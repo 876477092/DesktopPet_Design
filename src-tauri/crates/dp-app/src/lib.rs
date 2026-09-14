@@ -65,7 +65,13 @@ pub fn run() {
         // S2-M1：最小命令出口——前端经 invoke 读取图集 PNG 字节
         // （自定义 command，不走 asset 协议网络面，C9）。
         // S3-M6：menu_command 统一收口（右键菜单「隐藏」等命令的唯一出口）。
-        .invoke_handler(tauri::generate_handler![bridge::atlas_png, commands::menu_command]);
+        // S4-M3/M4：`bridge::atlas_png`（图集字节）、`commands::pet_emotion_command`
+        //（设置页「重置情绪」/「找回」兜底）。
+        .invoke_handler(tauri::generate_handler![
+            bridge::atlas_png,
+            commands::menu_command,
+            commands::pet_emotion_command
+        ]);
 
     // 仅 Windows 落平台窗口层（本项目仅 Windows 目标）。
     #[cfg(windows)]
@@ -150,6 +156,10 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
     // S4 前清障 B15-④：播放指令通道（core-loop 发播侧 ⇄ 播放器线程消费侧共享；
     // 须先 manage 再装配 core-loop 与播放器，两侧 try_state 取同一对象）。
     app.manage(bridge::PlaybackChannel::default());
+
+    // S4-M4：core-loop 入站指令通道（设置页「重置情绪」/ 托盘「把心月狐找回来」→
+    // core-loop 逻辑档；与 PlaybackChannel 同为进程内反向通道，非 C8 事件面）。
+    app.manage(bridge::CoreInputChannel::default());
 
     // S3-M2：掩码库后台一次性构建（`dp-mask-build` 线程读图集+PNG → MaskStore；
     // 失败降级 bbox 回退，不阻断启动）。图集目录复用 bridge 同一候选链（C1）。

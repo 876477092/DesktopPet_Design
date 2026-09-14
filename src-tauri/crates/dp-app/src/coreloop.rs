@@ -78,8 +78,8 @@ use dp_platform::{DisplayService, PlatformWindow, WinPlatformWindow};
 
 use crate::PetPlatform;
 use crate::bridge::{
-    self, FX_EVENT, MENU_EVENT, ParticleCmd, ParticleKind, PlaybackChannel, PlaybackOrder,
-    PlaybackReport, STATE_EVENT,
+    self, CoreInput, CoreInputChannel, FX_EVENT, MENU_EVENT, ParticleCmd, ParticleKind,
+    PlaybackChannel, PlaybackOrder, PlaybackReport, STATE_EVENT,
 };
 use crate::hit_latest::HitLatestHandle;
 use crate::hook_sink::ChannelSink;
@@ -281,6 +281,8 @@ pub struct CoreLoopState {
     /// 保证跨档不丢事件（logic 20Hz / biz 1Hz）且单次消费（幂等）。
     /// 暂停期间**不清零**（内核早退不消费），恢复后一次计入。
     pending_mood_delta: f32,
+    /// 上一次同步的「离家」可见态（S4-M4：`away` 翻转时隐藏 / 恢复宠物窗口）。
+    runaway_away: bool,
 }
 
 impl CoreLoopState {
@@ -341,6 +343,7 @@ impl CoreLoopState {
             session: SessionWatcher::default(),
             presence_idle_ms: None,
             pending_mood_delta: 0.0,
+            runaway_away: false,
         }
     }
 
@@ -371,6 +374,63 @@ impl CoreLoopState {
     #[inline]
     pub fn pending_mood_delta(&self) -> f32 {
         self.pending_mood_delta
+    }
+
+    // -----------------------------------------------------------------------
+    // S4-M3 / S4-M4：交互缓解 + 道歉三部曲 + 离家可见性 + 入站指令
+    // -----------------------------------------------------------------------
+
+    /// 交互意图结算（S4-M3：缓解表 `relief.*` + 道歉三部曲推进）。
+    ///
+    /// 由 logic 档（20Hz）对每个手势意图调用一次；返回内核算法事件（`pet://coax` /
+    /// `pet://emotion` 的载荷来源），由调用方经 [`Self::dispatch_emotion_events`] 落地。
+    pub fn on_interaction_intent(&mut self, kind: InteractionKind, now_ms: u64) -> Vec<EmotionEvent> {
+        self.emotion.on_interaction_kind(kind, now_ms as i64)
+    }
+
+    /// 道歉三部曲 20Hz 推进（S4-M3：连续抚摸累计 / 比心窗超时 / 离家演出计时）。
+    ///
+    /// `stroke_active` 取 [`InteractionConsumer::is_stroking`]——`Stroke` 意图只在松手
+    /// 结算一次，无法表达持续时间，故需每档读手势机的抚摸态。
+    pub fn coax_stroke_tick(&mut self, now_ms: u64, stroke_active: bool) -> Vec<EmotionEvent> {
+        self.emotion.coax_stroke_tick(now_ms as i64, stroke_active)
+    }
+
+    /// 入站指令落地（S4-M4：设置页「重置情绪」/ 托盘「把心月狐找回来」）。
+    pub fn apply_core_input(&mut self, input: CoreInput, now_ms: u64) -> Vec<EmotionEvent> {
+        match input {
+            CoreInput::ResetEmotion => {
+                let from = self.emotion.neglect.level;
+                eprintln!("[dp-app] core-loop 收到「重置情绪」：L{from} → L0（`force_lower` 兜底）");
+                self.emotion.force_lower(now_ms as i64)
+            }
+            CoreInput::RecallRunaway => {
+                eprintln!("[dp-app] core-loop 收到「把心月狐找回来」：L5 走回，仍需完成三部曲");
+                self.emotion.coax_recall(now_ms as i64)
+            }
+        }
+    }
+
+    /// 离家可见性同步（S4-M4）：`away` 翻转时隐藏 / 恢复宠物窗口。
+    ///
+    /// 复用 [`crate::tray_menu::set_pet_visible`]（与托盘 / 菜单 `hide` 同一写点），
+    /// 保证 `PET_VISIBLE` 镜像一致。
+    pub fn sync_runaway_visibility(&mut self, app: &AppHandle) {
+        let away = self.emotion.is_runaway_away();
+        if away == self.runaway_away {
+            return;
+        }
+        self.runaway_away = away;
+        if let Err(err) = crate::tray_menu::set_pet_visible(app, !away) {
+            eprintln!("[dp-app] core-loop 离家可见性同步降级（away={away}）：{err}");
+        }
+    }
+
+    /// 只读：是否已离家（S4-M4 诊断 / 单测）。
+    #[inline]
+    #[must_use]
+    pub fn is_runaway_away(&self) -> bool {
+        self.emotion.is_runaway_away()
     }
 
     /// 下发「起播」指令（覆盖态：播放器打断轮播优先播放该动作；无通道 → no-op）。
@@ -1419,6 +1479,23 @@ fn run_loop(
                 }
                 // S3-M6 右键单击命中 → `pet://menu`（Up 触发；屏幕坐标 + 窗口内 CSS 坐标）。
                 emit_menu_events(&app, &pet, consumer.take_menu_clicks());
+
+                // S4-M3 / S4-M4：情绪交互结算（缓解表 + 道歉三部曲）+ 入站指令 + 离家可见性。
+                // 事件名与载荷全在 `dp-core`（C8 单一真源），本层只 emit / 投仲裁。
+                let mut emotion_events: Vec<EmotionEvent> = Vec::new();
+                for intent in &intents {
+                    emotion_events.extend(state.on_interaction_intent(intent.kind, now));
+                }
+                emotion_events.extend(state.coax_stroke_tick(now, consumer.is_stroking()));
+                if let Some(channel) = app.try_state::<CoreInputChannel>() {
+                    for input in channel.drain() {
+                        emotion_events.extend(state.apply_core_input(input, now));
+                    }
+                }
+                if !emotion_events.is_empty() {
+                    state.dispatch_emotion_events(&emotion_events, now as i64, Some(&app));
+                }
+                state.sync_runaway_visibility(&app);
 
                 // S4 前清障 B15-④：播放回报排空（Finished 匹配 current → 链尾推进
                 // → 出队起播 `Play` 下发覆盖态；每 logic tick 至多排空一次）。

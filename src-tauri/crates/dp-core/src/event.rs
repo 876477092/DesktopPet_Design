@@ -30,12 +30,13 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::emotion::coax::{CoaxFailReason, CoaxStep};
 use crate::emotion::engine::{ColdReason, EmotionEngine, EmotionEvent};
 use crate::emotion::EmotionState;
 use crate::perception::WallClock;
 
 // ---------------------------------------------------------------------------
-// 事件名常量（C8：`02 §7.6` 已登记；本卡不新增）
+// 事件名常量（C8：`02 §7.6` 已登记；新增事件必须先登记再启用）
 // ---------------------------------------------------------------------------
 
 /// `pet://state` 事件名（`02 §7.6`：core → 设置窗口，载荷 `PetSnapshotV2`，1Hz）。
@@ -46,6 +47,13 @@ pub const EVENT_STATE: &str = "pet://state";
 /// `pet://emotion` 事件名（`02 §7.6`：core → 全部，载荷 `{from,to,reason,p,level}`，
 /// 变更时）。前端对应 `PET_EVENT.EMOTION`。
 pub const EVENT_EMOTION: &str = "pet://emotion";
+
+/// `pet://coax` 事件名（`02 §7.6`：core → 宠物窗口，载荷 [`CoaxWire`]，变更时；
+/// **S4-M3 登记 2026-09-14**）。前端对应 `PET_EVENT.COAX`。
+pub const EVENT_COAX: &str = "pet://coax";
+
+/// `CoaxWire` 载荷版本（v1；与前端 `COAX_CMD_VERSION` 同源）。
+pub const COAX_CMD_VERSION: u32 = 1;
 
 /// 快照载荷版本（`02 §4.3` `v: 2`；与前端 `PetSnapshotV2.v` 同源）。
 pub const SNAPSHOT_VERSION: u32 = 2;
@@ -196,6 +204,105 @@ impl From<EmotionState> for EmotionStateWire {
             EmotionState::Excited => Self::Excited,
             EmotionState::Outing => Self::Outing,
             EmotionState::SleepyHint => Self::SleepyHint,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `pet://coax` 载荷（S4-M3；进度环 + 离家态，`02 §7.6` 登记）
+// ---------------------------------------------------------------------------
+
+/// 三部曲子状态线上镜像（`02 §4.3` `CoaxStep`；serde 驼峰）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CoaxStepWire {
+    /// 未进行。
+    Idle,
+    /// 呼唤。
+    Call,
+    /// 抚摸。
+    Stroke,
+    /// 比心窗。
+    Heart,
+    /// 离家演出中。
+    Runaway,
+    /// 已离家。
+    Away,
+}
+
+impl From<CoaxStep> for CoaxStepWire {
+    fn from(value: CoaxStep) -> Self {
+        match value {
+            CoaxStep::Idle => Self::Idle,
+            CoaxStep::Call => Self::Call,
+            CoaxStep::Stroke => Self::Stroke,
+            CoaxStep::Heart => Self::Heart,
+            CoaxStep::Runaway => Self::Runaway,
+            CoaxStep::Away => Self::Away,
+        }
+    }
+}
+
+/// 失败原因线上镜像（`02 §4.3` `CoaxFailReason`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CoaxFailReasonWire {
+    /// 被打断。
+    Interrupted,
+    /// 超时。
+    Timeout,
+    /// 中途放弃。
+    Abandoned,
+}
+
+impl From<CoaxFailReason> for CoaxFailReasonWire {
+    fn from(value: CoaxFailReason) -> Self {
+        match value {
+            CoaxFailReason::Interrupted => Self::Interrupted,
+            CoaxFailReason::Timeout => Self::Timeout,
+            CoaxFailReason::Abandoned => Self::Abandoned,
+        }
+    }
+}
+
+/// `pet://coax` 载荷（进度环 + 离家态 + 成败标志；单一事件承载三部曲全部表现态）。
+///
+/// 字段语义（前端 `parseCoaxCmd` 逐项对齐）：
+/// - `active`：进度环是否可见（`step ∈ {call, stroke, heart}`）；
+/// - `away`：是否离家（`true` 时宠物窗口应隐藏；找回 / `force_lower` 后回落 `false`）；
+/// - `step` / `ratio`：子状态与进度环比例 0..=1；
+/// - `succeeded`：本帧为「三部曲完成」（配合 `ACT-E-06`，进度环隐藏）；
+/// - `reason`：本帧为「三部曲失败」时的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CoaxWire {
+    /// 载荷结构版本（恒 [`COAX_CMD_VERSION`]）。
+    pub version: u32,
+    /// 进度环是否可见。
+    pub active: bool,
+    /// 是否离家（窗口应隐藏）。
+    pub away: bool,
+    /// 子状态。
+    pub step: CoaxStepWire,
+    /// 进度环比例 0..=1。
+    pub ratio: f32,
+    /// 是否三部曲完成。
+    pub succeeded: bool,
+    /// 失败原因（成功 / 进行中为 `None`）。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reason: Option<CoaxFailReasonWire>,
+}
+
+impl Default for CoaxWire {
+    fn default() -> Self {
+        Self {
+            version: COAX_CMD_VERSION,
+            active: false,
+            away: false,
+            step: CoaxStepWire::Idle,
+            ratio: 0.0,
+            succeeded: false,
+            reason: None,
         }
     }
 }
@@ -517,11 +624,14 @@ pub fn snapshot_now(
 
 /// 把内核算法事件映射为线上事件（`02 §7.6` 白名单内，**不新增事件名**）。
 ///
-/// 映射口径（`02 §6.2` 时序的 S4-M2 承接面）：
+/// 映射口径（`02 §6.2` 时序的 S4-M2/S4-M3 承接面）：
 ///
 /// | 算法事件 | 线上事件 | 说明 |
 /// |---|---|---|
 /// | [`EmotionEvent::ColdLevelChanged`] | `pet://emotion` | 阶段迁移详情 |
+/// | [`EmotionEvent::CoaxProgress`] | `pet://coax` | 进度环 / 子状态（含离家态） |
+/// | [`EmotionEvent::CoaxSucceeded`] | `pet://coax` | 完成标志（`succeeded=true`） |
+/// | [`EmotionEvent::CoaxFailed`] | `pet://coax` | 失败原因 |
 /// | [`EmotionEvent::ValuesChanged`] | `pet://state` | 数值变化（1Hz 快照同源，此处**不重复发**） |
 /// | [`EmotionEvent::ForceAction`] | —（无线上事件） | 走动作仲裁，非事件面 |
 /// | [`EmotionEvent::PersistNow`] | —（无线上事件） | 存盘请求归 S5 存档层 |
@@ -543,6 +653,42 @@ pub fn wire_for_event(ev: &EmotionEvent, engine: &EmotionEngine<'_>) -> Option<W
                 state: Some(engine.state.emotion.into()),
             };
             Some(WireEvent::new(EVENT_EMOTION, &payload))
+        }
+        EmotionEvent::CoaxProgress { ratio, step } => {
+            let payload = CoaxWire {
+                version: COAX_CMD_VERSION,
+                active: step.ring_visible(),
+                away: *step == CoaxStep::Away,
+                step: (*step).into(),
+                ratio: *ratio,
+                succeeded: false,
+                reason: None,
+            };
+            Some(WireEvent::new(EVENT_COAX, &payload))
+        }
+        EmotionEvent::CoaxSucceeded { .. } => {
+            let payload = CoaxWire {
+                version: COAX_CMD_VERSION,
+                active: false,
+                away: false,
+                step: CoaxStepWire::Idle,
+                ratio: 0.0,
+                succeeded: true,
+                reason: None,
+            };
+            Some(WireEvent::new(EVENT_COAX, &payload))
+        }
+        EmotionEvent::CoaxFailed { reason } => {
+            let payload = CoaxWire {
+                version: COAX_CMD_VERSION,
+                active: false,
+                away: false,
+                step: CoaxStepWire::Idle,
+                ratio: 0.0,
+                succeeded: false,
+                reason: Some((*reason).into()),
+            };
+            Some(WireEvent::new(EVENT_COAX, &payload))
         }
         EmotionEvent::ValuesChanged { .. }
         | EmotionEvent::ForceAction { .. }

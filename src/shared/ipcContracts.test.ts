@@ -12,9 +12,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  COAX_CMD_VERSION,
   MENU_CMD_VERSION,
   PARTICLE_BURST_CAP,
   PARTICLE_CMD_VERSION,
+  parseCoaxCmd,
   parseMenuCmd,
   parseParticleCmd,
 } from './ipc';
@@ -117,5 +119,80 @@ describe('parseMenuCmd（pet://menu 契约 v1）', () => {
     expect(parseMenuCmd([{ localX: 1 }])).toBeNull();
     expect(parseMenuCmd('menu')).toBeNull();
     expect(parseMenuCmd(0)).toBeNull();
+  });
+});
+
+describe('parseCoaxCmd（pet://coax 契约 v1，S4-M3）', () => {
+  it('进度环进行中：active + ratio 保真', () => {
+    const cmd = parseCoaxCmd({
+      version: 1,
+      active: true,
+      away: false,
+      step: 'stroke',
+      ratio: 0.4,
+      succeeded: false,
+    });
+    expect(cmd).toEqual({
+      version: 1,
+      active: true,
+      away: false,
+      step: 'stroke',
+      ratio: 0.4,
+      succeeded: false,
+      reason: null,
+    });
+  });
+
+  it('三部曲完成：succeeded 标志 + 进度环隐藏', () => {
+    const cmd = parseCoaxCmd({ active: false, step: 'idle', ratio: 0, succeeded: true });
+    expect(cmd?.succeeded).toBe(true);
+    expect(cmd?.active).toBe(false);
+    expect(cmd?.reason).toBeNull();
+  });
+
+  it('失败：reason 保真（三态白名单）', () => {
+    expect(parseCoaxCmd({ reason: 'interrupted' })?.reason).toBe('interrupted');
+    expect(parseCoaxCmd({ reason: 'timeout' })?.reason).toBe('timeout');
+    expect(parseCoaxCmd({ reason: 'abandoned' })?.reason).toBe('abandoned');
+  });
+
+  it('非法 reason → null（不误报失败）', () => {
+    expect(parseCoaxCmd({ reason: 'exploded' })?.reason).toBeNull();
+    expect(parseCoaxCmd({ reason: 42 })?.reason).toBeNull();
+  });
+
+  it('离家态：away 保真（step=away）', () => {
+    const cmd = parseCoaxCmd({ active: false, away: true, step: 'away' });
+    expect(cmd?.away).toBe(true);
+    expect(cmd?.step).toBe('away');
+  });
+
+  it('缺失 / 非法字段兜底（step→idle、ratio→0 并钳 [0,1]、布尔→false）', () => {
+    expect(parseCoaxCmd({})).toEqual({
+      version: COAX_CMD_VERSION,
+      active: false,
+      away: false,
+      step: 'idle',
+      ratio: 0,
+      succeeded: false,
+      reason: null,
+    });
+    expect(parseCoaxCmd({ step: 'teleport', ratio: 7 })?.step).toBe('idle');
+    expect(parseCoaxCmd({ ratio: 7 })?.ratio).toBe(1);
+    expect(parseCoaxCmd({ ratio: -3 })?.ratio).toBe(0);
+    expect(parseCoaxCmd({ ratio: Number.NaN })?.ratio).toBe(0);
+    expect(parseCoaxCmd({ active: 'yes' })?.active).toBe(false);
+  });
+
+  it('前向兼容：未知字段忽略', () => {
+    const cmd = parseCoaxCmd({ ratio: 0.5, futureField: { a: 1 } });
+    expect(cmd?.ratio).toBe(0.5);
+  });
+
+  it('畸形载荷防御：null / 数组 / 标量 → null', () => {
+    expect(parseCoaxCmd(null)).toBeNull();
+    expect(parseCoaxCmd([{ ratio: 1 }])).toBeNull();
+    expect(parseCoaxCmd('coax')).toBeNull();
+    expect(parseCoaxCmd(0)).toBeNull();
   });
 });

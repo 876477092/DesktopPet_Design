@@ -4,6 +4,7 @@ import {
   invokeCommand,
   listenEvent,
   parseBubbleCmd,
+  parseCoaxCmd,
   parseMenuCmd,
   parseParticleCmd,
   parseRenderFrameCmd,
@@ -33,7 +34,9 @@ import { WebGLStage } from './renderer/WebGLStage';
  *      注册 overlay/bubble 两层（draw = 惰性 flush）+ `pet://bubble` 订阅
  *      （解析失败 warn 跳过，`02 §7.4`；零新增事件，C8）；
  *   5. S3-M6：装配 `DomParticleView`/`DomMenuView` + `ParticleLayer`/`MenuLayer`，
- *      注册 particle/menu 两层 + `pet://fx`/`pet://menu` 订阅（均已登记 `02 §7.6`）。
+ *      注册 particle/menu 两层 + `pet://fx`/`pet://menu` 订阅（均已登记 `02 §7.6`）；
+ *   6. S4-M3：订阅 `pet://coax`（**S4-M3 登记**）——和好进度环由上游 `CoaxFlow` 结算，
+ *      本层只把 `ratio` 交给 `OverlayLayer.setCoaxProgress`（`active=false` 即隐藏）。
  *
  * 约束：C3 前端不读系统时钟（本文件无时间逻辑）；C8 事件名取自 `PET_EVENT`；
  * C9 仅使用已登记的本地能力（`core:event:default` + 自定义命令 `atlas_png` /
@@ -189,11 +192,23 @@ async function bootstrapPetWindow(): Promise<void> {
     menu.open({ x: cmd.localX, y: cmd.localY });
   });
 
+  // pet://coax 被动订阅（S4-M3，02 §7.6 已登记）——道歉三部曲进度环 + 离家态。
+  // 上游 CoaxFlow 已完成中断回退（回退 50%）等全部结算，本层**只显示**（防双份真相）。
+  const unlistenCoax = await listenEvent<unknown>(PET_EVENT.COAX, (payload) => {
+    const cmd = parseCoaxCmd(payload);
+    if (cmd === null) {
+      console.warn('[pet] pet://coax 载荷解析失败，跳过');
+      return;
+    }
+    overlay.setCoaxProgress(cmd.active ? cmd.ratio : null);
+  });
+
   window.addEventListener('beforeunload', () => {
     unlistenFrame();
     unlistenBubble();
     unlistenFx();
     unlistenMenu();
+    unlistenCoax();
   });
 }
 

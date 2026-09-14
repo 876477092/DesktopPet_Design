@@ -456,6 +456,16 @@ impl GestureMachine {
         }
     }
 
+    /// 当前是否处于**抚摸态**（按住且速度 < `strokeSpeedMax`）。
+    ///
+    /// S4-M3 道歉三部曲「连续抚摸 ≥ `strokeSec`」的计时输入源：`Stroke` 意图只在
+    /// 松手时结算一次，无法表达持续时间，故 core-loop 每 logic 档读本标志推进
+    /// `CoaxFlow` 的抚摸累计。
+    #[must_use]
+    pub fn is_stroking(&self) -> bool {
+        self.state == GestureState::Stroking
+    }
+
     /// 驱动悬停 / 双击窗 / 长按等超时类迁移（消费端每 logic 档批尾调用）。
     pub fn tick(&mut self, now_ms: u64) -> Vec<GestureOutput> {
         match self.state {

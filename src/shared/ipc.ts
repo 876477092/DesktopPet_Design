@@ -357,3 +357,77 @@ export function parseMenuCmd(raw: unknown): MenuCmdV1 | null {
     localY: num(o.localY, 0),
   };
 }
+
+// ---------------------------------------------------------------------------
+// CoaxCmd v1（`pet://coax`，`02 §7.6` S4-M3 登记；Rust 侧生产者为 `dp-core`
+// 事件映射层，两端同构）
+// ---------------------------------------------------------------------------
+
+/** `CoaxCmd` 载荷结构版本（v1）。 */
+export const COAX_CMD_VERSION = 1;
+
+/** 三部曲子状态（`02 §4.3` `CoaxStep`）。 */
+export type CoaxStep = 'idle' | 'call' | 'stroke' | 'heart' | 'runaway' | 'away';
+
+/** 合法子状态集合（枚举兜底用）。 */
+const COAX_STEPS: readonly CoaxStep[] = ['idle', 'call', 'stroke', 'heart', 'runaway', 'away'];
+
+/** 三部曲失败原因（`02 §4.3` `CoaxFailReason`）。 */
+export type CoaxFailReason = 'interrupted' | 'timeout' | 'abandoned';
+
+/** 合法失败原因集合（枚举兜底用）。 */
+const COAX_FAIL_REASONS: readonly CoaxFailReason[] = ['interrupted', 'timeout', 'abandoned'];
+
+/**
+ * `CoaxCmd` v1（camelCase 线上格式，与 Rust `#[serde(rename_all = "camelCase")]` 对齐）。
+ *
+ * 单一事件承载三部曲全部**表现态**：
+ * - `active` 为 `true` 时按 `ratio` 显示和好进度环（`step ∈ call/stroke/heart`）；
+ * - `active` 为 `false` 时隐藏进度环（`idle` / 成功 / 失败 / 离家段）；
+ * - `away` 为 `true` 表示已离家（宠物窗口由 Rust 侧隐藏，前端无需处理）；
+ * - `succeeded` / `reason` 供表现层（气泡 / 音效，归 S4-M5 / S4-M6）使用。
+ */
+export interface CoaxCmdV1 {
+  /** 载荷结构版本（v1）。 */
+  readonly version: number;
+  /** 进度环是否可见。 */
+  readonly active: boolean;
+  /** 是否已离家（窗口应隐藏）。 */
+  readonly away: boolean;
+  /** 子状态。 */
+  readonly step: CoaxStep;
+  /** 进度环比例 0..=1（解析时钳制）。 */
+  readonly ratio: number;
+  /** 是否三部曲完成。 */
+  readonly succeeded: boolean;
+  /** 失败原因（成功 / 进行中为 `null`）。 */
+  readonly reason: CoaxFailReason | null;
+}
+
+/**
+ * 解析 `pet://coax` 载荷为 `CoaxCmd` v1（纯函数，可单测）。
+ *
+ * 前向兼容策略（与 `parseMenuCmd` 同范式）：布尔字段非布尔取 `false`；`step` 不在
+ * 六态集合内（含缺字段 / 类型错）回退 `'idle'`；`ratio` 非有限取 0 后钳 `[0,1]`；
+ * `reason` 非法 / 缺省 → `null`（不代表成功，成功另有 `succeeded` 标志）；未知字段
+ * 忽略；载荷非对象 → `null`，调用方 `console.warn` + 跳过（`02 §7.4`）。
+ */
+export function parseCoaxCmd(raw: unknown): CoaxCmdV1 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const reason =
+    typeof o.reason === 'string' && (COAX_FAIL_REASONS as readonly string[]).includes(o.reason)
+      ? (o.reason as CoaxFailReason)
+      : null;
+  return {
+    version: num(o.version, COAX_CMD_VERSION),
+    active: bool(o.active, false),
+    away: bool(o.away, false),
+    step: oneOf(o.step, COAX_STEPS, 'idle'),
+    ratio: clamp(num(o.ratio, 0), 0, 1),
+    succeeded: bool(o.succeeded, false),
+    reason,
+  };
+}

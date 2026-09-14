@@ -57,6 +57,41 @@ fn hide_pet_window(_app: &AppHandle) -> Result<(), String> {
     Err("menu_command 仅在 Windows 目标下可用".to_string())
 }
 
+// ---------------------------------------------------------------------------
+// S4-M4：情绪兜底命令（设置页「重置情绪」/ 托盘「把心月狐找回来」）
+// ---------------------------------------------------------------------------
+
+/// 情绪兜底命令枚举（S4-M4；新增命令在此登记，勿在前端自创字符串）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EmotionCommand {
+    /// 重置情绪（`force_lower` 兜底，`02 §5.23` R18：L5 强制解除）。
+    Reset,
+    /// 把角色找回来（L5 离家 → 走回，`01 §6.5.2`）。
+    Recall,
+}
+
+/// 情绪兜底命令（前端 `invoke('pet_emotion_command', { command })`）。
+///
+/// 只做**投递**：把指令经 [`crate::bridge::CoreInputChannel`] 送给 core-loop 逻辑档
+/// 落地（core-loop 单线程 Actor 口径，避免跨线程直改内核状态）。
+///
+/// # Errors
+/// 入站通道尚未装配时返回中文可读错误串（`02 §7.4.3`；前端降级日志，不 panic）。
+#[tauri::command]
+pub fn pet_emotion_command(app: AppHandle, command: EmotionCommand) -> Result<(), String> {
+    use tauri::Manager;
+
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法下发情绪命令".to_string())?;
+    channel.push(match command {
+        EmotionCommand::Reset => crate::bridge::CoreInput::ResetEmotion,
+        EmotionCommand::Recall => crate::bridge::CoreInput::RecallRunaway,
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,6 +106,22 @@ mod tests {
         assert!(
             serde_json::from_str::<MenuCommand>("\"unknown\"").is_err(),
             "未登记命令必须拒绝（收口单一出口）"
+        );
+    }
+
+    #[test]
+    fn emotion_command_deserializes_camel_case_and_rejects_unknown() {
+        assert_eq!(
+            serde_json::from_str::<EmotionCommand>("\"reset\"").expect("小写应可解析"),
+            EmotionCommand::Reset
+        );
+        assert_eq!(
+            serde_json::from_str::<EmotionCommand>("\"recall\"").expect("小写应可解析"),
+            EmotionCommand::Recall
+        );
+        assert!(
+            serde_json::from_str::<EmotionCommand>("\"reboot\"").is_err(),
+            "未登记情绪命令必须拒绝（收口单一出口）"
         );
     }
 }

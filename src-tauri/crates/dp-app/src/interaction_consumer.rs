@@ -222,6 +222,14 @@ impl InteractionConsumer {
         self.menu.lock().unwrap_or_else(|e| e.into_inner()).take_clicks()
     }
 
+    /// 当前是否处于抚摸态（S4-M3 道歉三部曲「连续抚摸 ≥ `strokeSec`」计时输入源）。
+    ///
+    /// 委托 [`GestureMachine::is_stroking`]；每 logic 档读一次（临界区为一次状态比对）。
+    #[must_use]
+    pub fn is_stroking(&self) -> bool {
+        self.machine.lock().unwrap_or_else(|e| e.into_inner()).is_stroking()
+    }
+
     /// 某意图的累计产出次数（诊断视图；C8 口径）。
     #[must_use]
     pub fn kind_count(&self, kind: InteractionKind) -> u64 {

@@ -569,6 +569,11 @@ pub const STATE_EVENT: &str = dp_core::event::EVENT_STATE;
 /// **真源 = `dp_core::event::EVENT_EMOTION`**（同 [`STATE_EVENT`] 口径）。
 pub const EMOTION_EVENT: &str = dp_core::event::EVENT_EMOTION;
 
+/// `pet://coax` 事件名（`02 §7.6` **S4-M3 登记 2026-09-14**；道歉三部曲进度环 + 离家态）。
+///
+/// **真源 = `dp_core::event::EVENT_COAX`**（同 [`STATE_EVENT`] 口径，C8）。
+pub const COAX_EVENT: &str = dp_core::event::EVENT_COAX;
+
 /// `ParticleCmd` / `MenuCmd` 载荷结构版本（v1；本批 Rust 即生产者，与
 /// `src/shared/ipc.ts` 的 `PARTICLE_CMD_VERSION` / `MENU_CMD_VERSION` 同源）。
 pub const PARTICLE_CMD_VERSION: u32 = 1;
@@ -771,6 +776,64 @@ impl PlaybackChannel {
     }
 }
 
+// ---------------------------------------------------------------------------
+// core-loop 入站指令通道（S4-M4：设置页 / 托盘 → core-loop；进程内，非 C8 事件面）
+// ---------------------------------------------------------------------------
+
+/// 入站指令队列容量（有界：满丢最旧并计数；8 ≫ 人工触发速率）。
+pub const CORE_INPUT_CAP: usize = 8;
+
+/// dp-app（设置页 / 托盘）→ core-loop 的入站指令（S4-M4）。
+///
+/// **非 C8 事件面**：进程内状态，不经 `pet://` 事件桥，无需登记；与
+/// [`PlaybackChannel`] 同为「壳 → 核」的反向通道（core-loop 单线程 Actor，入站在
+/// logic 档 drain）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoreInput {
+    /// 设置页「重置情绪」→ `EmotionEngine::force_lower`（`02 §5.23` R18 兜底）。
+    ResetEmotion,
+    /// 托盘「把心月狐找回来」→ L5 找回走回（`01 §6.5.2`）。
+    RecallRunaway,
+}
+
+/// 入站指令通道（dp-app 持发送侧视图、core-loop 持消费侧视图，同一 [`Clone`]
+/// 对象经 `Arc<Mutex<_>>` 共享）。
+#[derive(Debug, Default, Clone)]
+pub struct CoreInputChannel {
+    /// 指令队列（dp-app push / core-loop drain）。
+    queue: Arc<Mutex<VecDeque<CoreInput>>>,
+    /// 累计丢弃的指令数（可观测性：正常流量应为 0）。
+    dropped: Arc<AtomicU64>,
+}
+
+impl CoreInputChannel {
+    /// 投递入站指令（有界：满则丢最旧并计数）。
+    pub fn push(&self, input: CoreInput) {
+        if let Ok(mut queue) = self.queue.lock() {
+            if queue.len() >= CORE_INPUT_CAP {
+                queue.pop_front();
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            queue.push_back(input);
+        }
+    }
+
+    /// 排空全部入站指令（core-loop 每 logic 档调用；返回序 = 投递序）。
+    #[must_use]
+    pub fn drain(&self) -> Vec<CoreInput> {
+        match self.queue.lock() {
+            Ok(mut queue) => queue.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// 累计丢弃的指令数（正常流量应为 0）。
+    #[must_use]
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
 /// 处理一条 `Play` 指令（纯逻辑，单测覆盖）：动作在播放项中 → 覆盖起播
 /// （替换既有覆盖）；未命中（动作不在图集 / 未启用）→ **立即回报 `Finished`**
 /// 防链卡死——仲裁器等待链尾 `Finished` 才推进，静默吞掉会让链永久停摆。
@@ -813,10 +876,12 @@ mod tests {
     fn pet_event_names_align_core() {
         assert_eq!(STATE_EVENT, dp_core::event::EVENT_STATE);
         assert_eq!(EMOTION_EVENT, dp_core::event::EVENT_EMOTION);
+        assert_eq!(COAX_EVENT, dp_core::event::EVENT_COAX);
         assert_eq!(STATE_EVENT, "pet://state");
         assert_eq!(EMOTION_EVENT, "pet://emotion");
+        assert_eq!(COAX_EVENT, "pet://coax");
         // 与既有 S3-M6 事件名同为 `pet://<域>` 形态（C8 命名纪律）。
-        for name in [FRAME_EVENT, FX_EVENT, MENU_EVENT, STATE_EVENT, EMOTION_EVENT] {
+        for name in [FRAME_EVENT, FX_EVENT, MENU_EVENT, STATE_EVENT, EMOTION_EVENT, COAX_EVENT] {
             assert!(name.starts_with("pet://"), "{name} 必须为 pet:// 命名空间");
             assert!(!name.contains(' '), "{name} 不得含空格");
         }
@@ -1148,6 +1213,25 @@ mod tests {
         assert_eq!(drained[0], PlaybackReport::Finished { action_id: "ACT-T-07".into() });
         assert_eq!(drained[1], PlaybackReport::Finished { action_id: "ACT-T-08".into() });
         assert!(channel.drain_reports().is_empty(), "排空即清空（幂等）");
+    }
+
+    #[test]
+    fn core_input_channel_bounds_counts_drops_and_drains_fifo() {
+        let channel = CoreInputChannel::default();
+        for _ in 0..(CORE_INPUT_CAP + 2) {
+            channel.push(CoreInput::ResetEmotion);
+        }
+        assert_eq!(channel.dropped(), 2, "超容量丢最旧并计数");
+        assert_eq!(channel.drain().len(), CORE_INPUT_CAP, "容量恒有界");
+        assert!(channel.drain().is_empty(), "排空即清空（幂等）");
+
+        channel.push(CoreInput::RecallRunaway);
+        channel.push(CoreInput::ResetEmotion);
+        assert_eq!(
+            channel.drain(),
+            vec![CoreInput::RecallRunaway, CoreInput::ResetEmotion],
+            "投递序 = 排空序"
+        );
     }
 
     #[test]

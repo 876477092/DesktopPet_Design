@@ -16,12 +16,25 @@
 //!
 //! ## 禁止顺手改动
 //!
-//! 不引入七因子求解器（S7-M4）；不注册 `pet://` 事件（S4-M2）；不接台词 / 气泡
-//! （S4-M3 / S4-M5）。`EmotionEvent` 是**内核算法的返回值**，不是 Tauri 事件。
+//! 不引入七因子求解器（S7-M4）；不接台词 / 气泡（S4-M5）。`EmotionEvent` 是
+//! **内核算法的返回值**，不是 Tauri 事件。
+//!
+//! ## S4-M3 / S4-M4 增量
+//!
+//!   - 交互缓解表 `relief.*` + `cooldownSec` + `strokeMaxPerWindow`（FR-11-7）；
+//!   - 道歉三部曲接线（[`EmotionEngine::coax_input`] / [`EmotionEngine::coax_stroke_tick`]）
+//!     + 进度环事件（`CoaxProgress/Succeeded/Failed`）；
+//!   - **L4/L5 强制地板**：不开放自然回退，只能走 CoaxFlow（`01 §6.5.2`）；
+//!   - [`EmotionEngine::force_lower`] 兜底（`02 §5.23` R18）。
 
 use chrono::{Datelike, Local, Timelike};
 
 use crate::config::model::{EmotionLevelCfg, MoodDimCfg};
+use crate::emotion::coax::{
+    CoaxEffect, CoaxFailReason, CoaxFlow, CoaxInput, CoaxStep, COAX_REQUIRED_MIN_LEVEL,
+    COAX_SUCCESS_ACTION, COAX_SUCCESS_PRIORITY,
+};
+use crate::interaction::router::InteractionKind;
 use crate::state::PetState;
 
 /// 情绪状态机展示态（`02 §4.3`，14 值冻结词表）。
@@ -97,6 +110,47 @@ pub enum ColdReason {
     Accumulate,
 }
 
+/// 交互缓解类别（`emotion.json.relief`；`02 §5.7` FR-11-7，S4-M3 落地）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ReliefKind {
+    /// 悬停（冷却 60s）。
+    Hover,
+    /// 单击（冷却 3s）。
+    Click,
+    /// 双击（冷却 30s）。
+    DoubleClick,
+    /// 抚摸（无冷却，但受 `strokeMaxPerWindow` 窗口上限约束）。
+    Stroke,
+    /// 喂食。
+    Feed,
+    /// 洗澡。
+    Bath,
+    /// 玩耍（轨迹彩蛋）。
+    Play,
+}
+
+/// 缓解冷却与抚摸窗口计数（`relief.cooldownSec` / `strokeMaxPerWindow`；S4-M3）。
+#[derive(Clone, Debug, Default)]
+struct ReliefTracker {
+    /// 四类带冷却交互的最近一次生效时刻（下标 = [`ReliefTracker::slot`]）。
+    last_ms: [Option<i64>; 4],
+    /// 抚摸窗口内的生效时刻（超窗剔除）。
+    stroke_window: Vec<i64>,
+}
+
+impl ReliefTracker {
+    /// 类别 → 冷却槽（无冷却类别返回 `None`）。
+    const fn slot(kind: ReliefKind) -> Option<usize> {
+        match kind {
+            ReliefKind::Hover => Some(0),
+            ReliefKind::Click => Some(1),
+            ReliefKind::DoubleClick => Some(2),
+            ReliefKind::Stroke => Some(3),
+            ReliefKind::Feed | ReliefKind::Bath | ReliefKind::Play => None,
+        }
+    }
+}
+
 /// 情绪内核产出的算法事件（**非** Tauri 事件；C8 登记归 S4-M2）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum EmotionEvent {
@@ -132,6 +186,23 @@ pub enum EmotionEvent {
         satiety: f32,
         /// 清洁度。
         cleanliness: f32,
+    },
+    /// 道歉三部曲进度 / 子状态（S4-M3；`02 §4.3` `CoaxProgress`）。
+    CoaxProgress {
+        /// 进度环比例 0..=1。
+        ratio: f32,
+        /// 子状态（含 L5 离家段 `Runaway` / `Away`）。
+        step: CoaxStep,
+    },
+    /// 道歉三部曲完成（S4-M3；`02 §4.3` `CoaxSucceeded`）。
+    CoaxSucceeded {
+        /// 完成后的 Mood（已应用 `recoverMoodFloor` 兜底）。
+        mood: f32,
+    },
+    /// 道歉三部曲失败（S4-M3；`02 §4.3` `CoaxFailed`）。
+    CoaxFailed {
+        /// 失败原因。
+        reason: CoaxFailReason,
     },
     /// 需要落盘（阶段变化 / 数值跨界）。
     PersistNow,
@@ -358,6 +429,10 @@ pub struct EmotionEngine<'c> {
     longing: bool,
     /// 今日净正向交互数（自然消气条件②的计量，S4-M1 只维护不消费）。
     positive_interactions: u32,
+    /// 道歉三部曲状态机（S4-M3 / S4-M4）。
+    coax: CoaxFlow,
+    /// 交互缓解冷却与抚摸窗口（S4-M3）。
+    relief: ReliefTracker,
 }
 
 impl<'c> EmotionEngine<'c> {
@@ -384,6 +459,8 @@ impl<'c> EmotionEngine<'c> {
             last_now_local: chrono::Local::now(),
             longing: false,
             positive_interactions: 0,
+            coax: CoaxFlow::new(),
+            relief: ReliefTracker::default(),
         }
     }
 
@@ -599,6 +676,12 @@ impl<'c> EmotionEngine<'c> {
         // ── 3~4) 阶段结算（60s 升级 / 30s 回退 / 不跳级）────────────────────
         let mut events = self.settle_level(now_ms);
 
+        // ── 4.5) 三部曲阶段同步（S4-M3/S4-M4：L5 离家演出触发 / 档位回落清空）──
+        // 必须在 `settle_level` 之后：本 tick 刚进入 L5 时要立刻开始离家演出计时。
+        let level_now = self.neglect.level;
+        let coax_effects = self.coax.sync_level(level_now, now_ms);
+        events.extend(self.apply_coax_effects(coax_effects));
+
         // ── 5) Mood 一阶低通惯性 ────────────────────────────────────────────
         events.extend(self.step_mood(dt_min, env.event_delta, &env));
 
@@ -622,7 +705,14 @@ impl<'c> EmotionEngine<'c> {
     /// 阶段结算（`02 §5.3` 冻结口径）：确认期 + 不跳级 + 逐层扣 Mood。
     fn settle_level(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
         let p_eff = self.neglect.p / self.threshold_scale();
-        let target = self.level_for(p_eff);
+        let mut target = self.level_for(p_eff);
+        // S4-M4（`01 §6.5.2` / `02 §5.3`）：**L4 生气 / L5 离家出走必须走 CoaxFlow**，
+        // 正常可交互时不开放自然回退（「任何降级路径不得产生负向扣减」R18-4 不受影响：
+        // 此处只是**阻止**降级，不做任何扣减）。`confirm.naturalFloorLevel` 的完整口径
+        // （含 L3 自然消气通道）归 S7-M5；本卡先锁 L4/L5 强制地板。
+        if target < self.neglect.level && self.neglect.level >= COAX_REQUIRED_MIN_LEVEL {
+            target = self.neglect.level;
+        }
         if target == self.neglect.level {
             self.neglect.pending_since_ms = None;
             self.neglect.pending_level = self.neglect.level;
@@ -771,6 +861,242 @@ impl<'c> EmotionEngine<'c> {
             self.positive_interactions = self.positive_interactions.saturating_add(1);
         }
         TickOutcome::default()
+    }
+
+    // -----------------------------------------------------------------------
+    // S4-M3 / S4-M4：交互缓解表 + 道歉三部曲 + force_lower
+    // -----------------------------------------------------------------------
+
+    /// 设置「轻松模式」（`01 §6.5.2`；降低抚摸门槛至 `easyModeStrokeSec`）。
+    /// 设置项接线归 S5；此处只透传。
+    pub fn set_easy_coax_mode(&mut self, on: bool) {
+        self.coax.set_easy_mode(on);
+    }
+
+    /// 只读：三部曲子状态（`pet://coax` 投影 / 诊断用）。
+    #[inline]
+    #[must_use]
+    pub fn coax_step(&self) -> CoaxStep {
+        self.coax.step()
+    }
+
+    /// 只读：进度环比例。
+    #[inline]
+    #[must_use]
+    pub fn coax_progress(&self) -> f32 {
+        self.coax.progress()
+    }
+
+    /// 只读：是否已离家（窗口应隐藏）。
+    #[inline]
+    #[must_use]
+    pub fn is_runaway_away(&self) -> bool {
+        self.coax.is_away()
+    }
+
+    /// 交互缓解（`emotion.json.relief.*` + `cooldownSec` + `strokeMaxPerWindow`，FR-11-7）。
+    ///
+    /// 返回本次**实际可用**的 P 缓解量；冷却未过 / 抚摸超窗 → `0.0`（并**不**刷新冷却，
+    /// 避免「连点把冷却一直顶住」）。调用方负责从 P 中扣减（见 [`Self::apply_relief`]）。
+    pub fn relief_for(&mut self, kind: ReliefKind, now_ms: i64) -> f32 {
+        let r = &self.cfg.relief;
+        let (value, cooldown_sec) = match kind {
+            ReliefKind::Hover => (r.hover, r.cooldown_sec.hover),
+            ReliefKind::Click => (r.click, r.cooldown_sec.click),
+            ReliefKind::DoubleClick => (r.double_click, r.cooldown_sec.double_click),
+            ReliefKind::Stroke => (r.stroke, r.cooldown_sec.stroke),
+            ReliefKind::Feed => (r.feed, 0),
+            ReliefKind::Bath => (r.bath, 0),
+            ReliefKind::Play => (r.play, 0),
+        };
+        // 抚摸窗口上限（`strokeMaxPerWindow` / `strokeWindowSec`）：先判后记，超窗直接失效。
+        if kind == ReliefKind::Stroke {
+            let win_ms = (r.stroke_window_sec as i64).saturating_mul(1_000).max(0);
+            self.relief.stroke_window.retain(|t| now_ms - *t < win_ms);
+            if r.stroke_max_per_window > 0
+                && self.relief.stroke_window.len() >= r.stroke_max_per_window as usize
+            {
+                return 0.0;
+            }
+            self.relief.stroke_window.push(now_ms);
+        }
+        if let Some(slot) = ReliefTracker::slot(kind) {
+            if cooldown_sec > 0 {
+                if let Some(last) = self.relief.last_ms[slot] {
+                    if now_ms - last < (cooldown_sec as i64).saturating_mul(1_000) {
+                        return 0.0;
+                    }
+                }
+            }
+            self.relief.last_ms[slot] = Some(now_ms);
+        }
+        value as f32
+    }
+
+    /// 从 P 中扣减缓解量（钳 `[0, cap]`）。
+    fn apply_relief(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        self.neglect.p = (self.neglect.p - amount).clamp(0.0, self.neglect.cap);
+    }
+
+    /// 交互意图统一入口（S4-M3）：缓解表 → 三部曲推进 → 正向计数。
+    ///
+    /// `InteractionKind` 到三条通路的映射（唯一映射点，避免上层重复分支）：
+    ///   - 缓解：Hover/Click/DoubleClick/Stroke/Feed/Bath、轨迹彩蛋 Circle/Line/Zigzag → Play；
+    ///   - 三部曲：Click → 呼唤；DoubleClick → 比心；Tickle/Throw → **打断**（负向）；
+    ///     `TrayCoax` → 呼唤（`02 §5.23` 第 2 层托盘替代入口）；
+    ///   - 正向计数：有缓解语义的交互计入（自然消气条件②，消费归 S7-M5）。
+    pub fn on_interaction_kind(&mut self, kind: InteractionKind, now_ms: i64) -> Vec<EmotionEvent> {
+        self.last_tick_ms.get_or_insert(now_ms);
+        let relief_kind = match kind {
+            InteractionKind::Hover => Some(ReliefKind::Hover),
+            InteractionKind::Click => Some(ReliefKind::Click),
+            InteractionKind::DoubleClick => Some(ReliefKind::DoubleClick),
+            InteractionKind::Stroke => Some(ReliefKind::Stroke),
+            InteractionKind::Feed => Some(ReliefKind::Feed),
+            InteractionKind::Bath => Some(ReliefKind::Bath),
+            InteractionKind::Circle | InteractionKind::Line | InteractionKind::Zigzag => {
+                Some(ReliefKind::Play)
+            }
+            _ => None,
+        };
+        let mut out = Vec::new();
+        if let Some(rk) = relief_kind {
+            let relief = self.relief_for(rk, now_ms);
+            self.apply_relief(relief);
+            self.positive_interactions = self.positive_interactions.saturating_add(1);
+        }
+
+        let coax_input = match kind {
+            InteractionKind::Click | InteractionKind::TrayCoax => Some(CoaxInput::Call),
+            InteractionKind::DoubleClick => Some(CoaxInput::Heart),
+            InteractionKind::Tickle | InteractionKind::Throw => Some(CoaxInput::Negative),
+            _ => None,
+        };
+        if let Some(input) = coax_input {
+            out.extend(self.coax_input(input, now_ms));
+        }
+        out
+    }
+
+    /// 三部曲离散输入（`03 §2` 三部曲 / `02 §5.23` 托盘输入）。
+    pub fn coax_input(&mut self, input: CoaxInput, now_ms: i64) -> Vec<EmotionEvent> {
+        let effects = self.coax.on_input(input, now_ms, &self.cfg.coax);
+        self.apply_coax_effects(effects)
+    }
+
+    /// 三部曲 20Hz 推进（连续抚摸累计 / 比心窗 / 离家演出计时）。
+    ///
+    /// `stroke_active` = 光标当前是否处于抚摸态（`dp-app` `InteractionConsumer::is_stroking`）。
+    pub fn coax_stroke_tick(&mut self, now_ms: i64, stroke_active: bool) -> Vec<EmotionEvent> {
+        let effects = self.coax.tick(now_ms, stroke_active, &self.cfg.coax);
+        self.apply_coax_effects(effects)
+    }
+
+    /// 托盘「摸摸」累计一格（`02 §5.23` 第 2 层）。
+    pub fn coax_tray_stroke(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        self.coax_input(CoaxInput::TrayStroke, now_ms)
+    }
+
+    /// L5 找回（托盘「把心月狐找回来」→ 走回，仍需完成三部曲）。
+    pub fn coax_recall(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        self.coax_input(CoaxInput::Recall, now_ms)
+    }
+
+    /// `force_lower` 兜底（`02 §5.23` R18）：托盘 / 设置「重置情绪」强制解除 L5。
+    ///
+    /// 语义：清空三部曲与离家态、`P = 0`、档位回 L0、Mood 抬到 `recoverMoodFloor`。
+    pub fn force_lower(&mut self, _now_ms: i64) -> Vec<EmotionEvent> {
+        let cleared = self.coax.force_lower();
+        let mut out = self.apply_coax_effects(cleared);
+        let from = self.neglect.level;
+        self.neglect.p = 0.0;
+        self.neglect.level = 0;
+        self.neglect.pending_level = 0;
+        self.neglect.pending_since_ms = None;
+        self.state.emotion = EmotionState::Idle;
+        let floor = self.cfg.coax.recover_mood_floor as f32;
+        if self.state.values.mood < floor {
+            self.state.values.mood = floor;
+        }
+        if from != 0 {
+            out.push(EmotionEvent::ColdLevelChanged {
+                from,
+                to: 0,
+                mood_delta: 0.0,
+                redirected: false,
+                reason: ColdReason::Coax,
+            });
+        }
+        out.push(EmotionEvent::PersistNow);
+        out
+    }
+
+    /// 把 `CoaxEffect` 翻译为算法事件并落地状态变更（P / 档位 / Mood / 动作）。
+    fn apply_coax_effects(&mut self, effects: Vec<CoaxEffect>) -> Vec<EmotionEvent> {
+        let mut out = Vec::new();
+        for effect in effects {
+            match effect {
+                CoaxEffect::Progress { ratio, step } => {
+                    out.push(EmotionEvent::CoaxProgress { ratio, step });
+                }
+                CoaxEffect::MoodGain(gain) => {
+                    let m = &self.cfg.dimensions.mood;
+                    self.state.values.mood = (self.state.values.mood + gain).clamp(m.min, m.max);
+                }
+                CoaxEffect::Succeeded => {
+                    // `01 §6.5.2`：完成一次道歉三部曲 → P relief 60（`emotion.json.relief.coax`）。
+                    let relief = self.cfg.relief.coax as f32;
+                    self.neglect.p = (self.neglect.p - relief).clamp(0.0, self.neglect.cap);
+                    let from = self.neglect.level;
+                    let to = crate::emotion::coax::coax_target_level(from);
+                    if to != from {
+                        self.neglect.level = to;
+                        self.neglect.pending_level = to;
+                        self.neglect.pending_since_ms = None;
+                        if let Some(def) = self.cfg.levels.get(to as usize).cloned() {
+                            self.state.emotion = EmotionState::from_cfg_name(&def.emotion);
+                            if def.mood_lock_max > 0 {
+                                self.state.values.mood =
+                                    self.state.values.mood.min(def.mood_lock_max as f32);
+                            }
+                        }
+                        out.push(EmotionEvent::ColdLevelChanged {
+                            from,
+                            to,
+                            mood_delta: 0.0,
+                            redirected: false,
+                            reason: ColdReason::Coax,
+                        });
+                    }
+                    // `01 §6.11.8`：哄好瞬时兜底 `Mood = max(Mood, 50)`。
+                    let floor = self.cfg.coax.recover_mood_floor as f32;
+                    if self.state.values.mood < floor {
+                        self.state.values.mood = floor;
+                    }
+                    out.push(EmotionEvent::CoaxSucceeded {
+                        mood: self.state.values.mood,
+                    });
+                    // `01 §6.5.2` 步骤 3：播 ACT-E-06 哄好破涕为笑。
+                    out.push(EmotionEvent::ForceAction {
+                        action_id: COAX_SUCCESS_ACTION.to_string(),
+                        priority: COAX_SUCCESS_PRIORITY,
+                    });
+                    out.push(EmotionEvent::PersistNow);
+                }
+                CoaxEffect::Failed(reason) => {
+                    // B-6：打断正在进行的道歉三部曲额外 `P + rough.interruptPenalty`。
+                    if reason == CoaxFailReason::Interrupted {
+                        let penalty = self.cfg.rough.interrupt_penalty as f32;
+                        self.neglect.p = (self.neglect.p + penalty).clamp(0.0, self.neglect.cap);
+                    }
+                    out.push(EmotionEvent::CoaxFailed { reason });
+                }
+            }
+        }
+        out
     }
 
     /// 离线补偿（`02 §5.5`；RV-16：分块推进 + `min(4)` 封顶）。
@@ -934,6 +1260,7 @@ fn dedup_events(events: Vec<EmotionEvent>) -> Vec<EmotionEvent> {
 mod tests {
     use super::*;
     use crate::config::model::{EmotionConfig, NeedsConfig};
+    use crate::emotion::coax::RUNAWAY_PERFORMANCE_MS;
     use chrono::{Local, TimeZone};
 
     const MIN: i64 = 60_000;
@@ -1223,7 +1550,11 @@ mod tests {
 
     #[test]
     fn level_descent_never_deducts_mood() {
-        // R18-4 红线：降级路径不得产生负向扣减
+        // R18-4 红线：降级路径不得产生负向扣减。
+        //
+        // S4-M4 起 L4/L5 由**强制地板**锁定（不得自然回退），故本用例改在 **L3**
+        // 上验证「逐层回落不扣 Mood」；L4/L5 的地板另见
+        // `l4_l5_require_coax_and_never_regress_naturally`。
         let cfg = cramped_cfg();
         let needs = NeedsConfig::default();
         let mut e = EmotionEngine::new(&cfg, &needs);
@@ -1232,12 +1563,12 @@ mod tests {
         for i in 1..=600u64 {
             t = (i as i64) * 1000;
             e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
-            if e.neglect.level == 5 {
+            if e.neglect.level == 3 {
                 break;
             }
         }
-        assert_eq!(e.neglect.level, 5);
-        let mood_at_l5 = e.state.values.mood;
+        assert_eq!(e.neglect.level, 3);
+        let mood_at_l3 = e.state.values.mood;
 
         // 直接压 P 回 0 → 逐层回落，全程 mood_delta 必须为 0
         e.neglect.p = 0.0;
@@ -1255,7 +1586,168 @@ mod tests {
         }
         assert_eq!(e.neglect.level, 0, "应逐层回落到 L0");
         assert!(deltas.iter().all(|d| *d == 0.0), "降级不得扣减 Mood：{deltas:?}");
-        assert_eq!(e.state.values.mood, mood_at_l5, "降级不得退还也不得再扣");
+        assert_eq!(e.state.values.mood, mood_at_l3, "降级不得退还也不得再扣");
+    }
+
+    /// S4-M4（`01 §6.5.2` / `02 §5.3`）：**L4 生气 / L5 离家出走必须走 CoaxFlow**，
+    /// 正常可交互时不开放自然回退。
+    #[test]
+    fn l4_l5_require_coax_and_never_regress_naturally() {
+        let cfg = cramped_cfg();
+        let needs = NeedsConfig::default();
+        let mut e = EmotionEngine::new(&cfg, &needs);
+        e.tick_1s(0, env(day()));
+        let mut t = 0i64;
+        for i in 1..=600u64 {
+            t = (i as i64) * 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+            if e.neglect.level == 4 {
+                break;
+            }
+        }
+        assert_eq!(e.neglect.level, 4);
+        // 压 P 回 0 后长跑：L4 必须原地不动。
+        e.neglect.p = 0.0;
+        for _ in 0..180 {
+            t += 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+        }
+        assert_eq!(e.neglect.level, 4, "L4 不得自然回退（必须走 CoaxFlow）");
+
+        // 继续升到 L5（先恢复累积），再压 P：L5 同样锁定。
+        for i in 0..600u64 {
+            t += (i as i64) * 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+            if e.neglect.level == 5 {
+                break;
+            }
+        }
+        assert_eq!(e.neglect.level, 5);
+        let l5_ran_at = t;
+        e.neglect.p = 0.0;
+        for _ in 0..180 {
+            t += 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+        }
+        assert_eq!(e.neglect.level, 5, "L5 任何情况不开放自然回退");
+
+        // L5 离家演出计时（`ACT-E-05` 约 6s）→ 离家。
+        assert!(!e.is_runaway_away());
+        e.coax_stroke_tick(l5_ran_at + RUNAWAY_PERFORMANCE_MS, false);
+        assert!(e.is_runaway_away(), "演出满 6s 应离家（窗口隐藏）");
+    }
+
+    /// S4-M4：`force_lower`（设置 / 托盘「重置情绪」）强制解除 L5。
+    #[test]
+    fn force_lower_clears_l5_and_resets_level() {
+        let cfg = cramped_cfg();
+        let needs = NeedsConfig::default();
+        let mut e = EmotionEngine::new(&cfg, &needs);
+        e.tick_1s(0, env(day()));
+        let mut t = 0i64;
+        for i in 1..=600u64 {
+            t = (i as i64) * 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+            if e.neglect.level == 5 {
+                break;
+            }
+        }
+        assert_eq!(e.neglect.level, 5);
+        e.coax_stroke_tick(t + RUNAWAY_PERFORMANCE_MS, false);
+        assert!(e.is_runaway_away());
+
+        let out = e.force_lower(t + RUNAWAY_PERFORMANCE_MS + 1_000);
+        assert_eq!(e.neglect.level, 0, "L5 应被强制解除");
+        assert_eq!(e.neglect.p, 0.0);
+        assert!(!e.is_runaway_away(), "重置后应恢复可见");
+        assert_eq!(e.state.emotion, EmotionState::Idle);
+        assert!(
+            out.iter().any(|ev| matches!(ev, EmotionEvent::ColdLevelChanged { to: 0, .. })),
+            "应产出阶段迁移事件：{out:?}"
+        );
+        assert!(
+            out.iter().any(|ev| matches!(ev, EmotionEvent::PersistNow)),
+            "重置应请求落盘"
+        );
+    }
+
+    /// S4-M3：完成三部曲 → `L4 → L3` + `Mood ≥ 50` + `ACT-E-06` + `P relief`。
+    #[test]
+    fn coax_success_lowers_level_and_restores_mood() {
+        let cfg = cramped_cfg();
+        let needs = NeedsConfig::default();
+        let mut e = EmotionEngine::new(&cfg, &needs);
+        e.tick_1s(0, env(day()));
+        let mut t = 0i64;
+        for i in 1..=600u64 {
+            t = (i as i64) * 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+            if e.neglect.level == 4 {
+                break;
+            }
+        }
+        assert_eq!(e.neglect.level, 4);
+        let p_before = e.neglect.p;
+        e.coax_input(CoaxInput::Call, t);
+        assert_eq!(e.coax_step(), CoaxStep::Call);
+        let mut ck = t;
+        e.coax_stroke_tick(ck, true);
+        for _ in 0..120 {
+            ck += 100;
+            e.coax_stroke_tick(ck, true);
+            if e.coax_step() == CoaxStep::Heart {
+                break;
+            }
+        }
+        assert_eq!(e.coax_step(), CoaxStep::Heart, "抚摸 5s 应满进度环");
+        let out = e.coax_input(CoaxInput::Heart, ck + 100);
+        assert_eq!(e.neglect.level, 3, "L4 生气 → L3 生闷气（`01 §6.5.3`）");
+        assert!(e.state.values.mood >= 50.0, "Mood 兜底 ≥50：{}", e.state.values.mood);
+        assert!(e.neglect.p < p_before, "应扣减 relief.coax：{p_before} → {}", e.neglect.p);
+        assert!(
+            out.iter().any(|ev| matches!(ev, EmotionEvent::CoaxSucceeded { .. })),
+            "应产出完成事件：{out:?}"
+        );
+        assert!(
+            out.iter().any(|ev| matches!(ev, EmotionEvent::ForceAction { action_id, .. } if action_id == "ACT-E-06")),
+            "应播 ACT-E-06：{out:?}"
+        );
+    }
+
+    /// S4-M3：打断三部曲 → `P + rough.interruptPenalty`（B-6）。
+    #[test]
+    fn interrupting_trilogy_adds_pressure_penalty() {
+        let cfg = cramped_cfg();
+        let needs = NeedsConfig::default();
+        let mut e = EmotionEngine::new(&cfg, &needs);
+        e.tick_1s(0, env(day()));
+        let mut t = 0i64;
+        for i in 1..=600u64 {
+            t = (i as i64) * 1000;
+            e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) });
+            if e.neglect.level == 4 {
+                break;
+            }
+        }
+        e.coax_input(CoaxInput::Call, t);
+        let mut ck = t;
+        e.coax_stroke_tick(ck, true);
+        for _ in 0..10 {
+            ck += 100;
+            e.coax_stroke_tick(ck, true);
+        }
+        let p_before = e.neglect.p;
+        let out = e.coax_input(CoaxInput::Negative, ck + 10);
+        let want = cfg.rough.interrupt_penalty as f32;
+        assert!(
+            (e.neglect.p - (p_before + want)).abs() < 1e-3,
+            "打断应加 {want} P：{p_before} → {}",
+            e.neglect.p
+        );
+        assert!(
+            out.iter().any(|ev| matches!(ev, EmotionEvent::CoaxFailed { reason: CoaxFailReason::Interrupted })),
+            "{out:?}"
+        );
     }
 
     #[test]

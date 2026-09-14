@@ -22,6 +22,8 @@ export const PET_EVENT = {
   ECONOMY: 'pet://economy',
   /** core → 全部：情绪等级变更时。 */
   EMOTION: 'pet://emotion',
+  /** core → 宠物窗口：`CoaxCmd`，道歉三部曲进度环 / 离家态变更时（S4-M3 登记）。 */
+  COAX: 'pet://coax',
   /** core → 全部：配置摘要变更时。 */
   CONFIG: 'pet://config',
   /** core → 设置窗口：性能采样，5s。 */

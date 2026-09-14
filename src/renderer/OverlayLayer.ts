@@ -3,7 +3,8 @@
  *
  * 职责：五要素（`01`）的显示状态管理，经极窄端口 `OverlayView` 落 DOM：
  *   - 和好进度环 `setCoaxProgress(v|null)`（**回退 50% 由上游 CoaxFlow 算**，本层只显示，
- *     绝不参与结算——防双份真相，吸取 F-05 教训）；
+ *     绝不参与结算——防双份真相，吸取 F-05 教训；**S4-M3 起生产者为 `pet://coax`**，
+ *     订阅接线在 `src/main.ts`）；
  *   - 怒气符号 `setAngerLevel(n)`（`0` 隐藏 / `≥1` 显示）；
  *   - Zzz `setSleepLevel(0|1|2)`（非法档钳制 + `console.warn`，`02 §7.4` 不静默）；
  *   - 成就飘条 `enqueueToast(text)`（FIFO、同屏 1、队列上限 3、超出丢弃且告警）；

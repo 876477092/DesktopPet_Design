@@ -290,14 +290,22 @@ fn apply_action(app: &AppHandle, action: TrayAction) {
             }
             app.exit(0);
         }
-        // 设置 / 关于的 UI 在 S5；摸摸 / 喂食 / 洗澡 / 找回来的完整闭环在 S7-M6。
+        // S4-M4：L5 离家 → 「把心月狐找回来」走回。经入站通道交给 core-loop 逻辑档
+        // 落地（单线程 Actor 口径，避免跨线程直改内核状态）。
+        TrayAction::Recall => {
+            if let Some(channel) = app.try_state::<crate::bridge::CoreInputChannel>() {
+                channel.push(crate::bridge::CoreInput::RecallRunaway);
+            } else {
+                eprintln!("[dp-app] 托盘找回：core-loop 入站通道尚未装配，降级忽略");
+            }
+        }
+        // 设置 / 关于的 UI 在 S5；摸摸 / 喂食 / 洗澡的完整闭环在 S7-M6。
         // 本模块只负责把事件送达（见文件头「职责边界」）。
         TrayAction::Settings
         | TrayAction::About
         | TrayAction::Coax
         | TrayAction::Feed
-        | TrayAction::Bath
-        | TrayAction::Recall => {}
+        | TrayAction::Bath => {}
     }
 }
 
