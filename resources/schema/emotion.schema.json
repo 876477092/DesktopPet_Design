@@ -1,0 +1,1719 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "EmotionConfig",
+  "description": "`emotion.json` 根：P 模型 v2 全结构（`02 §5.7`）。",
+  "type": "object",
+  "properties": {
+    "activity": {
+      "description": "外出期间情绪口径。",
+      "default": {
+        "freezeNeglectWhileOut": true,
+        "returnRelief": 20
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EmotionActivityCfg"
+        }
+      ]
+    },
+    "adapt": {
+      "description": "自适应基线。",
+      "default": {
+        "avgRatio": 0.6000000238418579,
+        "baseMin": 30,
+        "clingyCoef": 10,
+        "coolDays": 3,
+        "coolDaysMinInteract": 3,
+        "coolMultiplier": 1.2000000476837158,
+        "factorMax": 1.2999999523162842,
+        "factorMin": 0.699999988079071,
+        "maxDailyChange": 0.10000000149011612,
+        "outlierHours": 8,
+        "tMax": 90,
+        "tMin": 8,
+        "zeroDays": 7
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AdaptCfg"
+        }
+      ]
+    },
+    "busyness": {
+      "description": "忙碌判定。",
+      "default": {
+        "capBusy": 28,
+        "capDeep": 12,
+        "capFree": 120,
+        "clicksPerMinDeep": 30,
+        "deepApps": [],
+        "factorBusy": 0.5,
+        "factorDeep": 0.30000001192092896,
+        "factorLight": 1.0,
+        "factorSlack": 1.2000000476837158,
+        "kpsBusyThreshold": 1.0,
+        "kpsDeepThreshold": 2.5,
+        "movePxPerMinDeep": 3000,
+        "slackApps": [],
+        "smoothingSec": 20
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BusynessCfg"
+        }
+      ]
+    },
+    "coax": {
+      "description": "哄好流程。",
+      "default": {
+        "easyModeStrokeSec": 2,
+        "heartWindowSec": 10,
+        "interruptRollbackRatio": 0.5,
+        "moodGainPerTwoSec": 3.0,
+        "recoverMoodFloor": 50,
+        "ringHoldSec": 60,
+        "strokeSec": 5
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/CoaxCfg"
+        }
+      ]
+    },
+    "confirm": {
+      "description": "阶段确认参数。",
+      "default": {
+        "coolDaysBlock": 3,
+        "downSec": 30,
+        "naturalFloorLevel": 3,
+        "naturalHoldSec": 60,
+        "naturalMinPositive": 3,
+        "naturalMoodFloor": 45,
+        "naturalPThreshold": 15,
+        "noNegativeWindowSec": 3600,
+        "upSec": 60
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ConfirmCfg"
+        }
+      ]
+    },
+    "dimensions": {
+      "description": "四维定义（mood / energy / affinity / boredom）。",
+      "default": {
+        "affinity": {
+          "defaultExp": 0.0,
+          "expFormula": "100*level",
+          "maxLevel": 10,
+          "minLevel": 1
+        },
+        "boredom": {
+          "displayOnly": true,
+          "formula": "min(100, p*100/120)",
+          "singleSourceOfTruth": "neglect.p"
+        },
+        "energy": {
+          "decayPerMin": -0.5,
+          "default": 100.0,
+          "max": 100.0,
+          "min": 0.0,
+          "sleepRecoverPerMin": 2.0,
+          "sleepyThreshold": 20.0
+        },
+        "mood": {
+          "decayPerMin": -1.0,
+          "decayPerMinActive": -0.5,
+          "default": 60.0,
+          "max": 100.0,
+          "min": 0.0
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EmotionDimensionsCfg"
+        }
+      ]
+    },
+    "inertia": {
+      "description": "惯性时间常数。",
+      "default": {
+        "tauDownSec": 20,
+        "tauUpSec": 90
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/InertiaCfg"
+        }
+      ]
+    },
+    "levels": {
+      "description": "六档阶段定义。",
+      "default": [
+        {
+          "emotion": "Idle",
+          "freezeAffinityToday": false,
+          "idlePool": [
+            "ACT-M-01",
+            "ACT-I-01",
+            "ACT-I-04",
+            "ACT-S-01"
+          ],
+          "level": 0,
+          "linePool": "idle",
+          "moodDelta": 0,
+          "moodLockMax": 0,
+          "name": "平静",
+          "priorityFloor": 0,
+          "refusePositive": false,
+          "roamRateMul": 1.0
+        },
+        {
+          "emotion": "Bored",
+          "freezeAffinityToday": false,
+          "idlePool": [
+            "ACT-I-03",
+            "ACT-I-01",
+            "ACT-I-02"
+          ],
+          "level": 1,
+          "linePool": "bored",
+          "moodDelta": -5,
+          "moodLockMax": 0,
+          "name": "无聊",
+          "priorityFloor": 3,
+          "refusePositive": false,
+          "roamRateMul": 0.6000000238418579
+        },
+        {
+          "emotion": "Aggrieved",
+          "freezeAffinityToday": false,
+          "idlePool": [
+            "ACT-E-02",
+            "ACT-I-03"
+          ],
+          "level": 2,
+          "linePool": "aggrieved",
+          "moodDelta": -10,
+          "moodLockMax": 0,
+          "name": "委屈",
+          "priorityFloor": 7,
+          "refusePositive": false,
+          "roamRateMul": 1.0
+        },
+        {
+          "emotion": "Sulking",
+          "freezeAffinityToday": false,
+          "idlePool": [
+            "ACT-E-03"
+          ],
+          "level": 3,
+          "linePool": "sulking",
+          "moodDelta": -15,
+          "moodLockMax": 0,
+          "name": "生闷气",
+          "priorityFloor": 8,
+          "refusePositive": true,
+          "roamRateMul": 1.0
+        },
+        {
+          "emotion": "Angry",
+          "freezeAffinityToday": false,
+          "idlePool": [
+            "ACT-E-04"
+          ],
+          "level": 4,
+          "linePool": "angry",
+          "moodDelta": -20,
+          "moodLockMax": 0,
+          "name": "生气",
+          "priorityFloor": 9,
+          "refusePositive": true,
+          "roamRateMul": 1.0
+        },
+        {
+          "emotion": "Runaway",
+          "freezeAffinityToday": true,
+          "idlePool": [
+            "ACT-E-05"
+          ],
+          "level": 5,
+          "linePool": "runaway",
+          "moodDelta": -30,
+          "moodLockMax": 10,
+          "name": "离家出走",
+          "priorityFloor": 10,
+          "refusePositive": false,
+          "roamRateMul": 1.0
+        }
+      ],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/EmotionLevelCfg"
+      }
+    },
+    "mood": {
+      "description": "P 抽血 drain。",
+      "default": {
+        "drainCoef": 2.0,
+        "drainExp": 1.5,
+        "drainRefP": 120.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/MoodDrainCfg"
+        }
+      ]
+    },
+    "needs": {
+      "description": "需求对 P 的贡献。",
+      "default": {
+        "coef": 0.6000000238418579,
+        "deficitRef": 70.0,
+        "deficitSources": [
+          "satiety",
+          "cleanliness"
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EmotionNeedsCfg"
+        }
+      ]
+    },
+    "offline": {
+      "description": "离线补偿。",
+      "default": {
+        "graceMin": 30,
+        "longingAffinityExpMultiplier": 2,
+        "longingHoldHour": 24,
+        "longingMin": 240,
+        "maxSimSteps": 1440,
+        "stepSec": 60
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/OfflineCfg"
+        }
+      ]
+    },
+    "personality": {
+      "description": "性格五维。",
+      "default": {
+        "clingyCoefA": 0.6000000238418579,
+        "clingyCoefB": 0.800000011920929,
+        "defaults": {
+          "clingy": 0.5,
+          "courage": 0.5,
+          "curiosity": 0.699999988079071,
+          "diligence": 0.6000000238418579,
+          "temper": 0.550000011920929
+        },
+        "moodDeltaBase": 0.800000011920929,
+        "moodDeltaTemper": 0.4000000059604645,
+        "rerollJitter": 0.15000000596046448,
+        "rerollPerDay": 3,
+        "thresholdScaleBase": 1.2000000476837158,
+        "thresholdScaleTemper": 0.4000000059604645
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PersonalityCfg"
+        }
+      ]
+    },
+    "presence": {
+      "description": "在场判定。",
+      "default": {
+        "awayThresholdSec": 180,
+        "factorAway": 0.05000000074505806,
+        "factorHere": 1.0,
+        "hysteresisSec": 15
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PresenceCfg"
+        }
+      ]
+    },
+    "relief": {
+      "description": "缓解值。",
+      "default": {
+        "bath": 25,
+        "click": 3,
+        "coax": 60,
+        "cooldownSec": {
+          "click": 3,
+          "doubleClick": 30,
+          "hover": 60,
+          "stroke": 0
+        },
+        "doubleClick": 8,
+        "feed": 20,
+        "hover": 2,
+        "play": 25,
+        "stroke": 15,
+        "strokeMaxPerWindow": 3,
+        "strokeWindowSec": 600
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ReliefCfg"
+        }
+      ]
+    },
+    "rhythm": {
+      "description": "作息节律。",
+      "default": {
+        "mealFactor": 1.149999976158142,
+        "mealWindows": [
+          [
+            "07:00",
+            "09:00"
+          ],
+          [
+            "11:00",
+            "13:00"
+          ],
+          [
+            "17:00",
+            "19:00"
+          ]
+        ],
+        "nightRedirectFromLevel": 2,
+        "segments": [
+          {
+            "factor": 1.0,
+            "from": "05:00",
+            "id": "morning",
+            "to": "09:00"
+          },
+          {
+            "factor": 1.0,
+            "from": "09:00",
+            "id": "forenoon",
+            "to": "11:00"
+          },
+          {
+            "factor": 1.149999976158142,
+            "from": "11:00",
+            "id": "noon",
+            "to": "13:00"
+          },
+          {
+            "factor": 1.0,
+            "from": "13:00",
+            "id": "afternoon",
+            "to": "17:00"
+          },
+          {
+            "factor": 1.149999976158142,
+            "from": "17:00",
+            "id": "dusk",
+            "to": "23:00"
+          },
+          {
+            "factor": 0.3499999940395355,
+            "from": "23:00",
+            "id": "night",
+            "to": "05:00"
+          }
+        ],
+        "warmupFactor": 0.5,
+        "warmupMinutes": 10
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RhythmCfg"
+        }
+      ]
+    },
+    "rough": {
+      "description": "粗暴对待。",
+      "default": {
+        "decayMin": 120,
+        "interruptPenalty": 10,
+        "max": 1.600000023841858,
+        "recallPenalty": 6,
+        "step": 0.15000000596046448
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RoughCfg"
+        }
+      ]
+    },
+    "sensitivity": {
+      "description": "敏感度（FR-11-11）。",
+      "default": {
+        "rateClamp": {
+          "max": 1.600000023841858,
+          "min": 0.5
+        },
+        "value": 1.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SensitivityCfg"
+        }
+      ]
+    },
+    "thresholds": {
+      "description": "P 阶段阈值（5/15/30/60/120）。",
+      "default": {
+        "l1": 5,
+        "l2": 15,
+        "l3": 30,
+        "l4": 60,
+        "l5": 120
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ThresholdsCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本（v2）。",
+      "default": 2,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "AdaptCfg": {
+      "description": "自适应基线（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "avgRatio": {
+          "description": "平均占比。",
+          "default": 0.6000000238418579,
+          "type": "number",
+          "format": "float"
+        },
+        "baseMin": {
+          "description": "基线最短（分钟）。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "clingyCoef": {
+          "description": "黏人系数。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "coolDays": {
+          "description": "关系降温天数。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "coolDaysMinInteract": {
+          "description": "降温判定最少交互次数。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "coolMultiplier": {
+          "description": "降温乘子。",
+          "default": 1.2000000476837158,
+          "type": "number",
+          "format": "float"
+        },
+        "factorMax": {
+          "description": "因子上限。",
+          "default": 1.2999999523162842,
+          "type": "number",
+          "format": "float"
+        },
+        "factorMin": {
+          "description": "因子下限。",
+          "default": 0.699999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "maxDailyChange": {
+          "description": "每日最大变化。",
+          "default": 0.10000000149011612,
+          "type": "number",
+          "format": "float"
+        },
+        "outlierHours": {
+          "description": "离群判定小时数。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tMax": {
+          "description": "最大交互时长（分钟）。",
+          "default": 90,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tMin": {
+          "description": "最小交互时长（分钟）。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "zeroDays": {
+          "description": "零交互降温天数。",
+          "default": 7,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "AffinityDimCfg": {
+      "description": "亲密度维度（`02 §5.7`：Lv1~10，经验公式 100*level）。",
+      "type": "object",
+      "properties": {
+        "defaultExp": {
+          "description": "初始经验。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "expFormula": {
+          "description": "每级所需经验公式（展示用）。",
+          "default": "100*level",
+          "type": "string"
+        },
+        "maxLevel": {
+          "description": "最高等级。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "minLevel": {
+          "description": "起始等级。",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "BoredomDimCfg": {
+      "description": "无聊维度（RV-02 / B-02 冻结：纯展示量，单一真源 = neglect.p）。",
+      "type": "object",
+      "properties": {
+        "displayOnly": {
+          "description": "仅展示。",
+          "default": true,
+          "type": "boolean"
+        },
+        "formula": {
+          "description": "展示映射公式。",
+          "default": "min(100, p*100/120)",
+          "type": "string"
+        },
+        "singleSourceOfTruth": {
+          "description": "单一真源字段。",
+          "default": "neglect.p",
+          "type": "string"
+        }
+      }
+    },
+    "BusynessCfg": {
+      "description": "忙碌判定（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "capBusy": {
+          "description": "忙碌 P 上限。",
+          "default": 28,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "capDeep": {
+          "description": "深度忙碌 P 上限。",
+          "default": 12,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "capFree": {
+          "description": "空闲 P 上限。",
+          "default": 120,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "clicksPerMinDeep": {
+          "description": "深度忙碌点击频率阈值。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "deepApps": {
+          "description": "深度忙碌应用哈希白名单（`02 §5.7` 为示意占位，默认空集，Q-18：只存哈希）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "factorBusy": {
+          "description": "忙碌因子。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "factorDeep": {
+          "description": "深度忙碌因子。",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        },
+        "factorLight": {
+          "description": "轻闲因子。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "factorSlack": {
+          "description": "摸鱼因子。",
+          "default": 1.2000000476837158,
+          "type": "number",
+          "format": "float"
+        },
+        "kpsBusyThreshold": {
+          "description": "忙碌击键强度阈值。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "kpsDeepThreshold": {
+          "description": "深度忙碌击键强度阈值。",
+          "default": 2.5,
+          "type": "number",
+          "format": "float"
+        },
+        "movePxPerMinDeep": {
+          "description": "深度忙碌移动量阈值。",
+          "default": 3000,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "slackApps": {
+          "description": "摸鱼应用哈希白名单。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "smoothingSec": {
+          "description": "强度平滑窗口（秒）。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "CoaxCfg": {
+      "description": "哄好流程（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "easyModeStrokeSec": {
+          "description": "简单模式抚摸时长（秒）。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "heartWindowSec": {
+          "description": "爱心窗口（秒）。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "interruptRollbackRatio": {
+          "description": "打断回滚比例。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "moodGainPerTwoSec": {
+          "description": "每两秒心情增益。",
+          "default": 3.0,
+          "type": "number",
+          "format": "float"
+        },
+        "recoverMoodFloor": {
+          "description": "恢复心情下限。",
+          "default": 50,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "ringHoldSec": {
+          "description": "光环比保持（秒）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "strokeSec": {
+          "description": "每步抚摸时长（秒）。",
+          "default": 5,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ConfirmCfg": {
+      "description": "阶段确认参数（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "coolDaysBlock": {
+          "description": "降温阻断天数。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "downSec": {
+          "description": "降档确认（秒）。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "naturalFloorLevel": {
+          "description": "自然回退档位下限。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naturalHoldSec": {
+          "description": "自然回退保持（秒）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "naturalMinPositive": {
+          "description": "自然回退最少正向交互。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naturalMoodFloor": {
+          "description": "自然回退心情下限。",
+          "default": 45,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "naturalPThreshold": {
+          "description": "自然回退 P 阈值。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "noNegativeWindowSec": {
+          "description": "无负向窗口（秒）。",
+          "default": 3600,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "upSec": {
+          "description": "升档确认（秒）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "EmotionActivityCfg": {
+      "description": "外出期间情绪口径（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "freezeNeglectWhileOut": {
+          "description": "外出期间冻结 P 累积。",
+          "default": true,
+          "type": "boolean"
+        },
+        "returnRelief": {
+          "description": "回归缓解。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "EmotionDimensionsCfg": {
+      "description": "四维定义（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "affinity": {
+          "description": "亲密度维度。",
+          "default": {
+            "defaultExp": 0.0,
+            "expFormula": "100*level",
+            "maxLevel": 10,
+            "minLevel": 1
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/AffinityDimCfg"
+            }
+          ]
+        },
+        "boredom": {
+          "description": "无聊派生展示维度（RV-02：单一真源 = P）。",
+          "default": {
+            "displayOnly": true,
+            "formula": "min(100, p*100/120)",
+            "singleSourceOfTruth": "neglect.p"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/BoredomDimCfg"
+            }
+          ]
+        },
+        "energy": {
+          "description": "精力维度。",
+          "default": {
+            "decayPerMin": -0.5,
+            "default": 100.0,
+            "max": 100.0,
+            "min": 0.0,
+            "sleepRecoverPerMin": 2.0,
+            "sleepyThreshold": 20.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/EnergyDimCfg"
+            }
+          ]
+        },
+        "mood": {
+          "description": "心情维度。",
+          "default": {
+            "decayPerMin": -1.0,
+            "decayPerMinActive": -0.5,
+            "default": 60.0,
+            "max": 100.0,
+            "min": 0.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/MoodDimCfg"
+            }
+          ]
+        }
+      }
+    },
+    "EmotionLevelCfg": {
+      "description": "六档阶段定义（`02 §5.7` levels：平静/无聊/委屈/生闷气/生气/离家出走）。",
+      "type": "object",
+      "properties": {
+        "emotion": {
+          "description": "情绪态标识。",
+          "default": "",
+          "type": "string"
+        },
+        "freezeAffinityToday": {
+          "description": "当日冻结亲密度。",
+          "default": false,
+          "type": "boolean"
+        },
+        "idlePool": {
+          "description": "待机动作池。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "level": {
+          "description": "档位序号。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "linePool": {
+          "description": "台词池。",
+          "default": "",
+          "type": "string"
+        },
+        "moodDelta": {
+          "description": "进档心情变化。",
+          "default": 0,
+          "type": "integer",
+          "format": "int32"
+        },
+        "moodLockMax": {
+          "description": "心情锁定最大值（离家出走档）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "description": "档位名。",
+          "default": "",
+          "type": "string"
+        },
+        "priorityFloor": {
+          "description": "优先级下限。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "refusePositive": {
+          "description": "拒绝正向交互。",
+          "default": false,
+          "type": "boolean"
+        },
+        "roamRateMul": {
+          "description": "漫游频率乘子（缺省 1.0）。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "EmotionNeedsCfg": {
+      "description": "需求对 P 的贡献（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "coef": {
+          "description": "需求系数。",
+          "default": 0.6000000238418579,
+          "type": "number",
+          "format": "float"
+        },
+        "deficitRef": {
+          "description": "亏空参考值。",
+          "default": 70.0,
+          "type": "number",
+          "format": "float"
+        },
+        "deficitSources": {
+          "description": "亏空来源维度。",
+          "default": [
+            "satiety",
+            "cleanliness"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "EnergyDimCfg": {
+      "description": "精力维度（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "decayPerMin": {
+          "description": "每分钟自然衰减。",
+          "default": -0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "default": {
+          "description": "默认值。",
+          "default": 100.0,
+          "type": "number",
+          "format": "float"
+        },
+        "max": {
+          "description": "上限。",
+          "default": 100.0,
+          "type": "number",
+          "format": "float"
+        },
+        "min": {
+          "description": "下限。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "sleepRecoverPerMin": {
+          "description": "睡眠每分钟恢复。",
+          "default": 2.0,
+          "type": "number",
+          "format": "float"
+        },
+        "sleepyThreshold": {
+          "description": "困倦阈值。",
+          "default": 20.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "InertiaCfg": {
+      "description": "惯性时间常数（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "tauDownSec": {
+          "description": "下降时间常数（秒）。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "tauUpSec": {
+          "description": "上升时间常数（秒）。",
+          "default": 90,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "MoodDimCfg": {
+      "description": "心情维度（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "decayPerMin": {
+          "description": "每分钟自然衰减。",
+          "default": -1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "decayPerMinActive": {
+          "description": "活跃期每分钟衰减。",
+          "default": -0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "default": {
+          "description": "默认值。",
+          "default": 60.0,
+          "type": "number",
+          "format": "float"
+        },
+        "max": {
+          "description": "上限。",
+          "default": 100.0,
+          "type": "number",
+          "format": "float"
+        },
+        "min": {
+          "description": "下限。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "MoodDrainCfg": {
+      "description": "P 抽血 drain（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "drainCoef": {
+          "description": "抽血系数。",
+          "default": 2.0,
+          "type": "number",
+          "format": "float"
+        },
+        "drainExp": {
+          "description": "抽血指数。",
+          "default": 1.5,
+          "type": "number",
+          "format": "float"
+        },
+        "drainRefP": {
+          "description": "抽血参考 P。",
+          "default": 120.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "OfflineCfg": {
+      "description": "离线补偿（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "graceMin": {
+          "description": "宽限期（分钟）。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "longingAffinityExpMultiplier": {
+          "description": "想念分支亲密度经验倍率。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "longingHoldHour": {
+          "description": "想念分支保持上限（小时）。",
+          "default": 24,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "longingMin": {
+          "description": "想念分支阈值（分钟）。",
+          "default": 240,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "maxSimSteps": {
+          "description": "单次补偿最大模拟步数。",
+          "default": 1440,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stepSec": {
+          "description": "模拟步长（秒）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PersonalityCfg": {
+      "description": "性格五维（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "clingyCoefA": {
+          "description": "黏人系数 A。",
+          "default": 0.6000000238418579,
+          "type": "number",
+          "format": "float"
+        },
+        "clingyCoefB": {
+          "description": "黏人系数 B。",
+          "default": 0.800000011920929,
+          "type": "number",
+          "format": "float"
+        },
+        "defaults": {
+          "description": "五维默认值。",
+          "default": {
+            "clingy": 0.5,
+            "courage": 0.5,
+            "curiosity": 0.699999988079071,
+            "diligence": 0.6000000238418579,
+            "temper": 0.550000011920929
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/PersonalityDefaultsCfg"
+            }
+          ]
+        },
+        "moodDeltaBase": {
+          "description": "心情变化基数。",
+          "default": 0.800000011920929,
+          "type": "number",
+          "format": "float"
+        },
+        "moodDeltaTemper": {
+          "description": "心情变化脾气项。",
+          "default": 0.4000000059604645,
+          "type": "number",
+          "format": "float"
+        },
+        "rerollJitter": {
+          "description": "重掷抖动。",
+          "default": 0.15000000596046448,
+          "type": "number",
+          "format": "float"
+        },
+        "rerollPerDay": {
+          "description": "每日重掷次数。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "thresholdScaleBase": {
+          "description": "阈值缩放基数。",
+          "default": 1.2000000476837158,
+          "type": "number",
+          "format": "float"
+        },
+        "thresholdScaleTemper": {
+          "description": "阈值缩放脾气项。",
+          "default": 0.4000000059604645,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "PersonalityDefaultsCfg": {
+      "description": "性格五维默认值（`02 §5.7`：clingy 0.50 / curiosity 0.70 / temper 0.55 / courage 0.50 / diligence 0.60）。",
+      "type": "object",
+      "properties": {
+        "clingy": {
+          "description": "黏人。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "courage": {
+          "description": "胆量。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "curiosity": {
+          "description": "好奇心。",
+          "default": 0.699999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "diligence": {
+          "description": "勤快。",
+          "default": 0.6000000238418579,
+          "type": "number",
+          "format": "float"
+        },
+        "temper": {
+          "description": "脾气。",
+          "default": 0.550000011920929,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "PresenceCfg": {
+      "description": "在场判定（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "awayThresholdSec": {
+          "description": "不在场阈值（秒）。",
+          "default": 180,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "factorAway": {
+          "description": "不在场因子。",
+          "default": 0.05000000074505806,
+          "type": "number",
+          "format": "float"
+        },
+        "factorHere": {
+          "description": "在场因子。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "hysteresisSec": {
+          "description": "迟滞窗口（秒）。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RateClampCfg": {
+      "description": "P 速率钳制区间（FR-11-11：min 0.5 / max 1.6）。",
+      "type": "object",
+      "properties": {
+        "max": {
+          "description": "钳制上限。",
+          "default": 1.600000023841858,
+          "type": "number",
+          "format": "float"
+        },
+        "min": {
+          "description": "钳制下限。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ReliefCfg": {
+      "description": "缓解值（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "bath": {
+          "description": "洗澡缓解。",
+          "default": 25,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "click": {
+          "description": "单击缓解。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "coax": {
+          "description": "哄好缓解。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "cooldownSec": {
+          "description": "各交互冷却（秒）。",
+          "default": {
+            "click": 3,
+            "doubleClick": 30,
+            "hover": 60,
+            "stroke": 0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ReliefCooldownCfg"
+            }
+          ]
+        },
+        "doubleClick": {
+          "description": "双击缓解。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "feed": {
+          "description": "喂食缓解。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "hover": {
+          "description": "悬停缓解。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "play": {
+          "description": "玩耍缓解。",
+          "default": 25,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "stroke": {
+          "description": "抚摸缓解。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "strokeMaxPerWindow": {
+          "description": "抚摸窗口内上限次数。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "strokeWindowSec": {
+          "description": "抚摸窗口时长（秒）。",
+          "default": 600,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ReliefCooldownCfg": {
+      "description": "缓解冷却（`02 §5.7`：hover 60 / click 3 / doubleClick 30 / stroke 0）。",
+      "type": "object",
+      "properties": {
+        "click": {
+          "description": "单击冷却（秒）。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "doubleClick": {
+          "description": "双击冷却（秒）。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "hover": {
+          "description": "悬停冷却（秒）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stroke": {
+          "description": "抚摸冷却（秒）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RhythmCfg": {
+      "description": "作息节律（`02 §5.7`：6 段 + 用餐窗口 + 预热）。",
+      "type": "object",
+      "properties": {
+        "mealFactor": {
+          "description": "用餐节律因子。",
+          "default": 1.149999976158142,
+          "type": "number",
+          "format": "float"
+        },
+        "mealWindows": {
+          "description": "用餐窗口（3 组）。",
+          "default": [
+            [
+              "07:00",
+              "09:00"
+            ],
+            [
+              "11:00",
+              "13:00"
+            ],
+            [
+              "17:00",
+              "19:00"
+            ]
+          ],
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
+        "nightRedirectFromLevel": {
+          "description": "深夜重定向起始等级。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "segments": {
+          "description": "时段表（6 段）。",
+          "default": [
+            {
+              "factor": 1.0,
+              "from": "05:00",
+              "id": "morning",
+              "to": "09:00"
+            },
+            {
+              "factor": 1.0,
+              "from": "09:00",
+              "id": "forenoon",
+              "to": "11:00"
+            },
+            {
+              "factor": 1.149999976158142,
+              "from": "11:00",
+              "id": "noon",
+              "to": "13:00"
+            },
+            {
+              "factor": 1.0,
+              "from": "13:00",
+              "id": "afternoon",
+              "to": "17:00"
+            },
+            {
+              "factor": 1.149999976158142,
+              "from": "17:00",
+              "id": "dusk",
+              "to": "23:00"
+            },
+            {
+              "factor": 0.3499999940395355,
+              "from": "23:00",
+              "id": "night",
+              "to": "05:00"
+            }
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/RhythmSegmentCfg"
+          }
+        },
+        "warmupFactor": {
+          "description": "预热因子。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "warmupMinutes": {
+          "description": "预热时长（分钟）。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "RhythmSegmentCfg": {
+      "description": "单个作息时段（`02 §5.7`：6 段）。",
+      "type": "object",
+      "properties": {
+        "factor": {
+          "description": "节律因子。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "from": {
+          "description": "起始时刻（HH:mm）。",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "时段 ID。",
+          "default": "",
+          "type": "string"
+        },
+        "to": {
+          "description": "结束时刻（HH:mm）。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "RoughCfg": {
+      "description": "粗暴对待（`02 §5.7`）。",
+      "type": "object",
+      "properties": {
+        "decayMin": {
+          "description": "完全衰减时长（分钟）。",
+          "default": 120,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "interruptPenalty": {
+          "description": "打断演出惩罚。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "max": {
+          "description": "上限。",
+          "default": 1.600000023841858,
+          "type": "number",
+          "format": "float"
+        },
+        "recallPenalty": {
+          "description": "召回惩罚。",
+          "default": 6,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "step": {
+          "description": "单次累积步长。",
+          "default": 0.15000000596046448,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "SensitivityCfg": {
+      "description": "敏感度（FR-11-11：value × rateClamp）。",
+      "type": "object",
+      "properties": {
+        "rateClamp": {
+          "description": "P 速率钳制区间。",
+          "default": {
+            "max": 1.600000023841858,
+            "min": 0.5
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RateClampCfg"
+            }
+          ]
+        },
+        "value": {
+          "description": "当前敏感度值。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ThresholdsCfg": {
+      "description": "P 阶段阈值（`02 §5.7`：5/15/30/60/120）。",
+      "type": "object",
+      "properties": {
+        "l1": {
+          "description": "L1 阈值（分钟）。",
+          "default": 5,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "l2": {
+          "description": "L2 阈值。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "l3": {
+          "description": "L3 阈值。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "l4": {
+          "description": "L4 阈值。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "l5": {
+          "description": "L5 阈值。",
+          "default": 120,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

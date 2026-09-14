@@ -1,0 +1,706 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AnimationConfig",
+  "description": "`animation.json` 根：缓动、物理、微动、呼吸、眨眼、视线、挤压、粒子。",
+  "type": "object",
+  "properties": {
+    "blink": {
+      "description": "眨眼。",
+      "default": {
+        "durationMs": [
+          120,
+          180
+        ],
+        "intervalMs": [
+          2000,
+          6000
+        ],
+        "peakMs": 3500,
+        "shyFactor": 1.5,
+        "speakingFactor": 0.30000001192092896
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BlinkCfg"
+        }
+      ]
+    },
+    "breath": {
+      "description": "呼吸。",
+      "default": {
+        "chestScale": 0.014999999664723873,
+        "headYPx": 1,
+        "periodSec": [
+          3.200000047683716,
+          4.0
+        ],
+        "sleepMul": 1.600000023841858,
+        "sleepPeriodSec": 5.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BreathCfg"
+        }
+      ]
+    },
+    "easing": {
+      "description": "缓动曲线（位移/表情/入场/默认）。",
+      "default": {
+        "defaultEasing": "easeInOutCubic",
+        "emotion": "easeInOutCubic",
+        "entrance": "easeOutBack1.7",
+        "moveEasing": "easeOutBack1.2"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EasingCfg"
+        }
+      ]
+    },
+    "fadeMs": {
+      "description": "交叉淡入时长范围（毫秒，`01 FR-3`：150~250ms）。",
+      "default": {
+        "default": 200,
+        "max": 250,
+        "min": 150
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/FadeMsCfg"
+        }
+      ]
+    },
+    "gaze": {
+      "description": "视线。",
+      "default": {
+        "easeMs": 200,
+        "intervalSec": [
+          3,
+          8
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/GazeCfg"
+        }
+      ]
+    },
+    "micro": {
+      "description": "微动层。",
+      "default": {
+        "intervalSec": [
+          5,
+          12
+        ],
+        "items": [
+          {
+            "clip": "anim_micro_ear",
+            "id": "ear_twitch",
+            "particle": null,
+            "weight": 25
+          },
+          {
+            "clip": "anim_micro_tail",
+            "id": "tail_swing",
+            "particle": null,
+            "weight": 20
+          },
+          {
+            "clip": "anim_micro_shift",
+            "id": "weight_shift",
+            "particle": null,
+            "weight": 15
+          },
+          {
+            "clip": "anim_micro_blink",
+            "id": "blink_smile",
+            "particle": null,
+            "weight": 15
+          },
+          {
+            "clip": "anim_micro_hum",
+            "id": "hum",
+            "particle": "note",
+            "weight": 10
+          },
+          {
+            "clip": "anim_micro_look",
+            "id": "look_around",
+            "particle": null,
+            "weight": 8
+          },
+          {
+            "clip": "anim_micro_jump",
+            "id": "small_jump",
+            "particle": null,
+            "weight": 5
+          },
+          {
+            "clip": "anim_micro_hair",
+            "id": "tidy_hair",
+            "particle": null,
+            "weight": 2
+          }
+        ],
+        "lowMoodReplace": [
+          "sigh",
+          "hug_knees"
+        ],
+        "noRepeatSec": 60
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/MicroCfg"
+        }
+      ]
+    },
+    "particles": {
+      "description": "粒子。",
+      "default": {
+        "lifeSec": 1.2000000476837158,
+        "maxPerBurst": 60
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ParticlesCfg"
+        }
+      ]
+    },
+    "physics": {
+      "description": "物理次级动画（`02 §5.20`；本阶段 parts 空数组）。",
+      "default": {
+        "enabled": true,
+        "level": "full",
+        "parts": [],
+        "subStepMs": 8
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PhysicsCfg"
+        }
+      ]
+    },
+    "squash": {
+      "description": "挤压拉伸。",
+      "default": {
+        "anticipation": [
+          0.8500000238418579,
+          1.149999976158142
+        ],
+        "landing": [
+          0.800000011920929,
+          1.2000000476837158
+        ],
+        "overshoot": [
+          0.07999999821186066,
+          0.15000000596046448
+        ],
+        "recoverMs": 200,
+        "stretch": [
+          1.149999976158142,
+          0.8999999761581421
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SquashCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "BlinkCfg": {
+      "description": "眨眼（`02 §5.22`：禁止等间隔，randWeighted(2000..6000, peak 3500)）。",
+      "type": "object",
+      "properties": {
+        "durationMs": {
+          "description": "单次时长区间（毫秒）。",
+          "default": [
+            120,
+            180
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "intervalMs": {
+          "description": "眨眼间隔区间（毫秒）。",
+          "default": [
+            2000,
+            6000
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "peakMs": {
+          "description": "加权峰值间隔（毫秒）。",
+          "default": 3500,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "shyFactor": {
+          "description": "害羞时倍率。",
+          "default": 1.5,
+          "type": "number",
+          "format": "float"
+        },
+        "speakingFactor": {
+          "description": "说话时倍率。",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "BreathCfg": {
+      "description": "呼吸（`02 §5.22`）。",
+      "type": "object",
+      "properties": {
+        "chestScale": {
+          "description": "胸部缩放幅度。",
+          "default": 0.014999999664723873,
+          "type": "number",
+          "format": "float"
+        },
+        "headYPx": {
+          "description": "头部纵向偏移（物理像素）。",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "periodSec": {
+          "description": "呼吸周期区间（秒）。",
+          "default": [
+            3.200000047683716,
+            4.0
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "sleepMul": {
+          "description": "睡眠呼吸倍率。",
+          "default": 1.600000023841858,
+          "type": "number",
+          "format": "float"
+        },
+        "sleepPeriodSec": {
+          "description": "睡眠呼吸周期（秒）。",
+          "default": 5.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "EasingCfg": {
+      "description": "缓动曲线名（`02 §5.22`）。",
+      "type": "object",
+      "properties": {
+        "defaultEasing": {
+          "description": "默认缓动。",
+          "default": "easeInOutCubic",
+          "type": "string"
+        },
+        "emotion": {
+          "description": "表情缓动。",
+          "default": "easeInOutCubic",
+          "type": "string"
+        },
+        "entrance": {
+          "description": "演出入场缓动。",
+          "default": "easeOutBack1.7",
+          "type": "string"
+        },
+        "moveEasing": {
+          "description": "位移缓动。",
+          "default": "easeOutBack1.2",
+          "type": "string"
+        }
+      }
+    },
+    "FadeMsCfg": {
+      "description": "淡入时长范围（毫秒）。",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "默认淡入（毫秒）。",
+          "default": 200,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "max": {
+          "description": "最长淡入（毫秒）。",
+          "default": 250,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "min": {
+          "description": "最短淡入（毫秒）。",
+          "default": 150,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "GazeCfg": {
+      "description": "视线（`02 §5.22`）。",
+      "type": "object",
+      "properties": {
+        "easeMs": {
+          "description": "视线缓动时长（毫秒）。",
+          "default": 200,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "intervalSec": {
+          "description": "视线切换间隔区间（秒）。",
+          "default": [
+            3,
+            8
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      }
+    },
+    "MicroCfg": {
+      "description": "微动层（`02 §5.22`：8 种微动 + 权重表 + 情绪低落替换）。",
+      "type": "object",
+      "properties": {
+        "intervalSec": {
+          "description": "抽取间隔区间（秒，5~12s）。",
+          "default": [
+            5,
+            12
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "items": {
+          "description": "微动条目（8 项 + 权重表 [25,20,15,15,10,8,5,2]）。",
+          "default": [
+            {
+              "clip": "anim_micro_ear",
+              "id": "ear_twitch",
+              "particle": null,
+              "weight": 25
+            },
+            {
+              "clip": "anim_micro_tail",
+              "id": "tail_swing",
+              "particle": null,
+              "weight": 20
+            },
+            {
+              "clip": "anim_micro_shift",
+              "id": "weight_shift",
+              "particle": null,
+              "weight": 15
+            },
+            {
+              "clip": "anim_micro_blink",
+              "id": "blink_smile",
+              "particle": null,
+              "weight": 15
+            },
+            {
+              "clip": "anim_micro_hum",
+              "id": "hum",
+              "particle": "note",
+              "weight": 10
+            },
+            {
+              "clip": "anim_micro_look",
+              "id": "look_around",
+              "particle": null,
+              "weight": 8
+            },
+            {
+              "clip": "anim_micro_jump",
+              "id": "small_jump",
+              "particle": null,
+              "weight": 5
+            },
+            {
+              "clip": "anim_micro_hair",
+              "id": "tidy_hair",
+              "particle": null,
+              "weight": 2
+            }
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MicroItemCfg"
+          }
+        },
+        "lowMoodReplace": {
+          "description": "情绪低落时替换项。",
+          "default": [
+            "sigh",
+            "hug_knees"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "noRepeatSec": {
+          "description": "60s 内不重复。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "MicroItemCfg": {
+      "description": "单条微动。",
+      "type": "object",
+      "properties": {
+        "clip": {
+          "description": "骨骼剪辑名。",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "微动 ID。",
+          "default": "",
+          "type": "string"
+        },
+        "particle": {
+          "description": "附带粒子（可选）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weight": {
+          "description": "抽取权重。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ParticlesCfg": {
+      "description": "粒子（`02 §5.22`）。",
+      "type": "object",
+      "properties": {
+        "lifeSec": {
+          "description": "粒子寿命（秒）。",
+          "default": 1.2000000476837158,
+          "type": "number",
+          "format": "float"
+        },
+        "maxPerBurst": {
+          "description": "单次爆发上限。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PhysicsCfg": {
+      "description": "物理配置（`02 §5.20`：8 部件半隐式欧拉；本阶段 parts 为空数组，enabled 保持 true）。",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "description": "物理总开关。",
+          "default": true,
+          "type": "boolean"
+        },
+        "level": {
+          "description": "物理等级（full / primaryOnly）。",
+          "default": "full",
+          "type": "string"
+        },
+        "parts": {
+          "description": "物理部件列表（`02 §5.20` 表；本阶段空数组）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/PhysicsPartCfg"
+          }
+        },
+        "subStepMs": {
+          "description": "固定子步长（毫秒，`02 §5.20`：8ms）。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PhysicsPartCfg": {
+      "description": "单个物理部件（`02 §5.20` 表：bone / type / stiffness/damping/mass）。",
+      "type": "object",
+      "properties": {
+        "angryStiff": {
+          "description": "生气变硬（尾巴）。",
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "bone": {
+          "description": "骨骼名。",
+          "default": "",
+          "type": "string"
+        },
+        "damping": {
+          "description": "阻尼。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "inheritFrom": {
+          "description": "继承来源部件。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "部件类型（rotate / chain / pendulum / cloth）。",
+          "default": "",
+          "type": "string"
+        },
+        "mass": {
+          "description": "质量。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "moodSwingMul": {
+          "description": "心情摆动倍率（尾巴）。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "stiffness": {
+          "description": "刚度。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "SquashCfg": {
+      "description": "挤压拉伸（`02 §5.22`）。",
+      "type": "object",
+      "properties": {
+        "anticipation": {
+          "description": "蓄力缩放区间。",
+          "default": [
+            0.8500000238418579,
+            1.149999976158142
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "landing": {
+          "description": "落地缩放区间。",
+          "default": [
+            0.800000011920929,
+            1.2000000476837158
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "overshoot": {
+          "description": "过冲幅度区间。",
+          "default": [
+            0.07999999821186066,
+            0.15000000596046448
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "recoverMs": {
+          "description": "恢复时长（毫秒）。",
+          "default": 200,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "stretch": {
+          "description": "拉伸缩放区间。",
+          "default": [
+            1.149999976158142,
+            0.8999999761581421
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      }
+    }
+  }
+}

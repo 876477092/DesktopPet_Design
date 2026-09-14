@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "dimensions": {
+    "satiety": { "min": 0, "max": 100, "default": 70, "decayPerMin": -0.05, "mealMultiplier": 2.5, "activityMultiplier": 2.0, "sleepMultiplier": 0.4 },
+    "cleanliness": { "min": 0, "max": 100, "default": 85, "decayPerMin": -0.08, "mealMultiplier": 1.0, "activityMultiplier": 2.0, "sleepMultiplier": 1.0 }
+  },
+  "bands": {
+    "satiety": [
+      { "id": "full", "min": 70 },
+      { "id": "normal", "min": 40 },
+      { "id": "peckish", "min": 20, "action": "ACT-N-01", "moodDecayMul": 1.2, "intervalSec": [180, 480] },
+      { "id": "hungry", "min": 5, "action": "ACT-N-01", "moodDecayMul": 1.8, "jobRewardMul": 0.7, "speedMul": 0.85 },
+      { "id": "starving", "min": 0, "action": "ACT-N-01", "moodDecayMul": 2.5, "deny": ["work", "study", "travel"], "emotion": "Aggrieved" }
+    ],
+    "cleanliness": [
+      { "id": "fresh", "min": 70 },
+      { "id": "normal", "min": 50 },
+      { "id": "stained", "min": 30, "action": "ACT-N-04", "patches": [1, 2] },
+      { "id": "dirty", "min": 15, "action": "ACT-N-05", "moodDecayMul": 1.3, "patches": [2, 4], "intervalSec": [120, 300] },
+      { "id": "filthy", "min": 0, "action": "ACT-N-06", "strokeGainMul": 0.5, "affinityGainMul": 0.5, "jobRewardMul": 0.6, "deny": ["study"], "patches": [4, 6], "effect": "flies" }
+    ]
+  },
+  "eventDeltas": {
+    "roll": { "cleanliness": -8 },
+    "thrownLand": { "cleanliness": -5 },
+    "eat": { "cleanliness": -3 },
+    "study": { "cleanliness": -2 },
+    "trip": { "cleanliness": -15 }
+  },
+  "bath": {
+    "durationMs": [8000, 12000],
+    "actionId": "ACT-N-07",
+    "endActionId": "ACT-N-08",
+    "cleanliness": 100,
+    "mood": 6,
+    "energy": -3,
+    "freeCdMin": 30,
+    "priority": 8
+  },
+  "coupling": {
+    "version": 1,
+    "combine": {
+      "moodDecay": "max",
+      "energyRecover": "mul",
+      "strokeGain": "mul",
+      "affinityGain": "mul",
+      "jobReward": "mul",
+      "studyEff": "mul",
+      "speed": "mul"
+    },
+    "smoothSec": 5,
+    "rules": [
+      { "id": "C-01", "when": "satiety<20", "target": "moodDecay", "op": "mul", "value": 1.8 },
+      { "id": "C-02", "when": "satiety<=0", "target": "moodDecay", "op": "mul", "value": 2.5 },
+      { "id": "C-03", "when": "satiety<40", "target": "energyRecover", "op": "mul", "value": 0.5 },
+      { "id": "C-04", "when": "satiety<20", "target": "jobReward", "op": "mul", "value": 0.7 },
+      { "id": "C-05", "when": "satiety<5", "target": "dispatch", "op": "deny", "value": "work", "reason": "心心没力气了" },
+      { "id": "C-06", "when": "cleanliness<30", "target": "moodDecay", "op": "mul", "value": 1.3 },
+      { "id": "C-07", "when": "cleanliness<15", "target": "strokeGain", "op": "mul", "value": 0.5 },
+      { "id": "C-08", "when": "cleanliness<15", "target": "affinityGain", "op": "mul", "value": 0.5 },
+      { "id": "C-09", "when": "cleanliness<15", "target": "jobReward", "op": "mul", "value": 0.6 },
+      { "id": "C-10", "when": "cleanliness<15", "target": "dispatch", "op": "deny", "value": "study", "reason": "洗干净再去上课" },
+      { "id": "C-11", "when": "energy<20", "target": "dispatch", "op": "deny", "value": "work,study,travel", "reason": "心心太累了" },
+      { "id": "C-12", "when": "energy<20", "target": "speed", "op": "mul", "value": 0.8 },
+      { "id": "C-13", "when": "mood<30", "target": "studyEff", "op": "mul", "value": 0.6 },
+      { "id": "C-14", "when": "mood<30", "target": "jobReward", "op": "mul", "value": 0.8 },
+      { "id": "C-15", "when": "mood>80", "target": "jobReward", "op": "mul", "value": 1.15 },
+      { "id": "C-16", "when": "mood>80", "target": "travelGain", "op": "mul", "value": 1.2 }
+    ]
+  }
+}

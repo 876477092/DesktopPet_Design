@@ -1,0 +1,15 @@
+[package]
+name = "dp-economy"
+description = "经济与商城：序号账本、背包、商品目录、配额、订单与履约"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_economy"
+path = "src/lib.rs"
+
+# S1-M1 骨架：不预先引入依赖，随模块落地时按 `02 §2.5` 增补。
+[dependencies]

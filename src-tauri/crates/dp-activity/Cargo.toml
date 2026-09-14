@@ -1,0 +1,15 @@
+[package]
+name = "dp-activity"
+description = "外出活动：岗位 / 课程 / 旅游的状态机、结算、明信片与异常（含 DST）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_activity"
+path = "src/lib.rs"
+
+# S1-M1 骨架：不预先引入依赖，随模块落地时按 `02 §2.5` 增补。
+[dependencies]

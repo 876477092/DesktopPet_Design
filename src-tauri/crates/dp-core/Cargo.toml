@@ -1,0 +1,33 @@
+[package]
+name = "dp-core"
+description = "纯逻辑内核：情绪 / 需求 / 运动 / 动画仲裁 / 交互 / 感知 / 存档 / 配置（可 cargo test）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_core"
+path = "src/lib.rs"
+
+# S1-M5（T-03）：`schema` feature 仅为 `export-schemas` 工具与 JSON Schema 生成启用
+# （`02 §4.2` / §7.7-5）。默认关：`cargo check/test --workspace` 不编译 schemars。
+[features]
+schema = ["dep:schemars"]
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+# S2-M7（T-07 感知服务）：事件总线有界队列（`02 §1.4`）+ WallClock 端口本地时间（`02 §4.4`）。
+crossbeam-channel = { workspace = true }
+chrono = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+# schema 导出工具（dev-only：required-features 门控，默认构建不参与）。
+[[bin]]
+name = "export-schemas"
+path = "src/bin/export-schemas.rs"
+required-features = ["schema"]

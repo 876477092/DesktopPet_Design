@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "appearance": {
+    "scalePercent": 100,
+    "scaleMinPercent": 50,
+    "scaleMaxPercent": 200,
+    "scaleStepPercent": 10,
+    "opacityPercent": 100,
+    "opacityMinPercent": 60,
+    "opacityMaxPercent": 100,
+    "language": "zh-CN"
+  },
+  "audio": {
+    "masterVolumePercent": 80,
+    "volumeMinPercent": 0,
+    "volumeMaxPercent": 100,
+    "muted": false
+  },
+  "behavior": {
+    "autoRoam": true,
+    "doNotDisturb": false,
+    "clickThrough": false,
+    "alwaysOnTopPolicy": "Always"
+  },
+  "roam": {
+    "pace": 1.0,
+    "decisionIntervalSec": [5, 30],
+    "cursorAvoidRadiusPx": 150
+  },
+  "interaction": {
+    "gravityPxPerSec2": 2400,
+    "unavailablePresenceFactor": 0.05,
+    "trayFallbackEnabled": true,
+    "unreachableNaturalFloorLevel": 4,
+    "unreachableHoldSec": 180,
+    "unreachableNoNegativeSec": 7200,
+    "gesture": {
+      "hoverEnterMs": 600,
+      "hoverLongMs": 2000,
+      "doubleClickWindowMs": 300,
+      "longPressMs": 500,
+      "strokeSpeedMaxPxPerSec": 800,
+      "dragThresholdPx": 8,
+      "throwSpeedMinPxPerSec": 1200,
+      "tickleWindowMs": 2000,
+      "tickleClicksMin": 5,
+      "trailMaxPoints": 32,
+      "circleTurnMinDeg": 270,
+      "lineResidualMaxPx": 12,
+      "zigzagReversalMin": 2,
+      "zigzagTurnMinDeg": 60
+    },
+    "clickFeedback": {
+      "enabled": true,
+      "burstCount": 6
+    }
+  },
+  "emotion": {
+    "sensitivityValue": 1.0,
+    "sensitivityOptions": [0.7, 1.0, 1.3]
+  },
+  "privacy": {
+    "activitySensing": true
+  }
+}

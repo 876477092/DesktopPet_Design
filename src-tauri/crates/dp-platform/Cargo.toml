@@ -1,0 +1,20 @@
+[package]
+name = "dp-platform"
+description = "平台抽象层：PlatformWindow / HitSource 等端口定义与 Windows 实装（Win32 + WebView2）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_platform"
+path = "src/lib.rs"
+
+# 通用依赖：错误类型（`02 §7.4`：thiserror + #[non_exhaustive]）。
+[dependencies]
+thiserror = { workspace = true }
+
+# Windows 专属能力（Win32 / 显示器 / DPI / DWM / Shell），仅在 windows 目标下编译。
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

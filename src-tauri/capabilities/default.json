@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "默认能力集。零网络红线（C9）：S1-M1 阶段权限全关；后续模块按「最小必需集」逐条申请并在此登记理由。S2-M1 登记：core:event:default —— pet 窗口需监听已登记事件 pet://frame（02 §7.6，RenderFrameCmd v1 被动推帧绘制），该权限仅覆盖本地窗口事件通道，无任何网络面。",
+  "local": true,
+  "windows": ["pet", "settings"],
+  "permissions": ["core:event:default"]
+}

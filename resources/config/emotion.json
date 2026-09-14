@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "dimensions": {
+    "mood": { "min": 0, "max": 100, "default": 60, "decayPerMin": -1.0, "decayPerMinActive": -0.5 },
+    "energy": { "min": 0, "max": 100, "default": 100, "decayPerMin": -0.5, "sleepRecoverPerMin": 2.0, "sleepyThreshold": 20 },
+    "affinity": { "minLevel": 1, "maxLevel": 10, "expFormula": "100*level", "defaultExp": 0 },
+    "boredom": { "displayOnly": true, "singleSourceOfTruth": "neglect.p", "formula": "min(100, p*100/120)" }
+  },
+  "sensitivity": { "value": 1.0, "rateClamp": { "min": 0.5, "max": 1.6 } },
+  "presence": { "awayThresholdSec": 180, "factorAway": 0.05, "factorHere": 1.0, "hysteresisSec": 15 },
+  "busyness": {
+    "factorDeep": 0.3,
+    "factorBusy": 0.5,
+    "factorLight": 1.0,
+    "factorSlack": 1.2,
+    "capDeep": 12,
+    "capBusy": 28,
+    "capFree": 120,
+    "kpsDeepThreshold": 2.5,
+    "kpsBusyThreshold": 1.0,
+    "clicksPerMinDeep": 30,
+    "movePxPerMinDeep": 3000,
+    "deepApps": [],
+    "slackApps": [],
+    "smoothingSec": 20
+  },
+  "rhythm": {
+    "segments": [
+      { "id": "morning", "from": "05:00", "to": "09:00", "factor": 1.0 },
+      { "id": "forenoon", "from": "09:00", "to": "11:00", "factor": 1.0 },
+      { "id": "noon", "from": "11:00", "to": "13:00", "factor": 1.15 },
+      { "id": "afternoon", "from": "13:00", "to": "17:00", "factor": 1.0 },
+      { "id": "dusk", "from": "17:00", "to": "23:00", "factor": 1.15 },
+      { "id": "night", "from": "23:00", "to": "05:00", "factor": 0.35 }
+    ],
+    "mealWindows": [["07:00", "09:00"], ["11:00", "13:00"], ["17:00", "19:00"]],
+    "mealFactor": 1.15,
+    "nightRedirectFromLevel": 2,
+    "warmupMinutes": 10,
+    "warmupFactor": 0.5
+  },
+  "needs": { "coef": 0.6, "deficitRef": 70.0, "deficitSources": ["satiety", "cleanliness"] },
+  "rough": { "step": 0.15, "max": 1.6, "decayMin": 120, "interruptPenalty": 10, "recallPenalty": 6 },
+  "personality": {
+    "clingyCoefA": 0.6,
+    "clingyCoefB": 0.8,
+    "thresholdScaleBase": 1.2,
+    "thresholdScaleTemper": 0.4,
+    "moodDeltaBase": 0.8,
+    "moodDeltaTemper": 0.4,
+    "defaults": { "clingy": 0.50, "curiosity": 0.70, "temper": 0.55, "courage": 0.50, "diligence": 0.60 },
+    "rerollPerDay": 3,
+    "rerollJitter": 0.15
+  },
+  "adapt": {
+    "tMin": 8,
+    "tMax": 90,
+    "baseMin": 30,
+    "clingyCoef": 10,
+    "avgRatio": 0.6,
+    "maxDailyChange": 0.1,
+    "factorMin": 0.7,
+    "factorMax": 1.3,
+    "outlierHours": 8,
+    "coolDays": 3,
+    "zeroDays": 7,
+    "coolDaysMinInteract": 3,
+    "coolMultiplier": 1.2
+  },
+  "thresholds": { "l1": 5, "l2": 15, "l3": 30, "l4": 60, "l5": 120 },
+  "confirm": {
+    "upSec": 60,
+    "downSec": 30,
+    "naturalFloorLevel": 3,
+    "naturalHoldSec": 60,
+    "naturalMinPositive": 3,
+    "naturalPThreshold": 15,
+    "noNegativeWindowSec": 3600,
+    "coolDaysBlock": 3,
+    "naturalMoodFloor": 45
+  },
+  "relief": {
+    "hover": 2,
+    "click": 3,
+    "doubleClick": 8,
+    "stroke": 15,
+    "feed": 20,
+    "bath": 25,
+    "play": 25,
+    "coax": 60,
+    "cooldownSec": { "hover": 60, "click": 3, "doubleClick": 30, "stroke": 0 },
+    "strokeMaxPerWindow": 3,
+    "strokeWindowSec": 600
+  },
+  "mood": { "drainCoef": 2.0, "drainExp": 1.5, "drainRefP": 120 },
+  "inertia": { "tauUpSec": 90, "tauDownSec": 20 },
+  "levels": [
+    { "level": 0, "name": "平静", "moodDelta": 0, "emotion": "Idle", "idlePool": ["ACT-M-01", "ACT-I-01", "ACT-I-04", "ACT-S-01"], "linePool": "idle", "priorityFloor": 0 },
+    { "level": 1, "name": "无聊", "moodDelta": -5, "emotion": "Bored", "idlePool": ["ACT-I-03", "ACT-I-01", "ACT-I-02"], "linePool": "bored", "priorityFloor": 3, "roamRateMul": 0.6 },
+    { "level": 2, "name": "委屈", "moodDelta": -10, "emotion": "Aggrieved", "idlePool": ["ACT-E-02", "ACT-I-03"], "linePool": "aggrieved", "priorityFloor": 7 },
+    { "level": 3, "name": "生闷气", "moodDelta": -15, "emotion": "Sulking", "idlePool": ["ACT-E-03"], "linePool": "sulking", "priorityFloor": 8, "refusePositive": true },
+    { "level": 4, "name": "生气", "moodDelta": -20, "emotion": "Angry", "idlePool": ["ACT-E-04"], "linePool": "angry", "priorityFloor": 9, "refusePositive": true },
+    { "level": 5, "name": "离家出走", "moodDelta": -30, "emotion": "Runaway", "idlePool": ["ACT-E-05"], "linePool": "runaway", "priorityFloor": 10, "moodLockMax": 10, "freezeAffinityToday": true }
+  ],
+  "offline": {
+    "graceMin": 30,
+    "longingMin": 240,
+    "longingAffinityExpMultiplier": 2,
+    "longingHoldHour": 24,
+    "maxSimSteps": 1440,
+    "stepSec": 60
+  },
+  "activity": { "freezeNeglectWhileOut": true, "returnRelief": 20 },
+  "coax": {
+    "strokeSec": 5,
+    "moodGainPerTwoSec": 3,
+    "heartWindowSec": 10,
+    "ringHoldSec": 60,
+    "interruptRollbackRatio": 0.5,
+    "recoverMoodFloor": 50,
+    "easyModeStrokeSec": 2
+  }
+}

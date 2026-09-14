@@ -1,0 +1,75 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# ---------------------------------------------------------------------------
+# 工作区级共享元数据（各 crate 通过 `xxx.workspace = true` 继承）
+# ---------------------------------------------------------------------------
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+license = "MIT OR Apache-2.0"
+
+# ---------------------------------------------------------------------------
+# 工作区级依赖版本锁定（`02 §2.5` 依赖清单）
+#
+# 红线（C4）：禁止引入 GPL/LGPL 依赖。
+# 红线（C9）：禁止引入 reqwest / hyper / tokio-tungstenite 等任何网络能力。
+#
+# 注意：Tauri 2 默认特性已满足透明窗口所需；**不开 devtools**（`02 §1.4`）。
+# 其余依赖（serde / image / rodio / chrono ...）随各模块落地时按需增补，
+# 不在骨架阶段预先引入（避免无谓编译耗时）。
+#
+# S1-M2（T-02 段上）新增：
+#   - `thiserror`：内核错误枚举（`02 §7.4`，MIT OR Apache-2.0）；
+#   - `windows`：Win32 调用（`02 §2.5`，MIT OR Apache-2.0），仅取窗口层所需最小 feature。
+# S1-M5（T-03 配置中心与资源加载）新增：
+#   - `serde` / `serde_json`：外置配置与 atlas.json 反序列化（MIT OR Apache-2.0）；
+#   - `tracing`：库内日志（`02 §7.5`，MIT OR Apache-2.0）；
+#   - `image`：PNG 解码（仅取 png feature，MIT OR Apache-2.0）；
+#   - `lru`：`LruAtlasCache` 字节驱逐底层（MIT）；
+#   - `schemars`：配置 JSON Schema 生成（`02 §4.2` / §7.7-5，MIT OR Apache-2.0）；
+#     经 dp-core 的 `schema` feature 门控保持 dev-only，默认构建不参与编译。
+# S2-M7（T-07 感知服务）新增：
+#   - `crossbeam-channel`：perception → core 有界队列 `bounded(64)`（`02 §1.4`，MIT OR Apache-2.0）；
+#   - `chrono`：`WallClock` 端口 `now_local` / 时区偏移（`02 §4.4` / §5.14，MIT OR Apache-2.0）；
+#   - windows feature 扩充（最小必需集）：`Win32_System_Power`（GetSystemPowerStatus 电量）、
+#     `Win32_System_Threading`（GetSystemTimes CPU 负载差分；注意该 API 位于 Threading
+#     而非 SystemInformation）、`Win32_UI_Input_KeyboardAndMouse`
+#     （GetLastInputInfo 在场空闲）。
+# S4-M1（T-11 段 · 上 / FR-1-10 / F10 会话暂停）新增：
+#   - `Win32_System_RemoteDesktop`：`WTSQuerySessionInformationW` / `WTSFreeMemory`
+#     （锁屏 / 远程桌面会话状态轮询）。**C9 零网络口径**：仅调用本机 `wtsapi32.dll`，
+#     不产生任何外连，capabilities / CSP 不变。真机受限时按 P1-2 降级 idle 近似
+#     并登记偏离（见 `dp-platform/src/win/session.rs` 模块文档）。
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+tauri = { version = "2" }
+tauri-build = { version = "2" }
+thiserror = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tracing = { version = "0.1" }
+image = { version = "0.25", default-features = false, features = ["png"] }
+lru = { version = "0.12" }
+schemars = { version = "0.8" }
+crossbeam-channel = { version = "0.5" }
+chrono = { version = "0.4" }
+
+# Win32 句柄 / 窗口 / 显示器 / DPI / DWM / Shell（ITaskbarList）。
+# feature 为「最小必需集」，避免拖入超重模块拖慢编译。
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+    "Win32_System_Com",
+    "Win32_UI_HiDpi",
+    "Win32_System_Power",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_RemoteDesktop",
+] }

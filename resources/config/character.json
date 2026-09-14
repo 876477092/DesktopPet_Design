@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "defaultName": "心月狐",
+  "catchphrase": {
+    "token": "心心",
+    "defaultEnabled": true,
+    "frequency": { "off": 0, "low": 5, "standard": 3, "high": 2 },
+    "defaultFrequency": "standard",
+    "minIntervalSec": 25,
+    "maxPerSentence": 1,
+    "positionBias": { "head": 0.7, "tail": 0.3, "middle": 0 },
+    "forbidPools": ["runaway", "angry", "remind", "system", "cool"],
+    "requirePools": ["greet", "coax", "apologize", "begFood", "begBath", "depart", "return"]
+  },
+  "linePools": {
+    "count": 13,
+    "minPerPool": 6,
+    "minWithCatchphrase": 2,
+    "minPlainVariant": 2,
+    "keys": ["idle", "happy", "curious", "bored", "aggrieved", "sulking", "angry", "sleepy", "excited", "runaway", "begFood", "begBath", "outing"]
+  },
+  "renderer": {
+    "prefer": "skeleton",
+    "fallbackChain": ["skeleton", "frame"],
+    "engine": "spine",
+    "spineVersion": "4.2",
+    "skeletonPath": "assets/sprites/xinyuehu/default/xinyuehu.json",
+    "atlasPath": "assets/sprites/xinyuehu/default/xinyuehu.atlas",
+    "atlasMaxPx": 2048,
+    "atlasMemBudgetMb": 16,
+    "frameFallbackPath": "assets/sprites/xinyuehu/default/atlas",
+    "probeTimeoutMs": 3000
+  },
+  "slots": ["costume", "hairpin", "cape", "collar", "held"],
+  "expressions": { "count": 20 },
+  "personalityText": {
+    "clingy": ["有点黏人", "很黏人", "独立"],
+    "curiosity": ["好奇心强", "爱探索"],
+    "temper": ["脾气不小", "温和"],
+    "courage": ["胆子大", "有点胆小"],
+    "diligence": ["勤快", "爱偷懒"]
+  }
+}

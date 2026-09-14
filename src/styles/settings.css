@@ -1,0 +1,14 @@
+/* 设置窗口样式（T-01 骨架）：Tailwind 三大指令，具体页面样式随 S1-M3 起扩充。 */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#settings-root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}

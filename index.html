@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 零网络红线（C9）：禁止任何外链资源与 remote URL -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost;" />
+    <title>desktop-pet</title>
+  </head>
+  <!--
+    宠物窗口（label = pet，`src-tauri/tauri.conf.json` 声明）：
+    transparent = true / decorations = false / skipTaskbar = true / visibleOnAllWorkspaces = true。
+    页面背景必须保持 transparent，仅绘制角色像素，否则透明区会出现白底。
+  -->
+  <body>
+    <canvas id="pet-canvas" width="256" height="256"></canvas>
+    <!-- 叠加层/气泡层 DOM 根（S3-M5）：置于 canvas 之后（声明 DOM 顺序，z-index 由 pet.css 定） -->
+    <div id="pet-overlay-root" aria-hidden="true"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

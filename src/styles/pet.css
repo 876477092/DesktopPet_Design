@@ -1,0 +1,329 @@
+/*
+ * 宠物窗口样式（T-01 骨架）。
+ *
+ * 关键约束：页面背景**必须**保持 transparent —— 透明区一旦被填充颜色，
+ * 分层窗口就会呈现白底（`02 §2.3` / SG-M1 门禁结论）。
+ * 画布只绘制角色像素，其余区域不参与绘制。
+ */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* 透明窗口内不需要文本选择/拖拽，避免穿透态下的误操作 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#pet-canvas {
+  display: block;
+  /* 尺寸由 src/main.ts 按 devicePixelRatio 设置 */
+  background: transparent;
+}
+
+/*
+ * S3-M5 叠加层与气泡层（T-10 段 · 上）。
+ *
+ * 落点裁定（设计 §3 Q9）：并入既有 pet.css，不新增未登记 css 文件。
+ * z-order：canvas 为默认层，DOM 层有 position + 正整数 z-index ⇒ 绘制于 canvas 之上；
+ * 且与 `LAYER_DRAW_ORDER = [character, particle, overlay, bubble, menu]` 一致
+ * （particle 先、overlay 次、bubble 再次、menu 最高；S3-M6 裁定追加 menu 尾位）。
+ */
+:root {
+  --pet-heart-pink: #ff8fb1; /* 和好进度环（01 附录 A.3） */
+  --pet-anger-red: #e5484d; /* 怒气符号（01 附录 A.3） */
+  --pet-runaway-red: #d62828; /* 离家出走气泡描边（01 附录 A.3） */
+  --pet-outline: #2b2436; /* 统一外描边（01 附录 A.3） */
+  --bubble-max-w: 256px; /* 气泡最大宽（宠物逻辑宽×2） */
+  --bubble-fade-ms: 200; /* 与 BUBBLE_FADE_MS 对齐（纯过渡时长冗余声明） */
+}
+
+#pet-overlay-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1; /* overlay 子层；bubble 子层更高 */
+}
+
+/* —— 气泡 —— */
+.bubble {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  max-width: var(--bubble-max-w, 256px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid var(--pet-outline);
+  color: #2b2436;
+  font-size: 12px;
+  line-height: 1.4;
+  z-index: 2; /* bubble 子层；须高于 overlay */
+  /* 隐藏态只用 visibility/opacity，禁 display:none（否则 measure() 全 0 退化） */
+  visibility: hidden;
+  opacity: 0;
+  /* 气泡文字可选中（01 §7 可访问性），故显式放行指针事件 */
+  pointer-events: auto;
+}
+
+.bubble--hc {
+  background: #000;
+  color: #fff;
+  border-color: #fff;
+}
+
+/* 尾巴朝向：right→左下、left→右下、clamp→居中朝下（设计 §3 Q4） */
+.bubble--right::after,
+.bubble--left::after,
+.bubble--clamp::after {
+  content: '';
+  position: absolute;
+  width: 0;
+  height: 0;
+  border: 6px solid transparent;
+  border-top-color: var(--pet-outline);
+}
+
+.bubble--right::after {
+  left: 10px;
+  top: 100%;
+}
+
+.bubble--left::after {
+  right: 10px;
+  top: 100%;
+}
+
+.bubble--clamp::after {
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+}
+
+.bubble__text {
+  display: block;
+  /* 气泡文字支持复制 */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.bubble__signature {
+  display: block;
+  margin-top: 2px;
+  text-align: right;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.bubble__actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.bubble__action {
+  pointer-events: auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--pet-outline);
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* —— 叠加层 —— */
+.overlay-coax {
+  position: absolute;
+  left: 50%;
+  bottom: 8px;
+  width: 24px;
+  height: 24px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--pet-heart-pink) calc(var(--coax-progress, 0) * 360deg),
+    rgba(43, 36, 54, 0.2) 0
+  );
+  z-index: 1;
+}
+
+.overlay-anger {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  color: var(--pet-anger-red);
+  font-weight: 700;
+  z-index: 1;
+}
+
+.overlay-sleep {
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  color: var(--pet-outline);
+  z-index: 1;
+}
+
+.overlay-sleep--big {
+  font-size: 20px;
+}
+
+.overlay-toast {
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  transform: translateX(-50%);
+  max-width: var(--bubble-max-w, 256px);
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: rgba(43, 36, 54, 0.85);
+  color: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+  z-index: 2;
+}
+
+/*
+ * —— 粒子层（S3-M6，T-10 段 · 下）——
+ *
+ * 绘制序：`LAYER_DRAW_ORDER` 中 particle 位于 character 之上、overlay 之下
+ * （`02 §6.5`：不遮挡眼睛与文字气泡）；`DomParticleView` 构造时 `root.prepend`
+ * 保证 DOM 序最低，z-index 0 与绘制序一致。
+ */
+.pet-particle-layer {
+  position: absolute;
+  inset: 0;
+  /* 粒子永不拦截交互（鼠标事件全部穿透到钩子/hit-test 域） */
+  pointer-events: none;
+  z-index: 0;
+}
+
+.particle {
+  /* 节点定位由 transform 承担（渲染快照逐帧收敛），布局盒固定在原点 */
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 12px;
+  height: 12px;
+  line-height: 12px;
+  font-size: 12px;
+  text-align: center;
+  /* will-change 提示合成器：粒子逐帧 transform/opacity，避免整层重绘 */
+  will-change: transform, opacity;
+}
+
+/* 五类粒子（`01 附录` / `02 §3`）：emoji 字形 + 类别色彩（dust/tear 用色彩兜底） */
+.particle--heart {
+  color: #ff8fb1; /* 爱心色（S3-M6 冻结规格） */
+}
+
+.particle--heart::before {
+  content: '\2665'; /* ♥ */
+}
+
+.particle--star {
+  color: #ffd166;
+}
+
+.particle--star::before {
+  content: '\2605'; /* ★ */
+}
+
+.particle--dust {
+  color: #b8a99a;
+  border-radius: 50%;
+  background: rgba(184, 169, 154, 0.6);
+}
+
+.particle--tear {
+  color: #7ec8e3;
+  border-radius: 50% 50% 50% 50% / 60% 60% 40% 40%;
+  background: rgba(126, 200, 227, 0.8);
+}
+
+.particle--anger {
+  color: #e5484d;
+}
+
+.particle--anger::before {
+  content: '\2621'; /* ☡ 怒气记号（与 overlay-anger 同族） */
+}
+
+/*
+ * —— 右键菜单（S3-M6，T-10 段 · 下；`01 §8.2` 九项 3×3）——
+ *
+ * z-order：menu 为最高层（z-index 3，裁定「菜单置于 bubble 层之上」）；
+ * 隐藏态只用 visibility（与气泡同纪律：禁 display:none，保留布局盒供
+ * containerSize 度量）。
+ */
+.pet-menu-root {
+  position: fixed;
+  inset: 0;
+  z-index: 3; /* menu 子层：高于 overlay(1) / bubble(2) */
+}
+
+/* 背板：打开期吃掉窗口内所有点击（点击空白处关闭）；
+ * 隐藏态（root visibility:hidden）元素不参与命中测试，无需额外开关。 */
+.pet-menu-backdrop {
+  position: absolute;
+  inset: 0;
+  pointer-events: auto;
+}
+
+.pet-menu {
+  position: absolute;
+  width: 216px; /* MENU_WIDTH（layerPorts.ts 冻结值） */
+  height: 156px; /* MENU_HEIGHT */
+  box-sizing: border-box;
+  padding: 4px;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 2px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.97);
+  border: 1px solid var(--pet-outline);
+  box-shadow: 0 4px 16px rgba(43, 36, 54, 0.25);
+  /* 菜单面板吃掉自身区域的点击（否则会透传到背板触发关闭） */
+  pointer-events: auto;
+}
+
+.pet-menu__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--pet-outline);
+  font-size: 11px;
+  line-height: 1.2;
+  cursor: pointer;
+  padding: 0;
+}
+
+.pet-menu__item:hover:not(:disabled) {
+  background: rgba(255, 143, 177, 0.18);
+}
+
+.pet-menu__item:disabled {
+  color: rgba(43, 36, 54, 0.35);
+  cursor: default;
+}
+
+.pet-menu__emoji {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.pet-menu__label {
+  font-size: 11px;
+  white-space: nowrap;
+}

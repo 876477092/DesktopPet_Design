@@ -1,0 +1,39 @@
+# 依赖与构建产物
+node_modules/
+.pnpm-store/
+target/
+src-tauri/target/
+src-tauri/dist/
+src-tauri/gen/
+dist/
+
+# 日志与临时文件
+*.log
+.DS_Store
+Thumbs.db
+
+# 本地环境变量（不入库）
+.env
+.env.local
+.env.*.local
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# 占位目录：保留 .gitkeep
+assets/*
+!assets/.gitkeep
+resources/**
+!resources/.gitkeep
+# S1-M5：外置配置与 JSON Schema 为版本化交付物（02 §4.2），放行两目录下的 .json。
+!resources/config/
+!resources/config/.gitkeep
+!resources/config/*.json
+!resources/schema/
+!resources/schema/.gitkeep
+!resources/schema/*.json
+
+# 事故留档：2026-09-14 .git 对象库损坏的现场快照（含 reflog 等元数据，仅供手工排查，不入库）
+.git-broken-*/

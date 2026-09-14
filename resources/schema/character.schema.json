@@ -1,0 +1,521 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CharacterConfig",
+  "description": "`character.json` 根：角色命名与口头禅（`02 §5.8`）。",
+  "type": "object",
+  "properties": {
+    "catchphrase": {
+      "description": "口头禅配置（L-03 枚举档位）。",
+      "default": {
+        "defaultEnabled": true,
+        "defaultFrequency": "standard",
+        "forbidPools": [
+          "runaway",
+          "angry",
+          "remind",
+          "system",
+          "cool"
+        ],
+        "frequency": {
+          "high": 2,
+          "low": 5,
+          "off": 0,
+          "standard": 3
+        },
+        "maxPerSentence": 1,
+        "minIntervalSec": 25,
+        "positionBias": {
+          "head": 0.699999988079071,
+          "middle": 0.0,
+          "tail": 0.30000001192092896
+        },
+        "requirePools": [
+          "greet",
+          "coax",
+          "apologize",
+          "begFood",
+          "begBath",
+          "depart",
+          "return"
+        ],
+        "token": "心心"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/CatchphraseCfg"
+        }
+      ]
+    },
+    "defaultName": {
+      "description": "默认角色名（仅允许出现在本配置文件；Rust 侧以 Unicode 码点构造兜底，C2）。",
+      "default": "心月狐",
+      "type": "string"
+    },
+    "expressions": {
+      "description": "表情数量。",
+      "default": {
+        "count": 20
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ExpressionsCfg"
+        }
+      ]
+    },
+    "linePools": {
+      "description": "台词池约束（L-02：count 与 keys 数一致）。",
+      "default": {
+        "count": 13,
+        "keys": [
+          "idle",
+          "happy",
+          "curious",
+          "bored",
+          "aggrieved",
+          "sulking",
+          "angry",
+          "sleepy",
+          "excited",
+          "runaway",
+          "begFood",
+          "begBath",
+          "outing"
+        ],
+        "minPerPool": 6,
+        "minPlainVariant": 2,
+        "minWithCatchphrase": 2
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/LinePoolsCfg"
+        }
+      ]
+    },
+    "personalityText": {
+      "description": "性格描述文案。",
+      "default": {
+        "clingy": [
+          "有点黏人",
+          "很黏人",
+          "独立"
+        ],
+        "courage": [
+          "胆子大",
+          "有点胆小"
+        ],
+        "curiosity": [
+          "好奇心强",
+          "爱探索"
+        ],
+        "diligence": [
+          "勤快",
+          "爱偷懒"
+        ],
+        "temper": [
+          "脾气不小",
+          "温和"
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PersonalityTextCfg"
+        }
+      ]
+    },
+    "renderer": {
+      "description": "渲染后端与资源路径。",
+      "default": {
+        "atlasMaxPx": 2048,
+        "atlasMemBudgetMb": 16,
+        "atlasPath": "assets/sprites/xinyuehu/default/xinyuehu.atlas",
+        "engine": "spine",
+        "fallbackChain": [
+          "skeleton",
+          "frame"
+        ],
+        "frameFallbackPath": "assets/sprites/xinyuehu/default/atlas",
+        "prefer": "skeleton",
+        "probeTimeoutMs": 3000,
+        "skeletonPath": "assets/sprites/xinyuehu/default/xinyuehu.json",
+        "spineVersion": "4.2"
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RendererCfg"
+        }
+      ]
+    },
+    "slots": {
+      "description": "换装插槽列表。",
+      "default": [
+        "costume",
+        "hairpin",
+        "cape",
+        "collar",
+        "held"
+      ],
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "CatchphraseCfg": {
+      "description": "口头禅配置（L-03：频率为枚举档位，作废 \"1:3\" 字符串比例）。",
+      "type": "object",
+      "properties": {
+        "defaultEnabled": {
+          "description": "默认开关。",
+          "default": true,
+          "type": "boolean"
+        },
+        "defaultFrequency": {
+          "description": "默认档位。",
+          "default": "standard",
+          "type": "string"
+        },
+        "forbidPools": {
+          "description": "禁用口头禅的台词池。",
+          "default": [
+            "runaway",
+            "angry",
+            "remind",
+            "system",
+            "cool"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "frequency": {
+          "description": "各档位出现频率（句分之 X）。",
+          "default": {
+            "high": 2,
+            "low": 5,
+            "off": 0,
+            "standard": 3
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CatchphraseFrequencyCfg"
+            }
+          ]
+        },
+        "maxPerSentence": {
+          "description": "单句出现上限。",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "minIntervalSec": {
+          "description": "同句最小间隔（秒）。",
+          "default": 25,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "positionBias": {
+          "description": "出现位置偏置。",
+          "default": {
+            "head": 0.699999988079071,
+            "middle": 0.0,
+            "tail": 0.30000001192092896
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/PositionBiasCfg"
+            }
+          ]
+        },
+        "requirePools": {
+          "description": "必带口头禅的台词池。",
+          "default": [
+            "greet",
+            "coax",
+            "apologize",
+            "begFood",
+            "begBath",
+            "depart",
+            "return"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "token": {
+          "description": "口头禅 token（以码点构造兜底，C2 同理）。",
+          "default": "心心",
+          "type": "string"
+        }
+      }
+    },
+    "CatchphraseFrequencyCfg": {
+      "description": "口头禅频率枚举档位（L-03：off / low=5 / standard=3 / high=2）。",
+      "type": "object",
+      "properties": {
+        "high": {
+          "description": "高频档。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "low": {
+          "description": "低频档。",
+          "default": 5,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "off": {
+          "description": "关闭档（0）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "standard": {
+          "description": "标准档。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ExpressionsCfg": {
+      "description": "表情数量。",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "表情差分数量。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "LinePoolsCfg": {
+      "description": "台词池约束（L-02：count=13 且与 keys 数一致；每池 ≥6 条）。",
+      "type": "object",
+      "properties": {
+        "count": {
+          "description": "台词池数量。",
+          "default": 13,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "keys": {
+          "description": "台词池键列表（13 个，含 idle）。",
+          "default": [
+            "idle",
+            "happy",
+            "curious",
+            "bored",
+            "aggrieved",
+            "sulking",
+            "angry",
+            "sleepy",
+            "excited",
+            "runaway",
+            "begFood",
+            "begBath",
+            "outing"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "minPerPool": {
+          "description": "每池最少条数。",
+          "default": 6,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "minPlainVariant": {
+          "description": "每池最少无口头禅变体条数。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "minWithCatchphrase": {
+          "description": "每池最少含口头禅条数。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PersonalityTextCfg": {
+      "description": "性格描述文案（`02 §5.8` personalityText）。",
+      "type": "object",
+      "properties": {
+        "clingy": {
+          "description": "黏人描述。",
+          "default": [
+            "有点黏人",
+            "很黏人",
+            "独立"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "courage": {
+          "description": "胆量描述。",
+          "default": [
+            "胆子大",
+            "有点胆小"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "curiosity": {
+          "description": "好奇心描述。",
+          "default": [
+            "好奇心强",
+            "爱探索"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "diligence": {
+          "description": "勤快描述。",
+          "default": [
+            "勤快",
+            "爱偷懒"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "temper": {
+          "description": "脾气描述。",
+          "default": [
+            "脾气不小",
+            "温和"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "PositionBiasCfg": {
+      "description": "口头禅出现位置偏置。",
+      "type": "object",
+      "properties": {
+        "head": {
+          "description": "句首权重。",
+          "default": 0.699999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "middle": {
+          "description": "句中权重。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "tail": {
+          "description": "句尾权重。",
+          "default": 0.30000001192092896,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "RendererCfg": {
+      "description": "渲染后端与资源路径（`02 §5.8`）。",
+      "type": "object",
+      "properties": {
+        "atlasMaxPx": {
+          "description": "图集最大边长（像素）。",
+          "default": 2048,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "atlasMemBudgetMb": {
+          "description": "图集内存预算（MB）。",
+          "default": 16,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "atlasPath": {
+          "description": "骨骼图集路径。",
+          "default": "assets/sprites/xinyuehu/default/xinyuehu.atlas",
+          "type": "string"
+        },
+        "engine": {
+          "description": "骨骼引擎名。",
+          "default": "spine",
+          "type": "string"
+        },
+        "fallbackChain": {
+          "description": "渲染回退链。",
+          "default": [
+            "skeleton",
+            "frame"
+          ],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "frameFallbackPath": {
+          "description": "帧回退图集目录。",
+          "default": "assets/sprites/xinyuehu/default/atlas",
+          "type": "string"
+        },
+        "prefer": {
+          "description": "首选渲染路径。",
+          "default": "skeleton",
+          "type": "string"
+        },
+        "probeTimeoutMs": {
+          "description": "资源探测超时（毫秒）。",
+          "default": 3000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "skeletonPath": {
+          "description": "骨骼数据路径。",
+          "default": "assets/sprites/xinyuehu/default/xinyuehu.json",
+          "type": "string"
+        },
+        "spineVersion": {
+          "description": "骨骼引擎版本。",
+          "default": "4.2",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

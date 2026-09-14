@@ -1,0 +1,4 @@
+# pnpm 工作区设置（pnpm 12 起，`package.json` 的 `pnpm.*` 字段迁移至此）。
+# esbuild 必须允许执行构建脚本，否则 vite 无法获得原生二进制。
+allowBuilds:
+  esbuild: true

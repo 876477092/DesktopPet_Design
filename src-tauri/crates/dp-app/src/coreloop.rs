@@ -1,0 +1,3010 @@
+//! `dp-app/src/coreloop.rs` —— S3-M0 运行时装配层：core-loop 三档 tick 与五引擎装配。
+//!
+//! 目标（03 台账 §2 S3-M0 卡片；闭合架构审查 F-01「S2 引擎零装配点 ⇒ 宠物不会动」与 G5）：
+//! **把「库」变成「会动的程序」**——实例化五大引擎（`MotionEngine` / `PhysicsEngine` /
+//! `PlatformGraph` / `PerceptionBus` / `SystemWallClock`）+ 注入端口 + 三档 tick 编排 +
+//! `MotionEvent::Landed → ActionArbiter::submit(ACT-M-06)` 接线。
+//!
+//! ## 结构（纯逻辑 ⇄ Tauri 外壳分离，为了可单测）
+//!   - [`CoreLoopState`]：**纯逻辑**相机器 + 引擎持有者，不依赖 Tauri / 窗口，可 `#[cfg(test)]`
+//!     直接驱动；[`CoreLoopState::logic_tick`] 即设计补充 §3.2 的逐步顺序。
+//!   - [`ScheduleGrid`]：三档 deadline 的**绝对锚定**网格（第 k 次 deadline = `start + k×间隔`，
+//!     禁止逐 tick 累加 sleep）。
+//!   - [`spawn`]：Tauri 外壳——装配 [`CoreLoopState`]、起感知线程与 core-loop 线程
+//!     （口径同 `supervisor::spawn`：**故意不标 `#[must_use]`**，失败降级空句柄）。
+//!     各里程碑接线明细（S3-M2 命中粗筛 / S3-M3 手势消费 / S3-M4 意图 → 相机接线 /
+//!     S3-M6 触发映射与右键菜单 / S4 B15-④ 播放指令通道）统一见 [`spawn`] 与
+//!     [`run_loop`] 的就地注释，此处不再逐条重复（B14-⑨ 文档去重，纯注释变更）。
+//!
+//! ## 引擎协同不变量（设计补充 §1.2）
+//!   A 单写者：任一 logic tick **至多 tick 一个引擎**（Roam/Fall 相恰一个活跃，
+//!   另一停放；Drag 相两引擎均停放，权威 pos = 光标钳制位）；
+//!   B 单一来源：权威 `pos` = 被 tick 引擎的 `pos()`（Drag 相 = 钳制后光标位），
+//!   窗口位置只由此单点写出；
+//!   C 换相重建：两引擎均无 `set_pos`，换相 = 以离场引擎末位 `pos` 重建入场引擎。
+//!
+//! ## 时钟口径（C3）
+//!   四引擎 `now_ms` **一律**取 `loop_start.elapsed().as_millis()`（`Instant` 单调）；
+//!   `SystemWallClock`（i64）**不进节拍**，仅注入 1Hz 业务档空槽。dt 观测口径钳
+//!   `MAX_TICK_DT_MS`（引擎内部已自钳，本层不重写物理子步）。
+//!
+//! ## 红线
+//!   C1 无盘符字面量；C3 见上；C8 `pet://` 事件白名单——S3-M5 前本层零新增
+//!   （render 档**不产帧**，帧仍归 `bridge::spawn_frame_player`，避免 `pet://frame`
+//!   双写者）；**S3-M6 起新增两个已登记事件**：`pet://fx`（粒子迸发，触发映射）
+//!   与 `pet://menu`（右键单击命中弹菜单）；**S4-M2 起新增两个已登记事件**：
+//!   `pet://state`（1Hz 全量 `PetSnapshotV2`）与 `pet://emotion`（阶段迁移详情），
+//!   二者均已登记 `02 §7.6`，其余仍禁；
+//!   C9 零网络。
+//!   `dp-core` 内**零** `use dp_platform`（本文件属 `dp-app`）。
+//!
+//! Windows 门控：本文件 `#![cfg(windows)]` 自门禁（引用 `crate::PetPlatform` 与
+//! `dp-platform/win/*`），装配方 `lib.rs` 只需 `#[cfg(windows)] pub mod coreloop;`。
+
+#![cfg(windows)]
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
+
+use dp_core::anim::{
+    ActionArbiter, ActionCatalog, ActionRequest, ActionSource, Arbitration, Started,
+};
+use dp_core::config::ConfigService;
+use dp_core::config::model::{
+    ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig, RoamCfg,
+};
+use dp_core::emotion::TickEnv;
+use dp_core::emotion::{EmotionEngine, EmotionEvent};
+use dp_core::event::{project_snapshot, wire_for_events};
+#[cfg(test)]
+use dp_core::event::PetSnapshotV2;
+use dp_core::interaction::{InteractionKind, THROW_LANDING_CHAIN, act_of};
+use dp_core::motion::physics::{MAX_TICK_DT_MS, SUB_STEP_MS};
+use dp_core::motion::{
+    MotionEngine, MotionEvent, PhysicsEngine, PlatformGraph, PlatformInputs, StandSurface, Vec2,
+};
+use dp_core::perception::{
+    PerceptionBus, PerceptionEvent, SystemSample, SystemWallClock, WallClock,
+};
+
+use tauri::{AppHandle, Emitter, Manager};
+
+use dp_platform::win::cursor::read_cursor_vdc;
+use dp_platform::win::session::SessionWatcher;
+use dp_platform::win::system::{battery_status, last_input_idle_ms, CpuLoadSampler};
+use dp_platform::{DisplayService, PlatformWindow, WinPlatformWindow};
+
+use crate::PetPlatform;
+use crate::bridge::{
+    self, FX_EVENT, MENU_EVENT, ParticleCmd, ParticleKind, PlaybackChannel, PlaybackOrder,
+    PlaybackReport, STATE_EVENT,
+};
+use crate::hit_latest::HitLatestHandle;
+use crate::hook_sink::ChannelSink;
+use crate::interaction_consumer::InteractionConsumer;
+use crate::ports;
+
+/// 比心 / 抚摸 / 戳痒的爱心迸发数量（S3-M6 触发映射表现档；文档未冻结数值）。
+const FX_HEART_BURST_COUNT: u32 = 12;
+
+/// 甩出落地尘土迸发数量（S3-M6 表现档；落地由 `landed_thrown` 触发，挂落地链起点）。
+const FX_DUST_BURST_COUNT: u32 = 16;
+
+// ---------------------------------------------------------------------------
+// 周期常量（三档 + 感知三档；C3 绝对锚定网格的步长）
+// ---------------------------------------------------------------------------
+
+/// logic 档间隔（20Hz = 50ms；`02 §1.4`）。
+pub const LOGIC_INTERVAL_MS: u64 = 50;
+
+/// 业务档间隔（1Hz = 1000ms；`02 §1.4`，S3-M0 只搭空槽）。
+pub const BIZ_INTERVAL_MS: u64 = 1_000;
+
+/// render 档默认间隔（≈60fps；无 `FrameTierHandle` 时的兜底，实际按 K-4 档位自适应）。
+pub const RENDER_DEFAULT_INTERVAL_MS: u64 = 16;
+
+/// 光标采样间隔（20Hz，FR-6-1）。
+pub const CURSOR_INTERVAL_MS: u64 = 50;
+
+/// 窗口枚举间隔（0.5Hz = 2s，FR-6-4）。
+pub const WINDOWS_INTERVAL_MS: u64 = 2_000;
+
+/// 系统采样间隔（0.1Hz = 10s，FR-6-3）。
+pub const SYSTEM_INTERVAL_MS: u64 = 10_000;
+
+/// 落地缓冲动作 ID（`01 §6.3.2`；源码中不存在常量，取自 `resources/config/actions.json`）。
+const LANDING_ACTION_ID: &str = "ACT-M-06";
+
+/// `seed_k` 递推乘子（SplitMix 风格摘取；设计补充 §1.2-6，避免同种子重复漫游序列）。
+const SEED_GAIN: u64 = 6364136223846793005;
+
+/// 甩出飞行时长上限（毫秒；FR-4-6：甩出后 1.5s 内必须完成落地）。
+const THROW_MAX_FLIGHT_MS: u64 = 1_500;
+
+/// 钳制公式的离散化裕量（毫秒；3 个物理积分子步 + 1 个 logic 档间隔）。
+///
+/// 覆盖三段误差：① 半隐式欧拉离散解相对连续闭式解的落地偏差（≤ 2 子步，20ms）；
+/// ② `PhysicsEngine::thrown` 首 tick `dt=0` 只锚定不推进——物理推进自下一 logic
+/// tick 开始，墙钟口径恒损失 1 个 logic 档间隔（50ms）；③ 落地 tick 按 50ms 粒度
+/// 取整的尾差。三者合计取 80ms：连续飞行 ≤ `T_eff = 上限 − 本裕量` 时，落地墙钟
+/// ≤ `T_eff + 80 = THROW_MAX_FLIGHT_MS`（FR-4-6 成立）。
+const THROW_FLIGHT_MARGIN_MS: u64 = 3 * SUB_STEP_MS + LOGIC_INTERVAL_MS;
+
+/// 宠物窗口物理高度（像素；与 `tauri.conf.json` 窗口 256×256、图集锚点
+/// `anchor.y = 256` 对齐）。2026-09-13 现场修复：`outcome.pos` 为脚底锚点
+/// （`dp-core` 站立语义 = 工作区底边，测试断言 `pos.y = work_bottom`），
+/// core-loop 写窗口位置须换算为窗口顶部（`pos.y − 窗口物理高 ÷ scale`），
+/// 否则窗口垂直溢出屏外（实测窗口顶 T=1392、窗口底 1648 > 屏高 1440，溢出 208px）。
+const PET_WINDOW_PHYS_H: f32 = 256.0;
+
+// ---------------------------------------------------------------------------
+// 相机器与逻辑产出（纯逻辑）
+// ---------------------------------------------------------------------------
+
+/// 运行相（三态；设计补充 §1.2，S3-M4 增拖拽相）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// 漫游相：活跃引擎 = [`MotionEngine`]，`PhysicsEngine` 停放。
+    Roam,
+    /// 下坠相：活跃引擎 = [`PhysicsEngine`]（`surface = PlatformGraph`），`MotionEngine` 停放。
+    Fall,
+    /// 拖拽相（S3-M4）：**两引擎均停放**，权威 `pos` = 钳制后光标位（不变量 B 特例，
+    /// 由 [`CoreLoopState::logic_tick`] 的 Drag 臂单点刷新）。
+    Drag,
+}
+
+/// 一次 logic tick 的产出（纯逻辑；无 Tauri 依赖）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct LogicOutcome {
+    /// 本 tick 的权威位置（VDC；= 被 tick 引擎的 `pos()`）。
+    pub pos: Vec2,
+    /// 权威位置是否相对上一次发生改变（决定是否调 `set_position_vdc`）。
+    pub moved: bool,
+    /// 本 tick 唯一 `MotionEvent → 仲裁` 接线的结果（仅 `Landed` 时非空）。
+    pub submitted: Option<Arbitration>,
+    /// 本 tick 是否结算了一次**甩出落地**（S3-M6：run_loop 据此发落地尘土
+    /// `pet://fx{kind:"dust"}`，挂落地链起点；纯标记，不影响结算本身）。
+    pub landed_thrown: bool,
+}
+
+/// 显示器几何类型别名（等价 `dp_core::motion::MonitorGeom`）。
+type MonitorGeomAlias = dp_core::motion::MonitorGeom;
+
+/// `seed_k` 递推（SplitMix 风格摘取；公开以便单测直接断言递推性质）。
+#[must_use]
+pub fn advance_seed(seed: u64, now_ms: u64) -> u64 {
+    seed.wrapping_mul(SEED_GAIN).wrapping_add(now_ms)
+}
+
+/// 触发映射（S3-M6，纯函数单测覆盖）：交互意图 → 粒子迸发命令（`pet://fx`）。
+///
+/// 映射口径（主理人 brief 冻结）：
+///   - `DoubleClick` → 比心爱心（heart）；
+///   - `Tickle` / `Stroke` → 头顶爱心（heart）；
+///   - `Click` → 微反馈尘土（dust），**仅在 `clickFeedback.enabled` 时**，数量取配置；
+///   - 其余意图（Hover / DragStart / Throw 起飞等）→ `None`（零迸发）；
+///   - 甩出**落地**尘土不在此映射（落地非意图）：run_loop 依 `LogicOutcome.landed_thrown`
+///     直发 `pet://fx{dust}`，挂落地链起点。
+///
+/// 数量统一经 [`bridge::particle_cmd`] 钳 `[1, 60]`（`02 §5.22` maxPerBurst）。
+#[must_use]
+pub fn fx_burst_for_intent(
+    kind: InteractionKind,
+    click_feedback: &ClickFeedbackCfg,
+) -> Option<ParticleCmd> {
+    match kind {
+        InteractionKind::DoubleClick | InteractionKind::Tickle | InteractionKind::Stroke => {
+            Some(bridge::particle_cmd(ParticleKind::Heart, FX_HEART_BURST_COUNT))
+        }
+        InteractionKind::Click if click_feedback.enabled => {
+            Some(bridge::particle_cmd(ParticleKind::Dust, click_feedback.burst_count))
+        }
+        _ => None,
+    }
+}
+
+/// core-loop 装配用的配置束（S4-M1 起引入：把 4 份配置从 `CoreLoopState::new` 的
+/// 位置参数里收进一个具名结构体，避免参数表膨胀到 clippy 的 7 参数上限）。
+///
+/// `emotion` / `needs` 在构造时被 `Box::leak` 固化为 `'static`（见
+/// [`CoreLoopState::new`]），故本结构体只在装配期短暂存在。
+#[derive(Debug, Clone)]
+pub struct CoreCfg {
+    /// 漫游配置。
+    pub roam_cfg: RoamCfg,
+    /// 交互 / 物理配置。
+    pub interaction_cfg: InteractionCfg,
+    /// 动作目录。
+    pub catalog: ActionCatalog,
+    /// 情绪配置（`emotion.json`）。
+    pub emotion: EmotionConfig,
+    /// 需求配置（`needs.json`）。
+    pub needs: NeedsConfig,
+}
+
+/// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
+pub struct CoreLoopState {
+    /// 权威位置（VDC；= 活跃引擎 `pos()` 的镜像）。
+    pos: Vec2,
+    /// 当前相。
+    phase: Phase,
+    /// 漫游决策引擎（Roam 相活跃）。
+    motion: MotionEngine,
+    /// 物理引擎（Fall 相活跃；Roam 相停放为 `None`）。
+    physics: Option<PhysicsEngine>,
+    /// 平台图（`StandSurface` 提供者 + 窗口标题栏站立面）。
+    platform_graph: PlatformGraph,
+    /// 动作仲裁器（S3-M0 仅落地缓冲 submit）。
+    arbiter: ActionArbiter,
+    /// 动作目录（`ACT-M-06` 元数据来源）。
+    catalog: ActionCatalog,
+    /// 漫游种子递推值（每次换相重建 `MotionEngine` 时递推）。
+    seed_k: u64,
+    /// 当前显示器几何（权威 `pos` 归属 / 边界计算）。
+    monitors: Vec<MonitorGeomAlias>,
+    /// 待注入 `PlatformGraph::rebuild` 的带（由感知 `Windows` 事件暂存）。
+    pending_inputs: PlatformInputs,
+    /// 上一次 logic tick 的单调毫秒（dt 观测口径）。
+    last_logic_ms: u64,
+    /// 漫游配置（换相重建用）。
+    roam_cfg: RoamCfg,
+    /// 交互/物理配置（换相重建用）。
+    interaction_cfg: InteractionCfg,
+    /// 最近一次光标位置（VDC；重建 `MotionEngine` 后需重新注入）。
+    cursor: Option<Vec2>,
+    /// Drag 相光标（VDC；`begin_drag` 设置、run_loop 经 `drag_to` 逐 tick 跟新、
+    /// `release_drag` 清空；钳制统一在 logic_tick Drag 臂完成）。
+    drag_cursor: Option<Vec2>,
+    /// 甩出飞行标记（S3-M4）：Fall 相落地时为真则结算 ACT-T-07→08 落地链并计数，
+    /// 为假则走常规 ACT-M-06。仅 Fall 相有意义：进 Drag / 回 Roam 即清零。
+    thrown_flight: bool,
+    /// 甩出落地累计次数（C8 诊断视图；core-loop 单线程独占写，普通 u64 即可）。
+    throw_landed_count: u64,
+    /// 播放指令通道（S4 前清障 B15-④：core-loop → 播放器线程；`None` = 未注册，
+    /// 全部发播方法退化为 no-op，行为与 S3 完全一致）。
+    playback: Option<PlaybackChannel>,
+    /// 情绪内核（S4-M1）。配置以 `Box::leak` 固化为 `'static`（装配期一次，见
+    /// [`CoreLoopState::new`]），故本字段无生命周期参数、`CoreLoopState` 可自由 `move`
+    /// 进 core-loop 线程。
+    emotion: EmotionEngine<'static>,
+    /// 会话监视（S4-M1 要点 3；轮询式锁屏 / 远程桌面检测 + idle 回退，见
+    /// `dp_platform::win::session` 模块文档）。
+    session: SessionWatcher,
+    /// 最近一次系统采样的用户空闲毫秒（10s 采样 → 1Hz 业务档注入 `TickEnv`）。
+    /// `None` = 该采样不可用（`GetLastInputInfo` 失败），此时在场判定保守取「在场」。
+    presence_idle_ms: Option<u64>,
+    /// 待喂入下一 tick 的交互净情绪增益（S4-M2：`Mood` 加项入口）。
+    ///
+    /// 交互发生（logic 档）时累加，业务档喂入 [`TickEnv::event_delta`] 后清零——
+    /// 保证跨档不丢事件（logic 20Hz / biz 1Hz）且单次消费（幂等）。
+    /// 暂停期间**不清零**（内核早退不消费），恢复后一次计入。
+    pending_mood_delta: f32,
+}
+
+impl CoreLoopState {
+    /// 构造核心状态。
+    ///
+    /// `pos` 为初始位置（VDC，构造时被 `MotionEngine` 钳到桌面地板）；`now_ms` 为启动单调毫秒
+    /// （首档 deadline 锚点）；`seed_k` 为漫游 PRNG 种子。
+    ///
+    /// 构造核心状态。
+    ///
+    /// `pos` 为初始位置（VDC，构造时被 `MotionEngine` 钳到桌面地板）；`now_ms` 为启动单调毫秒
+    /// （首档 deadline 锚点）；`seed_k` 为漫游 PRNG 种子。配置项统一经 [`CoreCfg`] 传入。
+    ///
+    /// `cfg.emotion` / `cfg.needs` 为 S4-M1 情绪内核的配置本体，在此**按值**接收并以
+    /// `Box::leak` 固化为 `'static`，使 [`EmotionEngine`] 能借用稳定地址而无需把生命周期
+    /// 参数传染给整个 `CoreLoopState`（后者要被 `move` 进 core-loop 线程）。
+    ///
+    /// 泄漏口径（C7 说明）：固化对象 = 两份配置（KB 级），发生时机 = core-loop 装配一次，
+    /// 与进程同生命周期——进程退出即由 OS 回收，**不是**稳态泄漏。替代方案（在 `AppHandle`
+    /// 内以 `Arc` 持有配置并让 `EmotionEngine` 借用）会把 `Arc` 的生命周期绑到 Tauri 状态
+    /// 管理器上，反而引入跨层所有权纠缠；本卡取前者。
+    #[must_use]
+    pub fn new(
+        pos: Vec2,
+        monitors: Vec<MonitorGeomAlias>,
+        cfg: CoreCfg,
+        seed_k: u64,
+        now_ms: u64,
+    ) -> Self {
+        let CoreCfg { roam_cfg, interaction_cfg, catalog, emotion, needs } = cfg;
+        let motion = MotionEngine::new(pos, monitors.clone(), roam_cfg.clone(), seed_k, now_ms);
+        let platform_graph = PlatformGraph::new(monitors.clone(), now_ms);
+        let clamped = motion.pos();
+        // 固化堆地址为 `'static`（装配期一次；见本方法文档的泄漏口径说明）。
+        let cfg_ref: &'static EmotionConfig = Box::leak(Box::new(emotion));
+        let needs_ref: &'static NeedsConfig = Box::leak(Box::new(needs));
+        let emotion = EmotionEngine::new(cfg_ref, needs_ref);
+        Self {
+            pos: clamped,
+            phase: Phase::Roam,
+            motion,
+            physics: None,
+            platform_graph,
+            arbiter: ActionArbiter::new(),
+            catalog,
+            seed_k,
+            monitors,
+            pending_inputs: PlatformInputs::default(),
+            last_logic_ms: now_ms,
+            roam_cfg,
+            interaction_cfg,
+            cursor: None,
+            drag_cursor: None,
+            thrown_flight: false,
+            throw_landed_count: 0,
+            playback: None,
+            emotion,
+            session: SessionWatcher::default(),
+            presence_idle_ms: None,
+            pending_mood_delta: 0.0,
+        }
+    }
+
+    /// 接入播放指令通道（S4 前清障 B15-④；装配点 `spawn` 在起线程前调用一次）。
+    pub fn attach_playback(&mut self, channel: PlaybackChannel) {
+        self.playback = Some(channel);
+    }
+
+    /// 记一次交互的情绪净增益（S4-M2：`Mood` 加项通路，跨档暂存）。
+    ///
+    /// 由 logic 档（20Hz）在识别到正向交互意图后调用，累加到
+    /// [`Self::pending_mood_delta`]，业务档（1Hz）下一次 tick 经
+    /// [`TickEnv::event_delta`] 一次性喂入内核。
+    ///
+    /// **数值口径归 S4-M3**（`emotion.json.relief.*` 的 P 缓解量与冷却）：本卡只提供
+    /// 「交互 → 暂存 → 单次消费」的通路与幂等语义，**不内置任何增益数值常量**，
+    /// 由调用方按 S4-M3 的缓解表给值（避免本层与配置真源双写）。
+    ///
+    /// 暂存语义：跨档不丢事件（logic 20Hz / biz 1Hz 频率差）；消费幂等（喂入即清零）；
+    /// 暂停期间不清零（内核早退不消费，恢复后一次计入）。
+    pub fn record_interaction_mood(&mut self, delta: f32) {
+        if delta.is_finite() {
+            self.pending_mood_delta += delta;
+        }
+    }
+
+    /// 当前待喂入的情绪增益（诊断 / 单测用）。
+    #[inline]
+    pub fn pending_mood_delta(&self) -> f32 {
+        self.pending_mood_delta
+    }
+
+    /// 下发「起播」指令（覆盖态：播放器打断轮播优先播放该动作；无通道 → no-op）。
+    fn emit_play(&self, action_id: &str) {
+        if let Some(channel) = &self.playback {
+            channel.push_order(PlaybackOrder::Play { action_id: action_id.to_string() });
+        }
+    }
+
+    /// 下发「停播」指令（播放器清覆盖回落轮播；无通道 → no-op）。
+    fn emit_stop(&self) {
+        if let Some(channel) = &self.playback {
+            channel.push_order(PlaybackOrder::Stop);
+        }
+    }
+
+    /// 仲裁结果 → 发播指令（仅起播型结果 `Play` / `Interrupt` 需要覆盖态起播；
+    /// 入队/丢弃/压制不下发——出队起播由 `Finished` 回报经 `drain_finished` 承载）。
+    fn settle_play(&self, verdict: Arbitration, action_id: &str) {
+        if matches!(verdict, Arbitration::Play | Arbitration::Interrupt { .. }) {
+            self.emit_play(action_id);
+        }
+    }
+
+    /// current 是否为循环动作（目录缺该动作 → 非循环口径，保守不停播）。
+    fn current_is_looping(&self) -> bool {
+        self.arbiter
+            .current()
+            .and_then(|a| self.catalog.find(&a.request.id))
+            .is_some_and(|cfg| cfg.looping)
+    }
+
+    /// 停播在播的循环动作并按 `on_action_finished` 语义推进仲裁链（S4 前清障 B15-④）。
+    ///
+    /// current 为循环动作 → 发 `Stop` 停播（画面回落轮播）+ `on_action_finished`
+    /// （弹出 current、队列最优者起播 fade 0）→ 起播者经 `emit_play` 重挂覆盖态；
+    /// current 缺席 / 非循环 → no-op（非循环动作的播完由播放器 `Finished` 回报驱动）。
+    fn stop_looping_current(&mut self, now_ms: u64) {
+        if !self.current_is_looping() {
+            return;
+        }
+        self.emit_stop();
+        if let Some(started) = self.arbiter.on_action_finished(now_ms) {
+            self.emit_play(&started.request.id);
+        }
+    }
+
+    /// 排空播放回报（S4 前清障 B15-④：每 logic tick 调用；`Finished` 匹配 current
+    /// → `on_action_finished` 链尾推进 → 出队者 `emit_play` 起播；不匹配 → 丢弃）。
+    pub fn drain_finished(&mut self, now_ms: u64) {
+        let Some(channel) = &self.playback else {
+            return;
+        };
+        for report in channel.drain_reports() {
+            let PlaybackReport::Finished { action_id } = report;
+            let matches = self.arbiter.current().is_some_and(|a| a.request.id == action_id);
+            if !matches {
+                eprintln!("[dp-app] core-loop 播放回报与 current 不符，丢弃：{action_id}");
+                continue;
+            }
+            if let Some(started) = self.arbiter.on_action_finished(now_ms) {
+                eprintln!(
+                    "[dp-app] core-loop 链尾推进：{} 播毕 → 出队起播 {}（fade={}ms）",
+                    action_id, started.request.id, started.fade_ms
+                );
+                self.emit_play(&started.request.id);
+            }
+        }
+    }
+
+    /// 当前相（调试 / 单测视图）。
+    #[must_use]
+    pub const fn phase(&self) -> Phase {
+        self.phase
+    }
+
+    /// 手势参数快照（S3-M3 消费端构造用；随 `interaction_cfg` 在启动期固化，
+    /// 运行期不热更——配置热更归后续里程碑）。
+    #[must_use]
+    pub fn gesture_cfg(&self) -> GestureCfg {
+        self.interaction_cfg.gesture.clone()
+    }
+
+    /// 单击微反馈配置快照（S3-M6 触发映射用；同启动期固化口径）。
+    #[must_use]
+    pub fn click_feedback_cfg(&self) -> ClickFeedbackCfg {
+        self.interaction_cfg.click_feedback.clone()
+    }
+
+    /// 当前权威位置（VDC）。
+    #[must_use]
+    pub const fn pos(&self) -> Vec2 {
+        self.pos
+    }
+
+    /// 最近一次感知光标（VDC；S3-M4 run_loop 接线 DragStart / Drag 跟手时取最新点用）。
+    #[must_use]
+    pub const fn cursor(&self) -> Option<Vec2> {
+        self.cursor
+    }
+
+    /// 是否处于甩出飞行（S3-M4 单测 / 诊断视图：Fall 相落地结算的分流依据）。
+    #[must_use]
+    pub const fn thrown_flight(&self) -> bool {
+        self.thrown_flight
+    }
+
+    /// 甩出落地累计次数（C8 诊断视图；每判定一次「甩出落地」加一）。
+    #[must_use]
+    pub const fn throw_landed_count(&self) -> u64 {
+        self.throw_landed_count
+    }
+
+    /// 应用一批感知事件（设计补充 §3.2-①；`Cursor`→引擎、`Windows`→暂存带）。
+    ///
+    /// `System` 样本中的 `presence_idle_ms` 被缓存供 1Hz 业务档注入 `TickEnv`（S4-M1）；
+    /// 其余系统字段（电量 / CPU）与 `Fullscreen` 仍不消费（全屏轮询已由 supervisor 处理，
+    /// 本层不重复）。
+    pub fn apply_perception(&mut self, events: Vec<PerceptionEvent>) {
+        for ev in events {
+            match ev {
+                PerceptionEvent::Cursor { pos } => {
+                    self.cursor = Some(pos);
+                    self.motion.set_cursor(Some(pos));
+                }
+                PerceptionEvent::Windows { titlebars, taskbars } => {
+                    self.pending_inputs = ports::platform_inputs(titlebars, taskbars);
+                }
+                PerceptionEvent::System(sample) => {
+                    self.presence_idle_ms = sample.presence_idle_ms;
+                }
+                PerceptionEvent::Fullscreen { .. } => {}
+            }
+        }
+    }
+
+    /// 应用显示器拓扑快照（设计补充 §3.2-②；变更时 `on_monitors_changed` + `PlatformGraph` 整体重建）。
+    pub fn apply_monitors(&mut self, monitors: Vec<MonitorGeomAlias>, now_ms: u64) {
+        if !monitors_changed(&self.monitors, &monitors) {
+            return;
+        }
+        self.monitors = monitors;
+        self.motion.on_monitors_changed(self.monitors.clone(), now_ms);
+        // PlatformGraph 无 set_monitors（§6-5）：整体重建。
+        self.platform_graph = PlatformGraph::new(self.monitors.clone(), now_ms);
+        let bounds = ports::bounds_of(&self.monitors, self.active_pos());
+        if let Some(phys) = self.physics.as_mut() {
+            phys.set_bounds(bounds);
+        }
+    }
+
+    /// 推进一次 logic tick（设计补充 §3.2 逐步顺序：①平台图重建 → ②站立面消失检查/换相
+    /// →③tick 活跃引擎 →④事件转发；返回权威 `pos` 与待发动作）。
+    pub fn logic_tick(&mut self, now_ms: u64) -> LogicOutcome {
+        let prev = self.pos;
+        // 驱动侧 dt 观测口径（护栏：引擎内部已各自钳 MAX_TICK_DT_MS，此处不重写物理子步）。
+        let _dt_ms = now_ms.saturating_sub(self.last_logic_ms).min(MAX_TICK_DT_MS);
+        self.last_logic_ms = now_ms;
+
+        // ① PlatformGraph 2s 重建（deadline 链绝对锚定由引擎内部维护）。
+        if self.platform_graph.should_rebuild(now_ms) {
+            self.platform_graph.rebuild(now_ms, self.pending_inputs.clone());
+        }
+
+        // ② 站立面消失检查（仅 Roam 相；AC-08）：命中即换相重建 PhysicsEngine。
+        if self.phase == Phase::Roam && !self.platform_graph.is_valid_stand(self.pos) {
+            let bounds = ports::bounds_of(&self.monitors, self.pos);
+            self.physics =
+                Some(PhysicsEngine::new(self.pos, self.interaction_cfg.clone(), bounds));
+            self.phase = Phase::Fall;
+        }
+
+        // ③ tick 活跃引擎（不变量 A：只 tick 一个，另一个停放）。
+        let events: Vec<MotionEvent> = match self.phase {
+            Phase::Roam => {
+                self.motion.set_cursor(self.cursor);
+                let evs = self.motion.tick(now_ms);
+                self.pos = self.motion.pos();
+                evs
+            }
+            Phase::Fall => {
+                let evs = match self.physics.as_mut() {
+                    Some(phys) => phys.tick(now_ms, &self.platform_graph),
+                    None => Vec::new(),
+                };
+                self.pos = self.physics.as_ref().map_or(self.pos, |p| p.pos());
+                evs
+            }
+            Phase::Drag => {
+                // 两引擎均停放（不变量 A 特例）：权威 pos = 钳制后光标位（不变量 B
+                // 特例）。无光标样本（异常）保持原位；钳制细节见 `clamp_drag_target`。
+                self.pos = self.clamp_drag_target(self.drag_cursor.unwrap_or(self.pos));
+                Vec::new()
+            }
+        };
+
+        // ④ 事件转发：仅 Landed 走仲裁（唯一 MotionEvent→仲裁 接线，卡片要点 5）。
+        let mut submitted = None;
+        let mut landed_thrown = false;
+        for ev in &events {
+            match ev {
+                MotionEvent::Landed { .. } => {
+                    // 换相重建 MotionEngine（不变量 C：以物理末位为入场 pos，seed_k 递推）。
+                    self.reenter_roam(now_ms);
+                    let thrown = self.thrown_flight;
+                    self.thrown_flight = false;
+                    landed_thrown = thrown;
+                    if thrown {
+                        // 甩出落地（FR-4-6）：ACT-T-07→08 落地链 + C8 计数
+                        // （落地尘土 `pet://fx{dust}` 由 run_loop 依 landed_thrown 发出）。
+                        self.throw_landed_count = self.throw_landed_count.wrapping_add(1);
+                        eprintln!("[dp-app] core-loop 甩出落地：count={}", self.throw_landed_count);
+                        // 链提交**先于**停播推进（B15-④ 裁定）：07/08 依序入队依赖
+                        // toss 仍在 current 位；若先停播，07 起播后 08 会被 R-A
+                        // Suppressed而断链。停播推进后队列最优者（07）fade 0 起播。
+                        submitted = self.submit_throw_landing_chain(now_ms);
+                        // S4 B15-④：落地即结束在播循环 toss（所有 Landed 口径）。
+                        self.stop_looping_current(now_ms);
+                    } else {
+                        // S4 B15-④：落地即结束在播循环动作（所有 Landed 口径，计划
+                        // 注记：原仅甩出路径，现扩至全部 Landed；非循环 current 不受影响）。
+                        self.stop_looping_current(now_ms);
+                        submitted = self.submit_landing(now_ms);
+                    }
+                    break;
+                }
+                // 其余事件（TargetDecided/Arrived/IdleFallback/Migrated）本阶段仅消费不换相
+                // （业务动作下发登记为遗留 §6-8）。
+                MotionEvent::TargetDecided { .. }
+                | MotionEvent::Arrived { .. }
+                | MotionEvent::IdleFallback
+                | MotionEvent::Migrated { .. } => {}
+            }
+        }
+
+        LogicOutcome { pos: self.pos, moved: self.pos != prev, submitted, landed_thrown }
+    }
+
+    /// 仲裁器活性轮询（设计补充 §3.2-⑧；S4 B15-④ 起播经播放指令通道下发覆盖态，
+    /// 本轮询仅保留 fade 观测日志）。
+    pub fn poll_arbiter(&mut self, now_ms: u64) -> Option<Started> {
+        self.arbiter.poll(now_ms)
+    }
+
+    /// 业务 1Hz 档（S4-M1 接线：会话暂停检测 → [`EmotionEngine::tick_1s`] → 事件落日志）。
+    ///
+    /// `wall` 为墙钟端口（C3）。业务时间与本地时间**都经该端口取**，本层不直接使用
+    /// `chrono` —— `dp-app` 不引入 `chrono` 依赖（C9：不新增第三方依赖）。
+    ///
+    /// ## 数据流
+    ///
+    ///   1. **会话监视**（S4-M1 要点 3）：`SessionWatcher::observe` 以轮询式锁屏 / 远程桌面
+    ///      检测（`dp-platform` 侧 `WTSQuerySessionInformationW`）叠加 idle 回退，输出
+    ///      `session_paused`（带 `hysteresisMs` 迟滞，避免临界抖动）。
+    ///   2. **环境组装**：把会话暂停 + 缓存的 `presence_idle_ms` + 需求快照塞进 [`TickEnv`]。
+    ///   3. **内核推进**：`tick_1s` 内部完成因子 → ΔP → 阶段结算 → Mood 惯性 → 日切。
+    ///   4. **事件落地**：本卡只做 C8 诊断日志（`pet://` 事件注册与气泡投递归 S4-M2）。
+    ///
+    /// 暂停期间 `tick_1s` 会冻结 P 累积且不跳变（验收标准 (a) 的实现位置在内核，
+    /// 本方法只负责把 `session_paused` 如实喂入）。
+    pub fn business_tick(&mut self, wall: &dyn WallClock, app: Option<&AppHandle>) {
+        let wall_now_ms = wall.now_ms();
+        // ① 会话暂停（迟滞口径在 `SessionWatcher` 内）。注意 `observe` 的返回值是
+        //    **迁移标志**而非当前暂停态 —— 后者经 `is_paused()` 读。
+        let session_changed = self
+            .session
+            .observe(wall_now_ms.max(0) as u64, self.presence_idle_ms);
+        let paused = self.session.is_paused();
+        self.business_tick_inner(wall, wall_now_ms, paused, session_changed, app);
+    }
+
+    /// 业务档内核推进（**跳过会话监视**，直接给定 `session_paused`）。
+    ///
+    /// 拆出此函数的原因：① 单测需要绕开平台会话查询（本机无头环境下
+    /// `query_session_state()` 恒返回 `Disconnected`，会使所有业务档用例恒处于暂停态）；
+    /// ② 后续里程碑（S4-M2 起）若有其它暂停来源（如演出中 `performing`），
+    /// 也可经此单点注入而不重复实现链路。
+    ///
+    /// `app` 为传输层句柄（`None` = 纯逻辑模式，常见于单测）：**仅**用于 `emit`
+    /// 事件；所有事件名与载荷生产均在 `dp-core`（C8 单一真源），本层不做任何
+    /// 事件名拼接。
+    fn business_tick_inner(
+        &mut self,
+        wall: &dyn WallClock,
+        wall_now_ms: i64,
+        paused: bool,
+        session_changed: bool,
+        app: Option<&AppHandle>,
+    ) {
+        // ② 环境组装（本地时间同经端口取；需求快照取自内核当前状态）。
+        let env = TickEnv {
+            now_local: wall.now_local(),
+            session_paused: paused,
+            performing: false,
+            activity_running: false,
+            event_delta: self.pending_mood_delta,
+            // 采样不可用（`None`）→ 保守取 0 = 判定「在场」，避免把检测失败
+            // 误算成用户离开而虚增冷落压力。
+            preset_idle_ms: self.presence_idle_ms.unwrap_or(0),
+            interaction_available: true,
+            satiety: self.emotion.state.values.satiety,
+            cleanliness: self.emotion.state.values.cleanliness,
+            ..TickEnv::default()
+        };
+        // 交互净增益按 tick 消费（幂等：喂入后清零，避免重复计入后续 tick）。
+        // **暂停态不清零**：暂停期间内核早退不消费，保留待恢复后一次计入。
+        if !paused {
+            self.pending_mood_delta = 0.0;
+        }
+
+        // ③ 内核推进。
+        let outcome = self.emotion.tick_1s(wall_now_ms, env);
+
+        // ④ 事件落地（S4-M2）：算法事件 → 线上事件（映射在 `dp-core::event`，
+        //    本层只做 emit + 降级日志，C8）。`ForceAction` 走动作仲裁而非事件面。
+        if session_changed || outcome.pause_changed {
+            eprintln!(
+                "[dp-app] core-loop 会话暂停态迁移：paused={paused} 累计={}ms（{} 次窗口）",
+                self.emotion.state.pause.accumulated_ms, self.emotion.state.pause.count
+            );
+        }
+        self.dispatch_emotion_events(&outcome.events, wall_now_ms, app);
+
+        // ⑤ 1Hz 全量快照（`pet://state`）：无论有无算法事件都发，供属性面板 /
+        //    原因卡实时刷新（`02 §7.6` 频率列 = 1Hz）。
+        self.emit_state_snapshot(app);
+    }
+
+    /// 情绪算法事件落地（S4-M2 要点 1/3）。
+    ///
+    /// 两类处置：
+    ///   - `ForceAction` → 动作仲裁（`02 §6.2`：`submit 情绪动作 优先级≥7`），
+    ///     经 `ActionRequest::from_cfg(cfg, ActionSource::Emotion)` 构造；目录缺
+    ///     该动作 / `disabled` / 优先级域外 → 降级不提交（不 panic）；
+    ///   - 其余 → 经 [`wire_for_events`] 映射为 `pet://emotion`（阶段迁移）；
+    ///     `ValuesChanged` / `PersistNow` 不产线上事件（快照走 ⑤ / 存盘归 S5）。
+    fn dispatch_emotion_events(
+        &mut self,
+        events: &[EmotionEvent],
+        wall_now_ms: i64,
+        app: Option<&AppHandle>,
+    ) {
+        // 强制动作（优先级 `02 §6.2` 要求 ≥7，由 `emotion.json.levels[].priorityFloor`
+        // 保证；此处不再二次钳制，避免与配置真源双写）。
+        for ev in events {
+            let EmotionEvent::ForceAction { action_id, priority } = ev else {
+                continue;
+            };
+            let Some(cfg) = self.catalog.find(action_id) else {
+                eprintln!("[dp-app] core-loop 情绪动作 {action_id} 不在目录，降级不提交");
+                continue;
+            };
+            let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Emotion) else {
+                eprintln!("[dp-app] core-loop 情绪动作 {action_id} 不可用（disabled），降级不提交");
+                continue;
+            };
+            let verdict = self.arbiter.submit(request, wall_now_ms.max(0) as u64);
+            self.settle_play(verdict.clone(), action_id);
+            eprintln!(
+                "[dp-app] core-loop 情绪强制动作 {action_id}（priority={priority}）仲裁={verdict:?}"
+            );
+        }
+
+        // 线上事件（`pet://emotion`）。
+        for wire in wire_for_events(events, &self.emotion) {
+            let Some(handle) = app else { continue };
+            if let Err(err) = handle.emit(wire.event, &wire.payload) {
+                eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+            }
+        }
+    }
+
+    /// 广播 1Hz 全量快照（`pet://state`，载荷 [`PetSnapshotV2`]）。
+    ///
+    /// 载荷经 [`project_snapshot`] 投影（唯一生产者）；前端先行契约见
+    /// `src/shared/ipc.ts` 的 `PetSnapshotV2`。无 `app`（纯逻辑模式）时不广播。
+    fn emit_state_snapshot(&mut self, app: Option<&AppHandle>) {
+        let Some(handle) = app else { return };
+        // 性格文本 / 重掷次数归 S7 性格面板；本卡投影空串 / 0（字段存在，形状正确）。
+        let snapshot = project_snapshot(&self.emotion, "", 0);
+        if let Err(err) = handle.emit(STATE_EVENT, &snapshot) {
+            eprintln!("[dp-app] core-loop 广播 {STATE_EVENT} 降级：{err}");
+        }
+    }
+
+    /// 当前快照（`#[cfg(test)]` 探针：验证契约而非广播路径）。
+    #[cfg(test)]
+    pub(crate) fn snapshot_for_test(&self) -> PetSnapshotV2 {
+        project_snapshot(&self.emotion, "", 0)
+    }
+
+    /// 业务档推进（**测试专用**：强制 `session_paused = false`，绕开平台会话查询）。
+    ///
+    /// 存在的理由见 [`Self::business_tick_inner`] 的文档：本机无头环境下平台查询恒为
+    /// `Disconnected`，若不绕开则无法在单测中触达「在场 / 离场因子」这条路径。
+    #[cfg(test)]
+    fn business_tick_present(&mut self, wall: &dyn WallClock) {
+        let now = wall.now_ms();
+        self.business_tick_inner(wall, now, false, false, None);
+    }
+
+    /// 当前权威 `pos`（不变量 B）。
+    fn active_pos(&self) -> Vec2 {
+        match self.phase {
+            Phase::Roam => self.motion.pos(),
+            Phase::Fall => self.physics.as_ref().map_or(self.pos, |p| p.pos()),
+            Phase::Drag => self.pos,
+        }
+    }
+
+    /// `Landed{impact}` → `ACT-M-06` → `ActionRequest::from_cfg(Motion)` → `arbiter.submit`。
+    ///
+    /// 目录缺该动作 / `disabled` / 优先级域外 → `None`（降级，不 panic）。
+    /// 起播型仲裁结果（`Play` / `Interrupt`）经 `settle_play` 下发覆盖态起播（B15-④）。
+    fn submit_landing(&mut self, now_ms: u64) -> Option<Arbitration> {
+        let cfg = self.catalog.find(LANDING_ACTION_ID)?;
+        let request = ActionRequest::from_cfg(cfg, ActionSource::Motion)?;
+        let verdict = self.arbiter.submit(request, now_ms);
+        self.settle_play(verdict.clone(), LANDING_ACTION_ID);
+        Some(verdict)
+    }
+
+    /// 进入拖拽相（S3-M4：`DragStart` 意图接线点，run_loop 每 logic tick 调用）。
+    ///
+    /// 已在 Drag 相：幂等——只刷新钳制后光标并同步权威 `pos`，返回 `None`
+    /// （不重复提交动作）；其余相：两引擎停放（Fall 相来的 `PhysicsEngine` 直接
+    /// 丢弃，不变量 A）、`phase = Drag`、`thrown_flight` 清零（飞行中抓回 → 落地链
+    /// 作废），并按幂等口径补提交 ACT-T-06「抛物线翻滚」挂光标（id 唯一真源 =
+    /// [`act_of`]`(`[`InteractionKind::DragStart`]`)`）：current 已是 ACT-T-06 时跳过
+    /// （空中抓回时 toss 仍在播，不重复入队污染队列），其余情况照常提交。
+    ///
+    /// 幂等口径与 [`Self::release_drag`] 一致，均经 `ensure_toss_submitted`；
+    /// 目录缺失则降级为不提交。
+    ///
+    /// 返回 toss 补提交的仲裁结果（仅当在播非 ACT-T-06 且目录可用时非空）。
+    pub fn begin_drag(&mut self, cursor: Vec2, now_ms: u64) -> Option<Arbitration> {
+        if self.phase == Phase::Drag {
+            let clamped = self.clamp_drag_target(cursor);
+            self.drag_cursor = Some(clamped);
+            self.pos = clamped;
+            return None;
+        }
+        self.physics = None;
+        self.phase = Phase::Drag;
+        self.thrown_flight = false;
+        let clamped = self.clamp_drag_target(cursor);
+        self.drag_cursor = Some(clamped);
+        self.pos = clamped;
+        self.ensure_toss_submitted(now_ms)
+    }
+
+    /// Drag 相跟手（S3-M4：只暂存光标，钳制与权威 `pos` 刷新统一在 logic_tick
+    /// Drag 臂完成；非 Drag 相调用为无操作）。
+    pub fn drag_to(&mut self, cursor: Vec2) {
+        if self.phase == Phase::Drag {
+            self.drag_cursor = Some(cursor);
+        }
+    }
+
+    /// 结束拖拽并结算（S3-M4：`Throw` 意图接线点）。
+    ///
+    /// `Some(vel)`（甩出）：初速度经 [`Self::clamp_throw_velocity`] 钳制（保证
+    /// `THROW_MAX_FLIGHT_MS` 内落地）后以 [`PhysicsEngine::thrown`] 构造抛物线下坠态，
+    /// `phase = Fall`、`thrown_flight = true`；仲裁器在播的不是 ACT-T-06 时补提交
+    /// （toss 缺席的退化场景，如 DragStart 丢失）。
+    ///
+    /// `None`（纯松手）：仅 Drag 相有意义——落点为合法站立面 → 直接
+    /// `reenter_roam`（无落地演出）；悬空 → `PhysicsEngine::new` 自然下坠（落地走
+    /// ACT-M-06）；非 Drag 相调用为无操作。
+    ///
+    /// Throw 直达（非 Drag 相，如同批互斥序 Throw 先于 DragStart 的竞态）：以当前
+    /// 权威位为起飞点走甩出分支。返回本次补提交 toss 的仲裁结果（无补提交时 `None`）。
+    pub fn release_drag(&mut self, throw_vel: Option<Vec2>, now_ms: u64) -> Option<Arbitration> {
+        let cursor = if self.phase == Phase::Drag {
+            self.drag_cursor.take().unwrap_or(self.pos)
+        } else {
+            self.pos
+        };
+        match throw_vel {
+            Some(raw_vel) => {
+                let vel = self.clamp_throw_velocity(raw_vel);
+                let bounds = ports::vd_bounds_of(&self.monitors);
+                self.physics = Some(PhysicsEngine::thrown(
+                    cursor,
+                    vel,
+                    self.interaction_cfg.clone(),
+                    bounds,
+                ));
+                self.pos = cursor;
+                self.phase = Phase::Fall;
+                self.thrown_flight = true;
+                // S4 B15-④：起飞即停播在播的循环 toss（画面转甩出物理飞行）。
+                // 仲裁器 current **保留**（toss 仍是「在播」语义，链首 07 差 0
+                // 优先级仍依序排队）。
+                if self.current_is_looping() {
+                    self.emit_stop();
+                }
+                // 退化补提交（toss 缺席，如 DragStart 丢失）；toss 已 current 时
+                // **不发 Play**——会抵消刚发的 Stop（B15-④ 裁定，重挂仅归 begin_drag）。
+                let toss_id = act_of(InteractionKind::DragStart);
+                if !self.arbiter.current().is_some_and(|a| a.request.id == toss_id) {
+                    return self.submit_toss(now_ms);
+                }
+                None
+            }
+            None => {
+                if self.phase != Phase::Drag {
+                    return None;
+                }
+                if self.platform_graph.is_valid_stand(cursor) {
+                    self.pos = cursor;
+                    self.reenter_roam(now_ms);
+                    self.thrown_flight = false;
+                    return None;
+                }
+                // 悬空松手：自然下坠（无初速），落地走常规 ACT-M-06。
+                let bounds = ports::bounds_of(&self.monitors, cursor);
+                self.physics =
+                    Some(PhysicsEngine::new(cursor, self.interaction_cfg.clone(), bounds));
+                self.pos = cursor;
+                self.phase = Phase::Fall;
+                self.thrown_flight = false;
+                None
+            }
+        }
+    }
+
+    /// 换相回 Roam（不变量 C：以离场位为入场 pos 重建 `MotionEngine`，seed_k 递推）。
+    ///
+    /// 从 `logic_tick` 的 Landed 分支与 `release_drag` 的合法落点分支复用；**不**动
+    /// `thrown_flight`（结算方读后自行清零，避免隐藏状态转移）。
+    fn reenter_roam(&mut self, now_ms: u64) {
+        self.seed_k = advance_seed(self.seed_k, now_ms);
+        self.motion = MotionEngine::new(
+            self.pos,
+            self.monitors.clone(),
+            self.roam_cfg.clone(),
+            self.seed_k,
+            now_ms,
+        );
+        self.motion.set_cursor(self.cursor);
+        self.pos = self.motion.pos();
+        self.phase = Phase::Roam;
+        self.physics = None;
+    }
+
+    /// 拖拽挂光标动作提交（ACT-T-06，id 唯一真源 = `act_of(InteractionKind::DragStart)`）。
+    ///
+    /// 目录缺失 / `disabled` / 优先级域外 → `None`（降级，不 panic）。
+    /// 起播型仲裁结果经 `settle_play` 下发覆盖态起播（B15-④）。
+    fn submit_toss(&mut self, now_ms: u64) -> Option<Arbitration> {
+        let toss_id = act_of(InteractionKind::DragStart);
+        let cfg = self.catalog.find(toss_id)?;
+        let request = ActionRequest::from_cfg(cfg, ActionSource::Interaction)?;
+        let verdict = self.arbiter.submit(request, now_ms);
+        self.settle_play(verdict.clone(), toss_id);
+        Some(verdict)
+    }
+
+    /// 甩出起飞时确保 ACT-T-06 在播（退化补提交；已在播则重挂覆盖态并返回 `None`）。
+    ///
+    /// S4 B15-④：toss 已 current（空中抓回）→ 重发 `Play` 重挂播放器覆盖态——
+    /// 播放器侧可能已因上一次 Stop 回落轮播，拖拽演出须持续跟手，故此处**重挂**。
+    /// （甩出路径 `release_drag` 不走本方法的重挂分支，见其内联裁定。）
+    fn ensure_toss_submitted(&mut self, now_ms: u64) -> Option<Arbitration> {
+        let toss_id = act_of(InteractionKind::DragStart);
+        if self.arbiter.current().is_some_and(|a| a.request.id == toss_id) {
+            self.emit_play(toss_id);
+            return None;
+        }
+        self.submit_toss(now_ms)
+    }
+
+    /// 甩出落地链提交（FR-4-6；[`THROW_LANDING_CHAIN`] 顺序 = ACT-T-07 → ACT-T-08）。
+    ///
+    /// 链首 07 走 `force_submit`（仅免 500ms 打断冷却；面对可打断的 toss 07 差 0
+    /// 优先级 → 排队 `Queued`）；链尾 08 常规 `submit` 依序入队。起播型仲裁结果
+    /// （current 空的退化路径）经 `settle_play` 下发覆盖态（B15-④）；入队型结果
+    /// 的出队起播由停播推进 / `Finished` 回报驱动。
+    ///
+    /// 返回链首的仲裁结果（`LogicOutcome::submitted` 槽位语义 = 单条，取链首）。
+    fn submit_throw_landing_chain(&mut self, now_ms: u64) -> Option<Arbitration> {
+        let head = self
+            .catalog
+            .find(THROW_LANDING_CHAIN[0])
+            .and_then(|cfg| ActionRequest::from_cfg(cfg, ActionSource::Interaction));
+        let head_result = head.map(|request| {
+            let verdict = self.arbiter.force_submit(request, now_ms);
+            self.settle_play(verdict.clone(), THROW_LANDING_CHAIN[0]);
+            verdict
+        });
+        if let Some(tail) = self
+            .catalog
+            .find(THROW_LANDING_CHAIN[1])
+            .and_then(|cfg| ActionRequest::from_cfg(cfg, ActionSource::Interaction))
+        {
+            let tail_result = self.arbiter.submit(tail, now_ms);
+            self.settle_play(tail_result.clone(), THROW_LANDING_CHAIN[1]);
+            eprintln!(
+                "[dp-app] core-loop 甩出落地链尾 {}：仲裁={tail_result:?}",
+                THROW_LANDING_CHAIN[1]
+            );
+        }
+        head_result
+    }
+
+    /// 甩出初速度钳制（FR-4-6：保证 `PhysicsEngine::thrown` 在 `THROW_MAX_FLIGHT_MS`
+    /// 内落地；dp-app 持有 monitors 几何，是唯一能算「最大可落高度」的层）。
+    ///
+    /// 闭式解推导（VDC y 向下，向上初速 v = −vel.y；g 取 `interaction_cfg` 单一真源
+    /// RV-18，非法回退默认——**本文件禁重力数值字面量**）：上升 t_up = v/g、上升高度
+    /// h_up = v²/(2g)；最坏落差 h = 虚拟桌面垂直跨度（`ports::vd_vertical_span`）。
+    /// 落地约束 t_up + √(2(h_up + h)/g) ≤ T_eff，两边平方整理得
+    /// `v ≤ g·T_eff/2 − h/T_eff`，其中 `T_eff = THROW_MAX_FLIGHT_MS − THROW_FLIGHT_MARGIN_MS`。
+    ///
+    /// 只钳向上分量：向下分量越大落地越快（physics 落地检测为「y ≥ 站立面顶」的
+    /// 钳制式判定 + x 已被 `vd_bounds_of` 收进工作区水平界 → 任意向下速度都有面可落）；
+    /// 水平分量由左右墙反弹兜住，不影响飞行时长。
+    fn clamp_throw_velocity(&self, vel: Vec2) -> Vec2 {
+        let g_raw = self.interaction_cfg.gravity_px_per_sec2;
+        let g = if g_raw.is_finite() && g_raw > 0.0 {
+            g_raw
+        } else {
+            InteractionCfg::default().gravity_px_per_sec2
+        };
+        let (top, bottom) = ports::vd_vertical_span(&self.monitors);
+        let h = if top.is_finite() && bottom.is_finite() && bottom > top {
+            bottom - top
+        } else {
+            0.0
+        };
+        let t_eff = (THROW_MAX_FLIGHT_MS.saturating_sub(THROW_FLIGHT_MARGIN_MS)) as f32 / 1000.0;
+        // 向上允许的最大初速（px/s）；几何退化时为 0（不放行任何向上分量，保守）。
+        let v_up_max = (g * t_eff / 2.0 - h / t_eff).max(0.0);
+        let vy = if vel.y < -v_up_max { -v_up_max } else { vel.y };
+        Vec2::new(vel.x, vy)
+    }
+
+    /// Drag 相光标钳制（x → 全工作区并集水平界，y → 虚拟桌面垂直跨度；FR-4-5）。
+    ///
+    /// 非有限输入（NaN / ±Inf，钩子层异常透传的防御）保持原位并落 C8 诊断日志；
+    /// 无显示器时钳制域退化为 (−∞, +∞)（`ports::vd_*` 已防御）→ 恒等。
+    fn clamp_drag_target(&self, cursor: Vec2) -> Vec2 {
+        if !cursor.x.is_finite() || !cursor.y.is_finite() {
+            eprintln!(
+                "[dp-app] core-loop 拖拽光标非有限坐标，保持原位：({},{})",
+                cursor.x, cursor.y
+            );
+            return self.pos;
+        }
+        let bounds = ports::vd_bounds_of(&self.monitors);
+        let (top, bottom) = ports::vd_vertical_span(&self.monitors);
+        Vec2::new(cursor.x.clamp(bounds.left, bounds.right), cursor.y.clamp(top, bottom))
+    }
+}
+
+/// 右键单击命中 → `pet://menu` 广播（S3-M6；core-loop logic 档内调用，失败降级）。
+///
+/// 坐标换算（RV-17 口径）：命中点屏幕物理 − 窗口物理左上，除以命中点所在屏
+/// DPI 因子 = 窗口内 CSS 坐标（[`bridge::menu_cmd`] 纯函数承载，单测覆盖）。
+/// 窗口矩形不可用时降级为窗口中心锚点 (128, 128)（前端 `clampMenuPlacement`
+/// 会钳回容器内，退化不越界弹出）。
+fn emit_menu_events(
+    app: &AppHandle,
+    pet: &PetPlatform,
+    hits: Vec<crate::interaction_consumer::RightClickHit>,
+) {
+    for hit in hits {
+        let cmd = match pet.window.window_physical_rect() {
+            Ok(rect) => {
+                let display = pet.platform.display();
+                // physical_to_vdc 产出平台 Vec2（monitor_at 直收，无需 ports 换算）。
+                let vdc = display.physical_to_vdc(hit.x, hit.y);
+                let scale = display.monitor_at(vdc).scale;
+                bridge::menu_cmd(rect.left, rect.top, scale, hit.x, hit.y)
+            }
+            Err(err) => {
+                eprintln!(
+                    "[dp-app] core-loop 菜单命中坐标换算降级（窗口矩形不可用：{err}）：使用中心锚点"
+                );
+                bridge::MenuCmd {
+                    screen_x: f64::from(hit.x),
+                    screen_y: f64::from(hit.y),
+                    local_x: 128.0,
+                    local_y: 128.0,
+                    ..bridge::MenuCmd::default()
+                }
+            }
+        };
+        if let Err(err) = app.emit(MENU_EVENT, &cmd) {
+            eprintln!("[dp-app] core-loop 广播 {MENU_EVENT} 降级：{err}");
+        }
+    }
+}
+
+/// 显示器几何是否变化（集合语义：id 集合 + 每屏几何 / 主屏标记）。
+#[must_use]
+fn monitors_changed(prev: &[MonitorGeomAlias], now: &[MonitorGeomAlias]) -> bool {    if prev.len() != now.len() {
+        return true;
+    }
+    prev.iter().any(|p| match now.iter().find(|n| n.id == p.id) {
+        None => true,
+        Some(n) => {
+            p.origin_vdc != n.origin_vdc
+                || p.size_vdc != n.size_vdc
+                || p.work_origin_vdc != n.work_origin_vdc
+                || p.work_size_vdc != n.work_size_vdc
+                || p.primary != n.primary
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 三档 deadline 绝对锚定网格（纯逻辑，可单测）
+// ---------------------------------------------------------------------------
+
+/// 本轮到期的档位集合。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TiersFired {
+    /// render 档是否到期。
+    pub render: bool,
+    /// logic 档是否到期。
+    pub logic: bool,
+    /// 业务档是否到期。
+    pub biz: bool,
+}
+
+/// 三档绝对锚定调度网格：每档 deadline 恒为 `start + k×间隔`，**禁止逐 tick 累加**。
+///
+/// `advance(now)` 一次推进所有已到期档（同一轮多档同时到期则全做）；若上层单次迟到超过
+/// 一个周期，`advance` 以固定间隔逐档追赶（deadline 链不因迟到而漂移，AC-11 / 提案要点 1）。
+#[derive(Clone, Copy, Debug)]
+pub struct ScheduleGrid {
+    render_interval_ms: u64,
+    logic_interval_ms: u64,
+    biz_interval_ms: u64,
+    next_render: u64,
+    next_logic: u64,
+    next_biz: u64,
+}
+
+impl ScheduleGrid {
+    /// 以锚定起点 `start_ms` 与三档间隔构造（各档首 deadline = `start + 间隔`）。
+    #[must_use]
+    pub fn new(
+        start_ms: u64,
+        render_interval_ms: u64,
+        logic_interval_ms: u64,
+        biz_interval_ms: u64,
+    ) -> Self {
+        let render = render_interval_ms.max(1);
+        let logic = logic_interval_ms.max(1);
+        let biz = biz_interval_ms.max(1);
+        Self {
+            render_interval_ms: render,
+            logic_interval_ms: logic,
+            biz_interval_ms: biz,
+            next_render: start_ms.saturating_add(render),
+            next_logic: start_ms.saturating_add(logic),
+            next_biz: start_ms.saturating_add(biz),
+        }
+    }
+
+    /// render 档下一 deadline（调试 / 单测视图）。
+    #[must_use]
+    pub const fn next_render(&self) -> u64 {
+        self.next_render
+    }
+
+    /// logic 档下一 deadline（调试 / 单测视图）。
+    #[must_use]
+    pub const fn next_logic(&self) -> u64 {
+        self.next_logic
+    }
+
+    /// 业务档下一 deadline（调试 / 单测视图）。
+    #[must_use]
+    pub const fn next_biz(&self) -> u64 {
+        self.next_biz
+    }
+
+    /// 当前 render 档间隔（毫秒）。
+    #[must_use]
+    pub const fn render_interval(&self) -> u64 {
+        self.render_interval_ms
+    }
+
+    /// 三档中最早的 deadline（供 `sleep_until`）。
+    #[must_use]
+    pub fn min_deadline(&self) -> u64 {
+        self.next_render.min(self.next_logic).min(self.next_biz)
+    }
+
+    /// 推进所有已到期档（绝对锚定：每次 `+= 固定间隔`，与实际触发时刻无关）。
+    pub fn advance(&mut self, now_ms: u64) -> TiersFired {
+        let mut fired = TiersFired::default();
+        while now_ms >= self.next_render {
+            fired.render = true;
+            let next = self.next_render.saturating_add(self.render_interval_ms);
+            if next == self.next_render {
+                break;
+            }
+            self.next_render = next;
+        }
+        while now_ms >= self.next_logic {
+            fired.logic = true;
+            let next = self.next_logic.saturating_add(self.logic_interval_ms);
+            if next == self.next_logic {
+                break;
+            }
+            self.next_logic = next;
+        }
+        while now_ms >= self.next_biz {
+            fired.biz = true;
+            let next = self.next_biz.saturating_add(self.biz_interval_ms);
+            if next == self.next_biz {
+                break;
+            }
+            self.next_biz = next;
+        }
+        fired
+    }
+
+    /// render 档间隔热切换（K-4 档位自适应）：变更即重锚 render 网格（相位重置，同 bridge 口径）。
+    pub fn set_render_interval(&mut self, interval_ms: u64, now_ms: u64) {
+        let interval = interval_ms.max(1);
+        if interval == self.render_interval_ms {
+            return;
+        }
+        self.render_interval_ms = interval;
+        self.next_render = now_ms.saturating_add(interval);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tauri 外壳：装配 + 三档 master loop + 感知采样线程
+// ---------------------------------------------------------------------------
+
+/// 启动 core-loop 执行体（`dp-core-loop` 线程）+ 感知采样线程（`dp-perception`）。
+///
+/// 口径同 `supervisor::spawn`：**故意不标 `#[must_use]`**，线程启动失败降级空句柄、
+/// 不 panic 主线程。`bus` / `hit` / `sink` 为跨线程共享端口：`PerceptionBus` 单生产者
+/// 语义、`HitLatestHandle` 无锁三态读（S3-M2，写侧 = 本层 render 档 + bridge 播放器）、
+/// `ChannelSink` 钩子事件队列（S3-M3 本层为唯一消费端）。
+pub fn spawn(
+    app: AppHandle,
+    bus: Arc<PerceptionBus<PerceptionEvent>>,
+    hit: HitLatestHandle,
+    sink: Arc<ChannelSink>,
+) -> JoinHandle<()> {
+    let Some(mut state) = build_state(&app) else {
+        eprintln!("[dp-app] core-loop 未装配（平台状态不可用），降级空循环");
+        return empty_handle();
+    };
+    // S4 前清障 B15-④：播放指令通道（装配点 lib.rs 须先 manage；未注册 → 不接，
+    // 发播方法全部 no-op，行为与 S3 完全一致）。
+    if let Some(channel) = app.try_state::<PlaybackChannel>().map(|c| (*c).clone()) {
+        state.attach_playback(channel);
+        eprintln!("[dp-app] core-loop 播放指令通道已接入（出队起播/停播/链推进）");
+    }
+    // 感知采样线程（单线程三档分档；`offer` 单一生产者语义，不得多线程 offer）。
+    let _perception = spawn_perception(app.clone(), Arc::clone(&bus));
+
+    // S3-M3：手势消费端（队列 drain → 手势机 → 意图日志+计数；仅本线程驱动）。
+    let consumer = InteractionConsumer::new(sink, state.gesture_cfg());
+
+    let builder = std::thread::Builder::new().name("dp-core-loop".to_string());
+    match builder.spawn(move || run_loop(app, state, bus, hit, consumer)) {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!("[dp-app] core-loop 线程启动失败，降级为空循环：{err}");
+            empty_handle()
+        }
+    }
+}
+
+/// 线程启动失败的降级句柄（立即结束的空线程；同 `supervisor::spawn` 口径）。
+fn empty_handle() -> JoinHandle<()> {
+    std::thread::spawn(|| {})
+}
+
+/// 从 `app` 状态 + 配置装核心状态（读窗口/显示器取初始 `pos`）。
+fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
+    let pet = app.try_state::<PetPlatform>()?;
+    let display = pet.platform.display();
+    let (roam_cfg, interaction_cfg, catalog, emotion, needs) = load_config(app);
+    let monitors = ports::to_monitor_geoms(display.monitors());
+    let pos = initial_pos(&pet.window, &display, &monitors);
+    // 播种：非节拍（C3 三段口径——PRNG 种子非业务时间，从墙钟端口取毫秒摘取）。
+    let seed = SystemWallClock.now_ms() as u64;
+    let cfg = CoreCfg { roam_cfg, interaction_cfg, catalog, emotion, needs };
+    Some(CoreLoopState::new(pos, monitors, cfg, seed, 0))
+}
+
+/// 初始 `pos`：窗口物理矩形中心 → VDC（RV-17）；失败退回主屏工作区中心。
+fn initial_pos(
+    window: &WinPlatformWindow,
+    display: &DisplayService,
+    monitors: &[MonitorGeomAlias],
+) -> Vec2 {
+    if let Ok(rect) = window.window_physical_rect() {
+        let c = rect.center();
+        let vdc =
+            ports::to_core_vec2(display.physical_to_vdc(c.x.round() as i32, c.y.round() as i32));
+        if vdc.x.is_finite() && vdc.y.is_finite() {
+            return vdc;
+        }
+    }
+    monitors
+        .iter()
+        .find(|m| m.primary)
+        .or_else(|| monitors.first())
+        .map_or(Vec2::ZERO, |m| m.work_center())
+}
+
+/// 加载配置（`RoamCfg` / `InteractionCfg` / `ActionCatalog` / `EmotionConfig` / `NeedsConfig`）；
+/// 失败降级内置默认（C1 无盘符字面量）。
+///
+/// S4-M1 起扩至五元组：情绪内核需要 `emotion.json`（档位阈值 / 确认期 / 惯性 / 离线）
+/// 与 `needs.json`（需求维度上下界），二者均按值交出、由 `CoreLoopState` 固化。
+fn load_config(
+    app: &AppHandle,
+) -> (RoamCfg, InteractionCfg, ActionCatalog, EmotionConfig, NeedsConfig) {
+    if let Some(dir) = resolve_config_dir(app) {
+        match ConfigService::load_all(&dir) {
+            Ok((bundle, warnings)) => {
+                if !warnings.is_empty() {
+                    eprintln!("[dp-app] core-loop 配置加载告警 {} 条：{:?}", warnings.len(), warnings);
+                }
+                return (
+                    bundle.settings.roam.clone(),
+                    bundle.settings.interaction.clone(),
+                    ActionCatalog::from_config(&bundle.actions),
+                    bundle.emotion.clone(),
+                    bundle.needs.clone(),
+                );
+            }
+            Err(err) => eprintln!("[dp-app] core-loop 配置加载降级：{err}"),
+        }
+    } else {
+        eprintln!("[dp-app] core-loop 未发现配置目录，使用内置默认");
+    }
+    (
+        RoamCfg::default(),
+        InteractionCfg::default(),
+        ActionCatalog::default(),
+        EmotionConfig::default(),
+        NeedsConfig::default(),
+    )
+}
+
+/// 解析配置目录（`<resource_dir>/resources/config`；dev 兜底工程根相对路径，C1 无盘符字面量）。
+fn resolve_config_dir(app: &AppHandle) -> Option<PathBuf> {
+    let root = app.path().resource_dir().ok()?;
+    let candidates = [
+        root.join("resources").join("config"),
+        root.join("config"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../resources/config"),
+    ];
+    candidates.into_iter().find(|c| c.join("actions.json").is_file())
+}
+
+/// core-loop 循环体：三档 deadline 合并 `sleep_until(min)`，到期档依次全做（单线程 Actor 单写者）。
+fn run_loop(
+    app: AppHandle,
+    mut state: CoreLoopState,
+    bus: Arc<PerceptionBus<PerceptionEvent>>,
+    hit: HitLatestHandle,
+    consumer: InteractionConsumer,
+) {
+    // 墙钟端口（仅业务 1Hz 档使用；不进节拍，C3）。
+    let wall: Arc<dyn WallClock> = Arc::new(SystemWallClock);
+    let start = Instant::now();
+    let mut grid =
+        ScheduleGrid::new(0, RENDER_DEFAULT_INTERVAL_MS, LOGIC_INTERVAL_MS, BIZ_INTERVAL_MS);
+    let mut seen_render = false;
+    let mut seen_logic = false;
+    let mut seen_biz = false;
+    // B17-②（2026-09-13）：启动首拍锚定位是否已写入窗口（loop 外局部，写成功才置位）。
+    let mut anchored_written = false;
+
+    eprintln!(
+        "[dp-app] core-loop 启动：render={RENDER_DEFAULT_INTERVAL_MS}ms logic={LOGIC_INTERVAL_MS}ms biz={BIZ_INTERVAL_MS}ms"
+    );
+
+    loop {
+        sleep_until(start, grid.min_deadline());
+        let now = start.elapsed().as_millis() as u64;
+        let fired = grid.advance(now);
+
+        if fired.logic {
+            if !seen_logic {
+                seen_logic = true;
+                eprintln!("[dp-app] core-loop logic 档起跳：interval={LOGIC_INTERVAL_MS}ms");
+            }
+            // S3-M3/M4：手势消费（drain 钩子队列 → 手势机 → 意图收集）。
+            // 纯队列消费，不依赖 pet 状态（独立于下方窗口写者；20Hz 节拍内微秒级）。
+            let intents = consumer.drain_collect(now).1;
+            if let Some(pet) = app.try_state::<PetPlatform>() {
+                let display = pet.platform.display();
+                state.apply_monitors(ports::to_monitor_geoms(display.monitors()), now);
+
+                // drain 感知积压（20Hz 光标 / 0.5Hz 窗口 / 0.1Hz 系统）。
+                let mut evs = Vec::new();
+                bus.drain(&mut evs);
+                state.apply_perception(evs);
+
+                // S3-M4 Drag 相跟手：begin_drag 定锚后逐 tick 以最新感知光标跟随
+                // （钳制统一在 logic_tick Drag 臂完成，此处只注入原始采样）。
+                if state.phase() == Phase::Drag {
+                    if let Some(cur) = state.cursor() {
+                        state.drag_to(cur);
+                    }
+                }
+
+                // S3-M4 意图接线（感知光标已就位、钳制几何已刷新；DragStart / Throw
+                // 之外的意图在 drain_collect 内仍只日志+计数，不投仲裁器）。
+                for intent in &intents {
+                    match intent.kind {
+                        InteractionKind::DragStart => {
+                            let cursor = state.cursor().unwrap_or(state.pos());
+                            let sub = state.begin_drag(cursor, now);
+                            eprintln!("[dp-app] core-loop DragStart → 拖拽相；toss 仲裁={sub:?}");
+                        }
+                        InteractionKind::Throw => {
+                            // 初速度口径桥（C6/RV-17）：手势轨迹在物理像素域，甩出按
+                            // 释放点所在屏 DPI 因子除算回 VDC（monitor_at 永不失败）。
+                            let scale =
+                                display.monitor_at(ports::to_platform_vec2(state.pos())).scale;
+                            let vel = ports::scale_velocity(intent.vel_px_per_sec, scale);
+                            let sub = state.release_drag(Some(vel), now);
+                            eprintln!("[dp-app] core-loop Throw → 甩出起飞；toss 补提交仲裁={sub:?}");
+                        }
+                        _ => {}
+                    }
+                }
+
+                // S3-M6 触发映射：意图 → 粒子迸发（`pet://fx`，C8 已登记；广播失败降级日志）。
+                let click_feedback = state.click_feedback_cfg();
+                for intent in &intents {
+                    if let Some(cmd) = fx_burst_for_intent(intent.kind, &click_feedback) {
+                        if let Err(err) = app.emit(FX_EVENT, &cmd) {
+                            eprintln!("[dp-app] core-loop 广播 {FX_EVENT} 降级：{err}");
+                        }
+                    }
+                }
+                // S3-M6 右键单击命中 → `pet://menu`（Up 触发；屏幕坐标 + 窗口内 CSS 坐标）。
+                emit_menu_events(&app, &pet, consumer.take_menu_clicks());
+
+                // S4 前清障 B15-④：播放回报排空（Finished 匹配 current → 链尾推进
+                // → 出队起播 `Play` 下发覆盖态；每 logic tick 至多排空一次）。
+                state.drain_finished(now);
+
+                let outcome = state.logic_tick(now);
+                // B17-②（2026-09-13）启动首拍：引擎构造即已钳制到工作区底边，但
+                // `moved=false` 不写窗口，窗口停在 tauri.conf 初始 (120,120)，首次漫游
+                // 才跳到位。首拍无视 `moved` 强制写一次锚定位，消除启动瞬移观感；
+                // 写失败不置位，下个 logic tick 自然重试。
+                if outcome.moved || !anchored_written {
+                    // 2026-09-13 现场修复（锚点→窗口顶部换算）：`outcome.pos` 为脚底
+                    // 锚点（`dp-core` 站立语义 = 工作区底边），窗口顶部 = 锚点 − 窗口
+                    // 物理高 ÷ 所在屏 scale（VDC 域）。修复前以脚底直写窗口顶，窗口
+                    // 垂直溢出屏外（B17-①，实测溢出 208px）。
+                    let scale = display.monitor_at(ports::to_platform_vec2(outcome.pos)).scale;
+                    let mut top = outcome.pos;
+                    top.y -= PET_WINDOW_PHYS_H / scale;
+                    match pet.window.set_position_vdc(ports::to_platform_vec2(top)) {
+                        Ok(()) => anchored_written = true,
+                        Err(err) => eprintln!("[dp-app] core-loop 写窗口位置降级：{err}"),
+                    }
+                }
+                if outcome.landed_thrown {
+                    // 甩出落地 → 尘土迸发（挂落地链起点；表现档数量，钳上限同源）。
+                    let cmd = bridge::particle_cmd(ParticleKind::Dust, FX_DUST_BURST_COUNT);
+                    if let Err(err) = app.emit(FX_EVENT, &cmd) {
+                        eprintln!("[dp-app] core-loop 广播 {FX_EVENT} 降级：{err}");
+                    }
+                }
+                if let Some(started) = state.poll_arbiter(now) {
+                    eprintln!(
+                        "[dp-app] core-loop 仲裁起播：{} fade={}ms（动作真播属后续 §6-8）",
+                        started.request.id, started.fade_ms
+                    );
+                }
+            }
+        }
+
+        if fired.render {
+            if !seen_render {
+                seen_render = true;
+                eprintln!(
+                    "[dp-app] core-loop render 档起跳：interval={}ms（不产帧，帧归 bridge）",
+                    grid.render_interval()
+                );
+            }
+            // K-4 档位自适应：按 bridge 帧播放器档位调整 render 网格（无档位槽 → 兜底）。
+            let interval = app
+                .try_state::<crate::bridge::FrameTierHandle>()
+                .map_or(RENDER_DEFAULT_INTERVAL_MS, |t| {
+                    1_000 / u64::from(t.get().fps()).max(1)
+                });
+            grid.set_render_interval(interval, now);
+            // 刷新 bbox（物理像素；S3-M2 起经 HIT_LATEST 句柄委托写入——唯一矩形
+            // 真源仍是 ports::PetBBoxHandle，钩子三态读点零感知）。
+            if let Some(pet) = app.try_state::<PetPlatform>() {
+                if let Ok(rect) = pet.window.window_physical_rect() {
+                    hit.store_bbox(rect.left, rect.top, rect.right, rect.bottom);
+                }
+            }
+        }
+
+        if fired.biz {
+            if !seen_biz {
+                seen_biz = true;
+                eprintln!(
+                    "[dp-app] core-loop 业务档起跳：interval={BIZ_INTERVAL_MS}ms（S4-M1 情绪内核已接线；S4-M2 事件总线已接通）"
+                );
+            }
+            // S4-M2：传入 `app` 作为传输层句柄（`pet://state` 1Hz / `pet://emotion`
+            // 变更时）；事件名与载荷生产在 `dp-core::event`（C8 单一真源）。
+            state.business_tick(wall.as_ref(), Some(&app));
+        }
+    }
+}
+
+/// 启动感知采样线程（同线程内三档 deadline 分档，各档 `bus.offer(...)`）。
+fn spawn_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) -> JoinHandle<()> {
+    let builder = std::thread::Builder::new().name("dp-perception".to_string());
+    match builder.spawn(move || run_perception(app, bus)) {
+        Ok(handle) => handle,
+        Err(err) => {
+            eprintln!("[dp-app] 感知线程启动失败，降级为空采样：{err}");
+            empty_handle()
+        }
+    }
+}
+
+/// 感知循环体：单线程三档 deadline 分档（**不得多线程 offer**，保 `PerceptionBus` 单生产者语义）。
+fn run_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) {
+    let start = Instant::now();
+    let mut next_cursor = 0u64;
+    let mut next_windows = 0u64;
+    let mut next_system = 0u64;
+    let mut cpu = CpuLoadSampler::new();
+
+    loop {
+        let target = next_cursor.min(next_windows).min(next_system);
+        sleep_until(start, target);
+
+        let Some(pet) = app.try_state::<PetPlatform>() else {
+            // 平台尚未装配（启动竞态）：短暂让出后重试，绝不 panic。
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        };
+        let display = pet.platform.display();
+        let now = start.elapsed().as_millis() as u64;
+
+        if now >= next_cursor {
+            next_cursor = advance_deadline(next_cursor, now, CURSOR_INTERVAL_MS);
+            if let Some(pos) = read_cursor_vdc(&display) {
+                bus.offer(PerceptionEvent::Cursor { pos: ports::to_core_vec2(pos) });
+            }
+        }
+        if now >= next_windows {
+            next_windows = advance_deadline(next_windows, now, WINDOWS_INTERVAL_MS);
+            let (titlebars, taskbars) = ports::enumerate_window_bands(&display);
+            bus.offer(PerceptionEvent::Windows { titlebars, taskbars });
+        }
+        if now >= next_system {
+            next_system = advance_deadline(next_system, now, SYSTEM_INTERVAL_MS);
+            let sample = SystemSample {
+                battery: battery_status().map(ports::to_core_battery),
+                cpu_load: cpu.sample(),
+                presence_idle_ms: last_input_idle_ms(),
+            };
+            bus.offer(PerceptionEvent::System(sample));
+        }
+    }
+}
+
+/// 推进单个绝对锚定 deadline 至首个 `> now` 的时刻（`+= 间隔`，过冲不累积）。
+fn advance_deadline(mut next: u64, now: u64, interval_ms: u64) -> u64 {
+    let interval = interval_ms.max(1);
+    while now >= next {
+        let bumped = next.saturating_add(interval);
+        if bumped == next {
+            break;
+        }
+        next = bumped;
+    }
+    next
+}
+
+/// 睡到 `start + target_ms` 的绝对锚定 deadline（越过则不补偿、不忙等；同 supervisor 策略）。
+fn sleep_until(start: Instant, target_ms: u64) {
+    let target = start + Duration::from_millis(target_ms);
+    if let Some(remaining) = target.checked_duration_since(Instant::now()) {
+        std::thread::sleep(remaining);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 纯逻辑单测（不依赖窗口）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dp_core::config::ActionCfg;
+    use dp_core::motion::{MonitorGeom, SplitMix64};
+    use dp_core::perception::FakeWallClock;
+
+    /// 主屏：VDC (0,0) 1920×1080，工作区底边 1040。
+    fn mon_a() -> MonitorGeom {
+        MonitorGeom {
+            id: 1,
+            origin_vdc: Vec2::new(0.0, 0.0),
+            size_vdc: Vec2::new(1920.0, 1080.0),
+            work_origin_vdc: Vec2::new(0.0, 0.0),
+            work_size_vdc: Vec2::new(1920.0, 1040.0),
+            primary: true,
+        }
+    }
+
+    /// 更低的屏（工作区底边 2000，用于构造「原站立面消失」的下坠场景）。
+    fn mon_low() -> MonitorGeom {
+        MonitorGeom {
+            id: 1,
+            origin_vdc: Vec2::new(0.0, 0.0),
+            size_vdc: Vec2::new(1920.0, 2400.0),
+            work_origin_vdc: Vec2::new(0.0, 0.0),
+            work_size_vdc: Vec2::new(1920.0, 2000.0),
+            primary: true,
+        }
+    }
+
+    /// ACT-M-06 启用目录（落地缓冲；priority 6，`resources/config/actions.json` 口径）。
+    fn landing_catalog() -> ActionCatalog {
+        ActionCatalog::from_actions(vec![ActionCfg {
+            id: "ACT-M-06".to_string(),
+            name: "落地缓冲".to_string(),
+            category: "move".to_string(),
+            priority: 6,
+            interruptible: false,
+            looping: false,
+            fps: 15,
+            fade_ms: 200,
+            disabled: false,
+            ..ActionCfg::default()
+        }])
+    }
+
+    /// S3-M4 拖拽/甩出目录（ACT-M-06 + ACT-T-06/07/08；元数据逐字段对齐
+    /// `resources/config/actions.json`，含 looping / loopRange / minInterruptPriority）。
+    fn toss_catalog() -> ActionCatalog {
+        ActionCatalog::from_actions(vec![
+            ActionCfg {
+                id: "ACT-M-06".to_string(),
+                name: "落地缓冲".to_string(),
+                category: "move".to_string(),
+                priority: 6,
+                interruptible: false,
+                looping: false,
+                fps: 15,
+                fade_ms: 200,
+                disabled: false,
+                ..ActionCfg::default()
+            },
+            ActionCfg {
+                id: "ACT-T-06".to_string(),
+                name: "抛物线翻滚".to_string(),
+                category: "interact".to_string(),
+                priority: 7,
+                interruptible: true,
+                min_interrupt_priority: 9,
+                looping: true,
+                loop_range: Some([0, 7]),
+                fps: 18,
+                fade_ms: 200,
+                disabled: false,
+                ..ActionCfg::default()
+            },
+            ActionCfg {
+                id: "ACT-T-07".to_string(),
+                name: "摔倒打滚".to_string(),
+                category: "interact".to_string(),
+                priority: 7,
+                interruptible: false,
+                min_interrupt_priority: 0,
+                looping: false,
+                fps: 12,
+                fade_ms: 200,
+                disabled: false,
+                ..ActionCfg::default()
+            },
+            ActionCfg {
+                id: "ACT-T-08".to_string(),
+                name: "抗议跺脚".to_string(),
+                category: "interact".to_string(),
+                priority: 6,
+                interruptible: false,
+                min_interrupt_priority: 0,
+                looping: false,
+                fps: 10,
+                fade_ms: 200,
+                disabled: false,
+                ..ActionCfg::default()
+            },
+        ])
+    }
+
+    fn roam_cfg() -> RoamCfg {
+        RoamCfg {
+            pace: 1.0,
+            decision_interval_sec: [5, 30],
+            cursor_avoid_radius_px: 150,
+            walk_speed_px_per_sec: 60.0,
+        }
+    }
+
+    /// S4-M1 装配夹具：除动作目录外的配置一律取内置默认（数值口径 = `emotion.json` v2
+    /// 冻结值 / `settings.json` 默认）。
+    fn core_cfg(catalog: ActionCatalog) -> CoreCfg {
+        CoreCfg {
+            roam_cfg: roam_cfg(),
+            interaction_cfg: InteractionCfg::default(),
+            catalog,
+            emotion: EmotionConfig::default(),
+            needs: NeedsConfig::default(),
+        }
+    }
+
+    // -- ScheduleGrid：三档绝对锚定无漂移（第 k 次 deadline = start + k×间隔） ------
+
+    #[test]
+    fn schedule_grid_deadlines_absolutely_anchored_no_drift() {
+        let mut g = ScheduleGrid::new(0, 16, 50, 1_000);
+        assert_eq!(g.next_logic(), 50, "首个 logic deadline = start + 1×50");
+        // 每轮迟到 30ms 触发（overshoot < 间隔，每轮恰推进一档）。
+        for k in 1..=10u64 {
+            let fired = g.advance(k * 50 + 30);
+            assert!(fired.logic, "第 {k} 轮 logic 应到期");
+        }
+        // 绝对锚定：过冲不累积；若按「实际触发时刻 + 间隔」累加将漂移到 830。
+        assert_eq!(g.next_logic(), 550, "第 11 次 deadline = start + 11×50");
+
+        // 业务档 1s：now=1030 时恰推进一档 → 下一 deadline = 0 + 2×1000。
+        let mut g2 = ScheduleGrid::new(0, 16, 50, 1_000);
+        let fired = g2.advance(1_030);
+        assert!(fired.logic && fired.biz, "1030ms 时 logic 与业务档同时到期");
+        assert_eq!(g2.next_biz(), 2_000, "业务档绝对锚定 = start + 2×1000");
+    }
+
+    #[test]
+    fn schedule_grid_overshoot_catches_up_and_stays_anchored() {
+        let mut g = ScheduleGrid::new(0, 16, 50, 1_000);
+        // 迟到整 3 个周期（now=150）：一次 advance 以固定间隔逐档追赶至首个 `> now` 的 deadline。
+        let fired = g.advance(150);
+        assert!(fired.logic);
+        assert_eq!(g.next_logic(), 200, "追赶后 deadline 仍为 start + k×50（过冲不漂移）");
+        // 已追平：同一 now 再次 advance 不重复触发（deadline 均已超前）。
+        let fired = g.advance(150);
+        assert!(!fired.logic, "已追平，同一 now 不重复触发");
+    }
+
+    #[test]
+    fn schedule_grid_render_interval_rescale_reanchors() {
+        let mut g = ScheduleGrid::new(0, 16, 50, 1_000);
+        g.set_render_interval(500, 1_000);
+        assert_eq!(g.next_render(), 1_500, "重锚：now + 新间隔");
+        assert_eq!(g.render_interval(), 500);
+        // 同值不重锚。
+        g.set_render_interval(500, 9_999);
+        assert_eq!(g.next_render(), 1_500, "间隔不变不重锚");
+    }
+
+    // -- 相机器：Roam→Fall（非法站立面）→ Fall→Roam（Landed + ACT-M-06 submit）------
+
+    #[test]
+    fn phase_machine_roams_falls_then_lands_and_submits_landing_action() {
+        // 空显示器：无任何站立面 → 首 logic tick 即 Roam→Fall（注入式冒烟，§6-7 可达性注）。
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 500.0),
+            Vec::new(),
+            core_cfg(landing_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.phase(), Phase::Roam);
+
+        let out = state.logic_tick(50);
+        assert_eq!(state.phase(), Phase::Fall, "非法站立面 → 换相 Fall");
+        assert!(out.submitted.is_none(), "起坠不提交动作");
+
+        // 持续下坠若干 tick（无站立面，永不落地）。
+        for k in 1..=20u64 {
+            let out = state.logic_tick(50 + k * 50);
+            assert!(out.submitted.is_none(), "下坠中不提交动作");
+        }
+        assert!(state.pos().y > 500.0, "下坠位置显著下移：{}", state.pos().y);
+
+        // 站立面重现（更低的地板 y=2000）→ 继续下坠至落地 → Landed → 换相 Roam + submit。
+        state.apply_monitors(vec![mon_low()], 1_100);
+        let mut landed = None;
+        for k in 0..300u64 {
+            let out = state.logic_tick(1_150 + k * 50);
+            if out.submitted.is_some() {
+                landed = out.submitted;
+                break;
+            }
+        }
+        assert_eq!(state.phase(), Phase::Roam, "Landed 后换相回 Roam");
+        assert_eq!(
+            landed,
+            Some(Arbitration::Play),
+            "Landed → 空仲裁器首次 submit(ACT-M-06) 命中 Play"
+        );
+    }
+
+    #[test]
+    fn stable_floor_does_not_fall_and_pos_holds() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(landing_catalog()),
+            7,
+            0,
+            );
+        // 短时间内不触发漫游决策（间隔 5~30s）；位置保持，不换相。
+        let out = state.logic_tick(50);
+        assert_eq!(state.phase(), Phase::Roam);
+        assert!(!out.moved, "决策未到期，pos 不变");
+        assert!(out.submitted.is_none());
+        assert!((state.pos().y - 1040.0).abs() < 1e-3);
+    }
+
+    // -- seed_k 递推：两次重建产生不同种子 / 不同漫游随机序列 ----------------------
+
+    #[test]
+    fn seed_recursion_yields_distinct_seeds_and_sequences() {
+        let s0 = 42u64;
+        let s1 = advance_seed(s0, 1_000);
+        let s2 = advance_seed(s1, 2_000);
+        assert_ne!(s1, s0);
+        assert_ne!(s2, s1, "递推两次应得不同种子（避免同种子重复漫游）");
+        let mut a = SplitMix64::new(s1);
+        let mut b = SplitMix64::new(s2);
+        assert_ne!(a.next_u64(), b.next_u64(), "不同种子 → 不同漫游随机序列");
+    }
+
+    // -- 显示器拓扑变化检测 ------------------------------------------------------
+
+    #[test]
+    fn monitors_changed_detects_add_remove_and_geometry() {
+        assert!(!monitors_changed(&[mon_a()], &[mon_a()]), "同几何无变化");
+        assert!(monitors_changed(&[mon_a()], &[]), "删屏");
+        assert!(monitors_changed(&[mon_a()], &[mon_a(), mon_low()]), "增屏");
+        assert!(monitors_changed(&[mon_a()], &[mon_low()]), "同 id 几何变化");
+    }
+
+    // -- S3-M4：拖拽相（begin_drag / drag_to / release_drag）与甩出物理 ------------
+
+    #[test]
+    fn begin_drag_enters_drag_tracks_cursor_and_submits_toss() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        // 首次进入：Drag 相 + 权威 pos 即钳制后光标 + toss Play。
+        assert_eq!(
+            state.begin_drag(Vec2::new(1000.0, 500.0), 50),
+            Some(Arbitration::Play),
+            "空仲裁器首次提交 toss → Play"
+        );
+        assert_eq!(state.phase(), Phase::Drag);
+        assert_eq!(state.pos(), Vec2::new(1000.0, 500.0));
+        // 幂等：已在 Drag 相只跟手，不重复提交。
+        assert_eq!(state.begin_drag(Vec2::new(1100.0, 600.0), 100), None, "幂等返回 None");
+        assert_eq!(state.pos(), Vec2::new(1100.0, 600.0));
+        // drag_to 暂存 + logic_tick Drag 臂刷新权威 pos（跟手闭环）。
+        state.drag_to(Vec2::new(1200.0, 300.0));
+        let out = state.logic_tick(150);
+        assert_eq!(state.pos(), Vec2::new(1200.0, 300.0), "Drag 相 pos = 钳制后光标位");
+        assert_eq!(out.pos, state.pos());
+        assert!(out.moved);
+        assert!(out.submitted.is_none(), "Drag 相无 MotionEvent → 无仲裁接线");
+    }
+
+    #[test]
+    fn drag_target_clamps_to_virtual_desktop_bounds() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        // 右 / 下越界 → 钳到工作区并集右下角（mon_a：1920, 1040）。
+        state.drag_to(Vec2::new(99_999.0, 99_999.0));
+        state.logic_tick(100);
+        assert_eq!(state.pos(), Vec2::new(1920.0, 1040.0), "右下越界钳到并集右下角");
+        // 左 / 上越界 → 钳到并集左上角。
+        state.drag_to(Vec2::new(-9.0, -9.0));
+        state.logic_tick(150);
+        assert_eq!(state.pos(), Vec2::new(0.0, 0.0), "左上越界钳到并集左上角");
+    }
+
+    #[test]
+    fn release_none_on_valid_stand_reenters_roam_without_action() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 1040.0), 50), Some(Arbitration::Play));
+        // 落点即合法站立面（地板）→ 直接回 Roam，无落地演出。
+        assert_eq!(state.release_drag(None, 100), None, "纯松手无仲裁产出");
+        assert_eq!(state.phase(), Phase::Roam);
+        assert!(!state.thrown_flight());
+        assert!(state.arbiter.queue_snapshot().is_empty(), "无落地演出 → 队列空");
+    }
+
+    #[test]
+    fn release_none_offscreen_falls_naturally_and_lands_with_motion_action() {
+        // 仅落地缓冲目录（无 toss）：隔离「自然下坠 ≠ 甩出」的结算路径。
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(landing_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), None, "目录缺 toss → 降级 None");
+        assert_eq!(state.phase(), Phase::Drag);
+        assert_eq!(state.release_drag(None, 100), None);
+        assert_eq!(state.phase(), Phase::Fall, "悬空松手 → 自然下坠");
+        assert!(!state.thrown_flight(), "自然下坠非甩出飞行");
+        let mut submitted = None;
+        for k in 1..=40u64 {
+            let out = state.logic_tick(100 + k * 50);
+            if out.submitted.is_some() {
+                submitted = out.submitted;
+                break;
+            }
+        }
+        assert_eq!(state.phase(), Phase::Roam);
+        assert_eq!(submitted, Some(Arbitration::Play), "自然落地 → ACT-M-06 Play");
+        assert_eq!(state.throw_landed_count(), 0, "非甩出落地不计数");
+    }
+
+    #[test]
+    fn throw_from_screen_top_lands_within_1500ms_with_landing_chain() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        // 最坏起点 = 屏顶：向上初速远超预算 → 被闭式解钳制，仍必须 1.5s 内落地。
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 0.0), 1_000), Some(Arbitration::Play));
+        assert_eq!(
+            state.release_drag(Some(Vec2::new(300.0, -100_000.0)), 1_000),
+            None,
+            "toss 已在播 → 无补提交"
+        );
+        assert_eq!(state.phase(), Phase::Fall);
+        assert!(state.thrown_flight());
+        let mut landed_at = None;
+        let mut submitted = None;
+        for k in 1..=60u64 {
+            let out = state.logic_tick(1_000 + k * 50);
+            if out.submitted.is_some() {
+                landed_at = Some(1_000 + k * 50);
+                submitted = out.submitted;
+                break;
+            }
+        }
+        let land = landed_at.expect("1.5s 预算内应落地");
+        assert!(land - 1_000 <= 1_500, "FR-4-6：实测飞行+tick 粒度 {}ms", land - 1_000);
+        assert_eq!(state.phase(), Phase::Roam);
+        assert!(!state.thrown_flight());
+        assert_eq!(state.throw_landed_count(), 1, "甩出落地计数 +1");
+        // 链首 07：force_submit 面对 toss（p7 可打断）差 0 → 排队 pos=1（1 基）。
+        // S4 B15-④：链提交后停播推进 toss 出局、07 fade 0 起播成 current →
+        // 队列快照仅剩链尾 08（07 播毕由 Finished 回报起播 08）。
+        assert_eq!(submitted, Some(Arbitration::Queued { pos: 1 }));
+        let ids: Vec<&str> =
+            state.arbiter.queue_snapshot().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ACT-T-08"], "链尾 08 依序在队（07 已起播为 current）");
+    }
+
+    #[test]
+    fn thrown_flight_follows_parabolic_direction() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(300.0, 500.0), 50), Some(Arbitration::Play));
+        // 右上抛（vx=500、vy=−400：未达闭式解上限，不被钳）。
+        assert_eq!(state.release_drag(Some(Vec2::new(500.0, -400.0)), 100), None);
+        let mut min_y = f32::MAX;
+        let mut last_x = 300.0f32;
+        let mut landed = false;
+        for k in 1..=60u64 {
+            let out = state.logic_tick(100 + k * 50);
+            min_y = min_y.min(out.pos.y);
+            last_x = out.pos.x;
+            if out.submitted.is_some() {
+                landed = true;
+                break;
+            }
+        }
+        assert!(landed, "应落地");
+        assert!(min_y < 490.0, "向上初速应先升（实测 min_y={min_y}）");
+        assert!(last_x > 300.0, "向右初速应净右移（实测 x={last_x}）");
+        assert_eq!(state.throw_landed_count(), 1);
+    }
+
+    #[test]
+    fn throw_intent_without_drag_takes_off_directly() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        // 同批互斥序 Throw 先于 DragStart 的竞态：Drag 相缺席 → 以当前权威位起飞 + 补提交 toss。
+        assert_eq!(
+            state.release_drag(Some(Vec2::new(0.0, -800.0)), 1_000),
+            Some(Arbitration::Play),
+            "current 空 → 补提交 toss 命中 Play"
+        );
+        assert_eq!(state.phase(), Phase::Fall);
+        assert!(state.thrown_flight());
+        let mut submitted = None;
+        for k in 1..=60u64 {
+            let out = state.logic_tick(1_000 + k * 50);
+            if out.submitted.is_some() {
+                submitted = out.submitted;
+                break;
+            }
+        }
+        assert_eq!(state.throw_landed_count(), 1);
+        // S4 B15-④：停播推进后队列仅剩链尾 08（07 已出队起播为 current）。
+        let ids: Vec<&str> =
+            state.arbiter.queue_snapshot().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ACT-T-08"], "补提交 toss 在播 → 落地链提交后 08 在队");
+        assert_eq!(submitted, Some(Arbitration::Queued { pos: 1 }));
+    }
+
+    #[test]
+    fn clamp_throw_velocity_caps_upward_vy_to_closed_form_budget() {
+        let state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        // 闭式解期望值：重力取 cfg 单一真源（RV-18，禁字面量）；h 取夹具几何跨度。
+        let g = InteractionCfg::default().gravity_px_per_sec2;
+        let m = mon_a();
+        let h = m.work_bottom_vdc() - m.work_origin_vdc.y;
+        let t_eff = ((THROW_MAX_FLIGHT_MS - THROW_FLIGHT_MARGIN_MS) as f32) / 1000.0;
+        let expected = (g * t_eff / 2.0 - h / t_eff).max(0.0);
+        // 超预算向上速度 → 钳到闭式解。
+        let clamped = state.clamp_throw_velocity(Vec2::new(0.0, -100_000.0));
+        assert!(
+            (clamped.y + expected).abs() < 1e-2,
+            "向上 vy 应钳到闭式解 {expected}（实测 {}）",
+            clamped.y
+        );
+        // 单子步位移对照：钳后 |vy|×10ms ≤ 预算 ×10ms（防穿透的实质约束）。
+        let sub = SUB_STEP_MS as f32 / 1000.0;
+        assert!(clamped.y.abs() * sub <= expected * sub + 1e-3);
+        // 向下分量不受限（下落更快，落地时限恒成立）。
+        let down = state.clamp_throw_velocity(Vec2::new(0.0, 50_000.0));
+        assert_eq!(down.y, 50_000.0, "向下分量不钳");
+    }
+
+    // -- QA 探针（S3-M4 独立验证）：AC-09 端到端时序 + 边界探查 --------------------
+    // 以下探针为 QA 验证轮新增：只探公共行为边界，不改源码，探查理由逐条注明。
+
+    /// AC-09 端到端完整时序：Roam → DragStart → begin_drag → drag_to 跟手 →
+    /// Throw → release_drag（上抛钳制内、vx>0）→ Fall 逐 tick → Landed。
+    ///
+    /// 探查理由：既有用例各自覆盖单段（begin_drag 幂等 / 屏顶甩出 / 抛物线方向），
+    /// 但「拖拽移动后甩出」的完整验收链无单测串联；且既有用例未断言
+    /// ①逐 tick x 单调性 ⑤落点 y 精确等于工作区底边（屏内）。本探针按
+    /// AC-09 逐条断言：①抛物线方向 ②落地 ≤1500ms ③落地链 [07,08] ④计数 1
+    /// ⑤落点钳回底边。
+    #[test]
+    fn qa_probe_ac09_end_to_end_drag_then_throw_full_sequence() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(300.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        state.logic_tick(50);
+        assert_eq!(state.phase(), Phase::Roam, "起点应处于漫游相");
+
+        // ① DragStart 意图 → begin_drag：挂光标 toss 起播、进入 Drag 相。
+        assert_eq!(
+            state.begin_drag(Vec2::new(300.0, 900.0), 100),
+            Some(Arbitration::Play),
+            "DragStart → toss Play"
+        );
+
+        // ② drag_to 跟手：三拍移动，权威 pos 逐拍刷新。
+        let path = [(400.0, 800.0), (500.0, 750.0), (600.0, 700.0)];
+        for (k, (x, y)) in path.iter().enumerate() {
+            state.drag_to(Vec2::new(*x, *y));
+            let out = state.logic_tick(150 + k as u64 * 50);
+            assert!(out.moved, "Drag 相第 {k} 拍应跟手位移");
+            assert!(out.submitted.is_none(), "Drag 相不产仲裁接线");
+        }
+        let release_pos = state.pos();
+        assert_eq!(release_pos, Vec2::new(600.0, 700.0), "权威 pos = 最后拖拽点");
+
+        // ③ Throw 意图 → release_drag(Some)：vx>0、小幅上抛（闭式解钳制内）。
+        let release_ms = 300u64;
+        assert_eq!(
+            state.release_drag(Some(Vec2::new(400.0, -300.0)), release_ms),
+            None,
+            "toss 已在播 → 起飞无补提交"
+        );
+        assert_eq!(state.phase(), Phase::Fall);
+        assert!(state.thrown_flight(), "甩出飞行标记置位");
+
+        // ④ Fall 逐 tick：x 单调向 vx 方向（不降）+ 上抛段先升。
+        let mut prev_x = release_pos.x;
+        let mut min_y = release_pos.y;
+        let mut landed_at = None;
+        let mut submitted = None;
+        for k in 1..=40u64 {
+            let now = release_ms + k * 50;
+            let out = state.logic_tick(now);
+            if state.phase() == Phase::Fall {
+                assert!(
+                    out.pos.x >= prev_x,
+                    "飞行 x 应单调不降（vx>0 无撞墙）：{} vs {prev_x}",
+                    out.pos.x
+                );
+                prev_x = out.pos.x;
+                min_y = min_y.min(out.pos.y);
+            }
+            if out.submitted.is_some() {
+                landed_at = Some(now);
+                submitted = out.submitted;
+                break;
+            }
+        }
+
+        // ②落地时限（FR-4-6：甩出后 1.5s 内完成落地）。
+        let land = landed_at.expect("1.5s 预算内应落地");
+        assert!(
+            land - release_ms <= 1_500,
+            "FR-4-6：实测飞行+tick 粒度 {}ms",
+            land - release_ms
+        );
+        // ①抛物线符合初速度方向：上抛段先升 + x 净右移。
+        assert!(min_y < release_pos.y - 5.0, "上抛段应先升：min_y={min_y}");
+        assert!(state.pos().x > release_pos.x, "x 净位移应向 vx 方向");
+        // ③落地结算：submitted 非空 + 链尾 08 在队（S4 B15-④：07 已由停播推进
+        // 出队起播为 current，队列快照仅剩 08；07 播毕由 Finished 回报起播 08）。
+        assert_eq!(
+            submitted,
+            Some(Arbitration::Queued { pos: 1 }),
+            "链首 07 force_submit（差 0 优先级）→ 排队 pos=1"
+        );
+        let ids: Vec<&str> =
+            state.arbiter.queue_snapshot().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ACT-T-08"], "链尾 08 在队（07 已起播为 current）");
+        // ④C8 计数。
+        assert_eq!(state.throw_landed_count(), 1, "甩出落地计数恰 +1");
+        // ⑤落点钳在屏内：y 精确等于工作区底边。
+        assert!(
+            (state.pos().y - 1040.0).abs() < 1e-3,
+            "落点 y 应等于工作区底边 1040：{}",
+            state.pos().y
+        );
+        assert_eq!(state.phase(), Phase::Roam);
+        assert!(!state.thrown_flight(), "落地后甩出标记清零");
+    }
+
+    /// 钳制边界探查：release_drag 初速度恰为闭式解边界 −v_up_max（最坏起点=屏顶）。
+    ///
+    /// 探查理由：`clamp_throw_velocity` 以严格小于（`vel.y < -v_up_max`）判定钳制，
+    /// 边界值应原样放行；且边界速度的连续解恰在 T_eff=1420ms 落地——验证离散化
+    /// 裕量（80ms）覆盖下最坏几何 + 最坏速度组合仍满足 FR-4-6 的 1500ms 硬上限。
+    #[test]
+    fn qa_probe_throw_at_exact_clamp_boundary_lands_within_1500ms() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        // 最坏起点 = 屏顶 y=0（可落高度 h 取工作区垂直跨度）。
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 0.0), 1_000), Some(Arbitration::Play));
+        // 闭式解边界值（重力取配置真源 RV-18，无字面量）。
+        let g = InteractionCfg::default().gravity_px_per_sec2;
+        let h = mon_a().work_bottom_vdc() - mon_a().work_origin_vdc.y;
+        let t_eff = (THROW_MAX_FLIGHT_MS - THROW_FLIGHT_MARGIN_MS) as f32 / 1000.0;
+        let v_up_max = (g * t_eff / 2.0 - h / t_eff).max(0.0);
+        let vel = Vec2::new(0.0, -v_up_max);
+        // 边界值恰不触发钳制（严格小于判定）。
+        let clamped = state.clamp_throw_velocity(vel);
+        assert!(
+            (clamped.y + v_up_max).abs() < 1e-2,
+            "恰在边界的 vy 应原样放行：{} vs -{v_up_max}",
+            clamped.y
+        );
+        assert_eq!(state.release_drag(Some(vel), 1_000), None, "toss 在播无补提交");
+        assert_eq!(state.phase(), Phase::Fall);
+        let mut landed_at = None;
+        for k in 1..=40u64 {
+            let now = 1_000 + k * 50;
+            let out = state.logic_tick(now);
+            if out.submitted.is_some() {
+                landed_at = Some(now);
+                break;
+            }
+        }
+        let land = landed_at.expect("边界速度应在预算内落地");
+        assert!(land - 1_000 <= 1_500, "边界 vy 落地实测 {}ms ≤ 1500", land - 1_000);
+        assert_eq!(state.throw_landed_count(), 1, "边界速度甩出落地仍计数");
+        assert!(
+            (state.pos().y - 1040.0).abs() < 1e-3,
+            "落点仍钳回工作区底边：{}",
+            state.pos().y
+        );
+    }
+
+    /// 非对称双屏探查：两台显示器拼接的 VD 包围矩形（屏1 1920×1040 工作区 +
+    /// 屏2 1280×960 工作区），光标拖到屏 2 / 越界钳制 / 跨屏甩出落点。
+    ///
+    /// 探查理由：既有 `drag_target_clamps_to_virtual_desktop_bounds` 只用单屏
+    /// 对称夹具；非对称拼接下 `vd_bounds_of`（并集水平界）与 `vd_vertical_span`
+    /// （全局垂直跨度）是否跟手正确、跨屏甩出是否落在**所在屏**（屏 2）的工作区
+    /// 底边 960（而非较高屏 1 的 1040），是 FR-4-5/4-6 的关键遗漏面。
+    #[test]
+    fn qa_probe_dual_monitor_asymmetric_vd_drag_clamp_and_cross_screen_throw() {
+        // 屏 2：VDC x ∈ [1920, 3200)，工作区底边 960（比屏 1 的 1040 高）。
+        let mon_c = MonitorGeom {
+            id: 2,
+            origin_vdc: Vec2::new(1920.0, 0.0),
+            size_vdc: Vec2::new(1280.0, 1024.0),
+            work_origin_vdc: Vec2::new(1920.0, 0.0),
+            work_size_vdc: Vec2::new(1280.0, 960.0),
+            primary: false,
+        };
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a(), mon_c],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        // 拖到屏 2 内（VD 包围矩形内）→ 跟手原样保留（跨屏拖拽不误钳）。
+        state.drag_to(Vec2::new(2_500.0, 400.0));
+        state.logic_tick(100);
+        assert_eq!(state.pos(), Vec2::new(2_500.0, 400.0), "屏 2 内拖拽点应原样保留");
+        // 越界 → 钳到 VD 包围矩形右下（x=屏 2 右缘 3200；y=全局垂直跨度底 1040）。
+        state.drag_to(Vec2::new(99_999.0, 99_999.0));
+        state.logic_tick(150);
+        assert_eq!(state.pos(), Vec2::new(3_200.0, 1_040.0), "越界钳到双屏外包矩形右下角");
+        // 左越界 → 钳到并集左缘 0。
+        state.drag_to(Vec2::new(-100.0, 100.0));
+        state.logic_tick(200);
+        assert_eq!(state.pos().x, 0.0, "左越界钳到并集左缘");
+
+        // 跨屏甩出：从屏 2 起抛（vx>0）→ 落点仍在屏 2 工作区（y=屏 2 底边 960）。
+        state.drag_to(Vec2::new(2_500.0, 500.0));
+        state.logic_tick(250);
+        let release_ms = 300u64;
+        assert_eq!(state.release_drag(Some(Vec2::new(200.0, -100.0)), release_ms), None);
+        assert_eq!(state.phase(), Phase::Fall);
+        let mut landed_at = None;
+        for k in 1..=40u64 {
+            let now = release_ms + k * 50;
+            let out = state.logic_tick(now);
+            if out.submitted.is_some() {
+                landed_at = Some(now);
+                break;
+            }
+        }
+        let land = landed_at.expect("跨屏甩出应在预算内落地");
+        assert!(land - release_ms <= 1_500, "跨屏甩出落地实测 {}ms", land - release_ms);
+        assert!(
+            state.pos().x >= 1_920.0 && state.pos().x <= 3_200.0,
+            "落点 x 应留在屏 2 水平域（反弹界=并集）：{}",
+            state.pos().x
+        );
+        assert!(
+            (state.pos().y - 960.0).abs() < 1e-3,
+            "落点 y 应为屏 2 工作区底边 960（所在屏口径）：{}",
+            state.pos().y
+        );
+        assert_eq!(state.throw_landed_count(), 1);
+    }
+
+    /// 飞行中抓回探查：甩出后未落地即 begin_drag（空中抓回）→ 拖回地面轻放。
+    ///
+    /// 探查理由：`thrown_flight` 清零（落地链作废）只在 begin_drag 实现路径有
+    /// 注释、无既有测试覆盖；若未清零，轻放会误产 ACT-T-07→08 抗议链与 C8
+    /// 计数，直接违背 AC-09 与 FR-4-6「轻放无惩罚」。
+    #[test]
+    fn qa_probe_catch_mid_flight_voids_throw_landing_chain() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 300.0), 1_000), Some(Arbitration::Play));
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -500.0)), 1_000), None);
+        assert!(state.thrown_flight(), "起飞后处于甩出飞行");
+        // 飞行中一拍（未落地）。
+        let out = state.logic_tick(1_050);
+        assert!(out.submitted.is_none(), "飞行中不结算");
+        assert_eq!(state.phase(), Phase::Fall);
+        // 空中抓回 → 拖拽相、甩出标记清零。
+        state.begin_drag(Vec2::new(960.0, 300.0), 1_100);
+        assert_eq!(state.phase(), Phase::Drag);
+        assert!(!state.thrown_flight(), "飞行中抓回应清零甩出标记（落地链作废）");
+        // 拖回地面轻放 → 合法站立面直接回 Roam。
+        state.drag_to(Vec2::new(960.0, 1_040.0));
+        state.logic_tick(1_150);
+        assert_eq!(state.release_drag(None, 1_200), None, "轻放无仲裁产出");
+        assert_eq!(state.phase(), Phase::Roam);
+        // 落地链作废：无 07/08、计数不增。
+        assert_eq!(state.throw_landed_count(), 0, "抓回后轻放不计甩出落地");
+        let ids: Vec<&str> =
+            state.arbiter.queue_snapshot().iter().map(|r| r.id.as_str()).collect();
+        assert!(
+            !ids.contains(&"ACT-T-07") && !ids.contains(&"ACT-T-08"),
+            "落地链应作废，队列不得含 07/08：{ids:?}"
+        );
+    }
+
+    /// 源码缺陷复现探针：飞行中抓回（Fall → begin_drag）时 toss（ACT-T-06）已在播，
+    /// `begin_drag` 无条件 `submit_toss`（未对齐 `release_drag` 的
+    /// `ensure_toss_submitted` 口径）→ 同优先级重复 toss 排队。
+    ///
+    /// 期望行为：toss 已在播时不重复提交（返回 None、队列不新增）——与
+    /// `release_drag` 起飞补提交的幂等语义一致。
+    #[test]
+    fn qa_probe_begin_drag_mid_flight_does_not_duplicate_toss() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 300.0), 1_000), Some(Arbitration::Play));
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -500.0)), 1_000), None);
+        let out = state.logic_tick(1_050);
+        assert!(out.submitted.is_none());
+        // 空中抓回：toss（p7）正在播 → 不应重复提交。
+        assert_eq!(
+            state.begin_drag(Vec2::new(960.0, 300.0), 1_100),
+            None,
+            "toss 已在播时 begin_drag 不应重复提交（ensure 口径）"
+        );
+    }
+
+    // -- S3-M6：触发映射（fx_burst_for_intent）+ landed_thrown 落地标记 ------------
+
+    #[test]
+    fn fx_burst_maps_double_click_tickle_stroke_to_hearts() {
+        let cfg = ClickFeedbackCfg::default();
+        for kind in [InteractionKind::DoubleClick, InteractionKind::Tickle, InteractionKind::Stroke]
+        {
+            let cmd = fx_burst_for_intent(kind, &cfg).expect("三类意图应产爱心迸发");
+            assert_eq!(cmd.kind, ParticleKind::Heart, "{kind:?} → heart");
+            assert_eq!(cmd.count, FX_HEART_BURST_COUNT);
+            assert_eq!(cmd.version, bridge::PARTICLE_CMD_VERSION);
+        }
+    }
+
+    #[test]
+    fn fx_burst_click_gated_by_click_feedback_config_and_clamped() {
+        // 默认开启：Click → 微反馈尘土，数量取配置。
+        let on = ClickFeedbackCfg { enabled: true, burst_count: 6 };
+        let cmd = fx_burst_for_intent(InteractionKind::Click, &on).expect("开关开启应产尘土");
+        assert_eq!(cmd.kind, ParticleKind::Dust);
+        assert_eq!(cmd.count, 6);
+
+        // 数量钳制：0→1、超限→60（与 PARTICLE_BURST_CAP 同源）。
+        let big = ClickFeedbackCfg { enabled: true, burst_count: 500 };
+        assert_eq!(
+            fx_burst_for_intent(InteractionKind::Click, &big).expect("有产出").count,
+            bridge::PARTICLE_BURST_CAP
+        );
+        let zero = ClickFeedbackCfg { enabled: true, burst_count: 0 };
+        assert_eq!(fx_burst_for_intent(InteractionKind::Click, &zero).expect("有产出").count, 1);
+
+        // 关闭：Click 零迸发。
+        let off = ClickFeedbackCfg { enabled: false, burst_count: 6 };
+        assert!(fx_burst_for_intent(InteractionKind::Click, &off).is_none());
+    }
+
+    #[test]
+    fn fx_burst_ignores_non_visual_intents() {
+        let cfg = ClickFeedbackCfg::default();
+        for kind in [InteractionKind::Hover, InteractionKind::DragStart, InteractionKind::Throw] {
+            assert!(
+                fx_burst_for_intent(kind, &cfg).is_none(),
+                "{kind:?} 不产粒子迸发"
+            );
+        }
+    }
+
+    #[test]
+    fn logic_tick_marks_landed_thrown_only_on_throw_landing() {
+        // 甩出落地：landed_thrown = true（run_loop 据此发落地尘土）。
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+            );
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -500.0)), 100), None);
+        let mut marked = false;
+        for k in 1..=60u64 {
+            let out = state.logic_tick(100 + k * 50);
+            if out.submitted.is_some() {
+                assert!(out.landed_thrown, "甩出落地 tick 应置 landed_thrown");
+                assert_eq!(state.throw_landed_count(), 1);
+                marked = true;
+                break;
+            }
+            assert!(!out.landed_thrown, "飞行中不置标记");
+        }
+        assert!(marked, "应在预算内落地");
+
+        // 对照：自然下坠落地（非甩出）→ landed_thrown = false。
+        let mut natural = CoreLoopState::new(
+            Vec2::new(960.0, 500.0),
+            Vec::new(),
+            core_cfg(landing_catalog()),
+            7,
+            0,
+            );
+        let _ = natural.logic_tick(50); // 无站立面 → Fall
+        for k in 1..=20u64 {
+            let _ = natural.logic_tick(50 + k * 50);
+        }
+        natural.apply_monitors(vec![mon_low()], 1_100);
+        for k in 0..300u64 {
+            let out = natural.logic_tick(1_150 + k * 50);
+            if out.submitted.is_some() {
+                assert!(!out.landed_thrown, "自然落地不置标记");
+                break;
+            }
+        }
+    }
+
+    // -- S4 前清障 B15-④：播放指令通道（出队起播 / 停播 / 链推进） ------------------
+
+    /// 装配带播放通道的状态（默认 toss_catalog + mon_a 起点可换）。
+    fn state_with_playback(
+        pos: Vec2,
+        monitors: Vec<MonitorGeom>,
+        catalog: ActionCatalog,
+    ) -> (CoreLoopState, PlaybackChannel) {
+        let mut state = CoreLoopState::new(pos, monitors, core_cfg(catalog), 7, 0);
+        let channel = PlaybackChannel::default();
+        state.attach_playback(channel.clone());
+        (state, channel)
+    }
+
+    /// 排空通道指令（保序）。
+    fn drain_orders(channel: &PlaybackChannel) -> Vec<PlaybackOrder> {
+        let mut orders = Vec::new();
+        while let Some(order) = channel.try_pop_order() {
+            orders.push(order);
+        }
+        orders
+    }
+
+    #[test]
+    fn playback_play_order_emitted_on_action_start_and_reattach() {
+        let (mut state, channel) =
+            state_with_playback(Vec2::new(960.0, 1040.0), vec![mon_a()], toss_catalog());
+        // 起播：DragStart → toss Play 下发覆盖态。
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        assert_eq!(
+            drain_orders(&channel),
+            vec![PlaybackOrder::Play { action_id: "ACT-T-06".to_string() }],
+            "起播型仲裁结果 → Play 指令"
+        );
+
+        // 起飞：停播循环 toss（下一用例详测）；空中抓回 → 重发 Play 重挂覆盖态。
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -300.0)), 100), None);
+        assert_eq!(
+            drain_orders(&channel),
+            vec![PlaybackOrder::Stop],
+            "起飞停播且不发 Play 抵消（B15-④ 裁定）"
+        );
+        assert_eq!(
+            state.begin_drag(Vec2::new(1000.0, 600.0), 150),
+            None,
+            "toss 已在播不重复提交"
+        );
+        assert_eq!(
+            drain_orders(&channel),
+            vec![PlaybackOrder::Play { action_id: "ACT-T-06".to_string() }],
+            "空中抓回 → 重发 Play 重挂覆盖态"
+        );
+    }
+
+    #[test]
+    fn playback_finished_report_advances_landing_chain() {
+        let (mut state, channel) =
+            state_with_playback(Vec2::new(960.0, 1040.0), vec![mon_a()], toss_catalog());
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        assert_eq!(drain_orders(&channel).len(), 1, "toss 起播恰一条指令");
+
+        // 起飞：Stop（仲裁 current 保留）。
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -500.0)), 100), None);
+        assert_eq!(drain_orders(&channel), vec![PlaybackOrder::Stop]);
+
+        // 落地：链提交（07 Queued{pos:1}、08 依序入队）→ 停播推进（toss 出局、07 起播）。
+        let mut land_ms = None;
+        for k in 1..=60u64 {
+            let now = 100 + k * 50;
+            let out = state.logic_tick(now);
+            if out.submitted.is_some() {
+                land_ms = Some(now);
+                break;
+            }
+        }
+        let land = land_ms.expect("1.5s 预算内应落地");
+        assert_eq!(
+            drain_orders(&channel),
+            vec![
+                PlaybackOrder::Stop,
+                PlaybackOrder::Play { action_id: "ACT-T-07".to_string() },
+            ],
+            "落地停播 toss + 链首 07 出队起播（fade 0）"
+        );
+        let ids: Vec<&str> =
+            state.arbiter.queue_snapshot().iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["ACT-T-08"], "队列仅剩链尾 08（07 已成 current）");
+
+        // 链推进：播放器回报 07 播毕 → 08 出队起播。
+        channel.push_report(PlaybackReport::Finished { action_id: "ACT-T-07".to_string() });
+        state.drain_finished(land);
+        assert_eq!(
+            drain_orders(&channel),
+            vec![PlaybackOrder::Play { action_id: "ACT-T-08".to_string() }],
+            "Finished 回报 → 链尾 08 出队起播"
+        );
+        assert!(state.arbiter.queue_snapshot().is_empty(), "链推进后队列清空");
+
+        // 不匹配回报丢弃：伪 Finished 不产生任何指令。
+        channel.push_report(PlaybackReport::Finished { action_id: "ACT-T-06".to_string() });
+        state.drain_finished(land + 50);
+        assert!(drain_orders(&channel).is_empty(), "不匹配 current 的回报丢弃");
+    }
+
+    #[test]
+    fn playback_natural_landing_stops_looping_current_and_starts_landing_action() {
+        // 非甩出 Landed 也停播循环 current（计划注记：停播口径扩至所有 Landed）。
+        let (mut state, channel) =
+            state_with_playback(Vec2::new(960.0, 1040.0), vec![mon_a()], toss_catalog());
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 1040.0), 50), Some(Arbitration::Play));
+        assert_eq!(drain_orders(&channel).len(), 1, "toss 起播恰一条指令");
+        // 拖回地面轻放（合法站立面 → 回 Roam；toss 仍 current、循环在播）。
+        assert_eq!(state.release_drag(None, 100), None);
+        assert_eq!(state.phase(), Phase::Roam);
+
+        // 站立面消失 → 自然下坠 → 落地（非甩出）。
+        state.apply_monitors(Vec::new(), 150);
+        assert!(state.logic_tick(200).submitted.is_none(), "起坠不提交");
+        state.apply_monitors(vec![mon_low()], 250);
+        let mut landed = None;
+        for k in 1..=400u64 {
+            let now = 250 + k * 50;
+            let out = state.logic_tick(now);
+            if out.submitted.is_some() {
+                landed = Some(now);
+                break;
+            }
+        }
+        assert!(landed.is_some(), "应在预算内落地");
+        assert_eq!(state.throw_landed_count(), 0, "自然落地不计数");
+        assert_eq!(
+            drain_orders(&channel),
+            vec![
+                PlaybackOrder::Stop,
+                PlaybackOrder::Play { action_id: "ACT-M-06".to_string() },
+            ],
+            "所有 Landed 口径：停播循环 toss + 落地缓冲覆盖起播"
+        );
+    }
+
+    // -- S4 前清障 B15-④ QA 探针：落地链「先提交后停播推进」时序独立复核 --------
+
+    /// QA 独立探针（第 1 轮）：链首 07 仲裁 verdict 必须为 `Queued{pos:1}`（依赖
+    /// toss 仍在 current 位——「先提交后停播」裁定的核心语义），且 07/08 均不被
+    /// R-A `Suppressed`；随后 Finished 回报驱动 08 出队，链完整排空、无残留指令。
+    #[test]
+    fn qa_probe_landing_chain_head_queued_and_both_links_start_without_suppression() {
+        let (mut state, channel) =
+            state_with_playback(Vec2::new(960.0, 1040.0), vec![mon_a()], toss_catalog());
+        // 拖拽起飞 → toss 起播（current = ACT-T-06，循环）。
+        assert_eq!(state.begin_drag(Vec2::new(960.0, 500.0), 50), Some(Arbitration::Play));
+        assert_eq!(drain_orders(&channel).len(), 1);
+        // 甩出起飞：Stop（current 保留）。
+        assert_eq!(state.release_drag(Some(Vec2::new(0.0, -400.0)), 100), None);
+        assert_eq!(drain_orders(&channel), vec![PlaybackOrder::Stop]);
+
+        // 落地 tick：链头 verdict = Queued{pos:1}（非 Suppressed/Dropped/Play）。
+        let mut land_ms = None;
+        for k in 1..=60u64 {
+            let now = 100 + k * 50;
+            let out = state.logic_tick(now);
+            if let Some(verdict) = out.submitted {
+                assert_eq!(
+                    verdict,
+                    Arbitration::Queued { pos: 1 },
+                    "链首 07 在 toss 仍 current 时入队（先提交后停播的关键语义）"
+                );
+                assert!(out.landed_thrown, "甩出落地标记");
+                land_ms = Some(now);
+                break;
+            }
+        }
+        let land = land_ms.expect("1.5s 预算内应落地");
+        // 同 tick 内停播推进：toss Stop + 07 出队起播（fade 0），顺序不可反。
+        assert_eq!(
+            drain_orders(&channel),
+            vec![
+                PlaybackOrder::Stop,
+                PlaybackOrder::Play { action_id: "ACT-T-07".to_string() },
+            ],
+            "落地 tick：先 Stop 停 toss，后 Play 07（提交序已先行）"
+        );
+        // 链尾 08 仍在队列（未丢失、未 Suppressed）。
+        assert_eq!(
+            state
+                .arbiter
+                .queue_snapshot()
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ACT-T-08"]
+        );
+        // 播放器回报 07 播毕 → 08 出队起播 → 队列清空。
+        channel.push_report(PlaybackReport::Finished { action_id: "ACT-T-07".to_string() });
+        state.drain_finished(land);
+        assert_eq!(
+            drain_orders(&channel),
+            vec![PlaybackOrder::Play { action_id: "ACT-T-08".to_string() }],
+            "07 Finished → 08 出队起播（链尾推进）"
+        );
+        channel.push_report(PlaybackReport::Finished { action_id: "ACT-T-08".to_string() });
+        state.drain_finished(land + 50);
+        assert!(drain_orders(&channel).is_empty(), "08 播毕队列已空 → 零指令");
+        assert!(state.arbiter.queue_snapshot().is_empty());
+        assert!(state.arbiter.current().is_none(), "链排空后 current 清空");
+    }
+
+    // -- S4-M1：业务档接线（情绪内核 + 会话暂停） ----------------------------------
+
+    #[test]
+    fn business_tick_drives_emotion_engine_and_accumulates_pressure_while_present() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(landing_catalog()),
+            7,
+            0,
+        );
+        // 业务档墙钟（C3：端口注入；`FakeWallClock` 是 dp-core 提供的测试替身）。
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        // 绕开平台会话查询（本机无头环境恒 `Disconnected` → 恒暂停，速率恒 0）。
+        state.emotion.state.pause.observe(false, wall.now_ms());
+
+        // 首拍建基线（不累积）。
+        state.business_tick_present(&wall);
+        assert!(
+            state.emotion.neglect.p.abs() < f32::EPSILON,
+            "首拍不产生累积（避免把启动前空闲算成冷落）"
+        );
+
+        // 在场（idle = 0）推进 10 分钟：P 应按在场速率增长。
+        for _ in 0..600 {
+            wall.advance_ms(1_000);
+            state.business_tick_present(&wall);
+        }
+        let here_p = state.emotion.neglect.p;
+        assert!(here_p > 0.0, "在场 10min 后 P 应增长（实测 {here_p}）");
+    }
+
+    #[test]
+    fn business_tick_with_idle_beyond_threshold_uses_away_factor() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(landing_catalog()),
+            7,
+            0,
+        );
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        state.business_tick(&wall, None);
+
+        // 注入「远超离场阈值」的空闲（1h > awayThresholdSec），并跨过迟滞窗口。
+        //
+        // 注意：本机（无头 / 远程会话）的 `query_session_state()` 可能返回
+        // `Disconnected`，此时 `SessionWatcher` 会判定暂停、`tick_1s` 提前返回，
+        // 速率恒 0 —— 这是**正确**行为而非缺陷。为让本用例只检验「离场因子」这一
+        // 条路径，这里绕过会话监视、直接把内置内核置为非暂停态。
+        state.emotion.state.pause.observe(false, wall.now_ms());
+        state.presence_idle_ms = Some(3_600_000);
+        for _ in 0..600 {
+            wall.advance_ms(1_000);
+            state.business_tick_present(&wall);
+        }
+        let away_rate = state.emotion.neglect.rate_per_min;
+        // 离场因子 0.05 → 速率应落在 0.5 以下（若被 rateClamp.min 抬到 0.5 即回归失败）。
+        assert!(
+            away_rate > 0.0 && away_rate < 0.5,
+            "离场速率应显著低于钳制下限（实测 {away_rate}）"
+        );
+        // RV-16 口径：离场 10min ≈ P 0.5 量级，绝不可接近在场速率。
+        assert!(
+            state.emotion.neglect.p < 10.0,
+            "离场 10min 后 P 应极小（实测 {}）",
+            state.emotion.neglect.p
+        );
+    }
+
+    #[test]
+    fn business_tick_pause_window_is_recorded_into_emotion_state() {
+        // 会话暂停（锁屏）期间 P 冻结且暂停时间戳入状态（P2-2 裁定：
+        // 起止时间戳入状态，S5-M2 只读）。
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(landing_catalog()),
+            7,
+            0,
+        );
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        state.business_tick(&wall, None);
+        assert!(!state.emotion.state.pause.is_paused());
+
+        // 直接驱动内核的暂停窗口（`SessionWatcher` 的平台查询在单测中不可控，
+        // 故此处以状态层为断点验证「暂停 → 时间戳入状态 → 累计」的口径）。
+        let start = wall.now_ms();
+        state.emotion.state.pause.observe(true, start);
+        assert!(state.emotion.state.pause.is_paused());
+        assert_eq!(state.emotion.state.pause.start_ms, Some(start));
+
+        wall.advance_ms(30 * 60 * 1_000);
+        assert_eq!(state.emotion.state.pause.current_span_ms(wall.now_ms()), 30 * 60 * 1_000);
+
+        // 解锁：窗口闭合、累计入账、不处于暂停。
+        state.emotion.state.pause.observe(false, wall.now_ms());
+        assert!(!state.emotion.state.pause.is_paused());
+        assert_eq!(state.emotion.state.pause.accumulated_ms, 30 * 60 * 1_000);
+        assert_eq!(state.emotion.state.pause.count, 1);
+    }
+
+    // ==================== S4-M2：事件总线与 1Hz tick 链路 ====================
+
+    /// 交互增益跨档暂存 → 单次消费（**幂等**：喂入即清零，不重复计入）。
+    #[test]
+    fn pending_mood_delta_is_consumed_once_per_business_tick() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+        );
+        let wall = FakeWallClock::new(1_800_000_000_000);
+
+        // 首拍建立基线（不消费累积）。
+        state.business_tick_present(&wall);
+        state.record_interaction_mood(3.0);
+        state.record_interaction_mood(2.5);
+        assert_eq!(state.pending_mood_delta(), 5.5, "跨档暂存应累加");
+
+        // 业务档消费后清零（幂等：连续两次 tick 不会重复计入）。
+        wall.advance_ms(1_000);
+        state.business_tick_present(&wall);
+        assert_eq!(state.pending_mood_delta(), 0.0, "喂入内核后必须清零");
+
+        // 清零后的下一 tick 不再产生额外增益 → Mood 只受惯性驱动（单调不回升）。
+        let mood_after = state.emotion.state.values.mood;
+        wall.advance_ms(1_000);
+        state.business_tick_present(&wall);
+        assert!(
+            state.emotion.state.values.mood <= mood_after,
+            "无新交互时 Mood 不得因残留增益回升"
+        );
+    }
+
+    /// 非有限增益防御（NaN / inf 不得污染内核数值）。
+    #[test]
+    fn record_interaction_mood_ignores_non_finite() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+        );
+        state.record_interaction_mood(f32::NAN);
+        state.record_interaction_mood(f32::INFINITY);
+        state.record_interaction_mood(2.0);
+        assert_eq!(state.pending_mood_delta(), 2.0, "仅有限值计入");
+    }
+
+    /// 暂停期间暂存**不清零**（内核早退不消费，恢复后一次计入）。
+    #[test]
+    fn pending_delta_survives_paused_tick() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+        );
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        state.business_tick_present(&wall);
+        state.record_interaction_mood(4.0);
+
+        // 暂停态 tick：内核早退，暂存必须保留。
+        wall.advance_ms(1_000);
+        state.business_tick_inner(&wall, wall.now_ms(), true, true, None);
+        assert_eq!(state.pending_mood_delta(), 4.0, "暂停期间不得丢弃待喂增益");
+
+        // 恢复后一次计入并清零。
+        wall.advance_ms(1_000);
+        state.business_tick_present(&wall);
+        assert_eq!(state.pending_mood_delta(), 0.0);
+    }
+
+    /// 快照契约（`02 §4.3`）：1Hz 投影字段齐备且数值与内核同源。
+    #[test]
+    fn snapshot_contract_matches_core_state() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+        );
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        state.business_tick_present(&wall);
+
+        let snap = state.snapshot_for_test();
+        assert_eq!(snap.v, 2, "契约版本恒为 2");
+        assert_eq!(snap.values.mood, state.emotion.state.values.mood);
+        assert_eq!(snap.values.boredom, state.emotion.boredom_display());
+        assert_eq!(snap.neglect.level, state.emotion.neglect.level);
+        assert_eq!(snap.neglect.p, state.emotion.neglect.p);
+        assert!(snap.activity.is_none(), "活动快照归 S8，本卡恒 null");
+        assert!(snap.inventory.is_empty());
+        assert!(snap.skills.is_empty());
+        // 线上序列化：camelCase 逐项到位（前端契约）。
+        let json = serde_json::to_value(&snap).expect("快照可序列化");
+        assert!(json["values"].get("affinityLevel").is_some());
+        assert!(json["neglect"].get("ratePerMin").is_some());
+        assert!(json["neglect"]["factors"].get("product").is_some());
+    }
+
+    /// `ForceAction` → `arbiter.submit`（`02 §6.2`：情绪动作优先级 ≥7）。
+    #[test]
+    fn force_action_submits_to_arbiter_with_emotion_source() {
+        // 目录含一个「离家出走」档待机动作（`emotion.json.levels[4].idlePool` 首选）。
+        let catalog = ActionCatalog::from_actions(vec![ActionCfg {
+            id: "ACT-T-07".to_string(),
+            name: "甩出落地".to_string(),
+            category: "interact".to_string(),
+            priority: 8,
+            interruptible: true,
+            min_interrupt_priority: 9,
+            looping: false,
+            fps: 15,
+            fade_ms: 200,
+            disabled: false,
+            ..ActionCfg::default()
+        }]);
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(catalog),
+            7,
+            0,
+        );
+        let events = vec![EmotionEvent::ForceAction {
+            action_id: "ACT-T-07".to_string(),
+            priority: 8,
+        }];
+        state.dispatch_emotion_events(&events, 1_000, None);
+
+        let current = state.arbiter.current().expect("强制动作应进入仲裁器");
+        assert_eq!(current.request.id, "ACT-T-07");
+        assert_eq!(current.request.source, ActionSource::Emotion);
+    }
+
+    /// `ForceAction` 指向目录外动作 → 降级不提交（不 panic，`02 §7.4.2`）。
+    #[test]
+    fn force_action_missing_in_catalog_degrades_without_panic() {
+        let mut state = CoreLoopState::new(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            core_cfg(toss_catalog()),
+            7,
+            0,
+        );
+        let events = vec![EmotionEvent::ForceAction {
+            action_id: "ACT-ZZZZ".to_string(),
+            priority: 8,
+        }];
+        state.dispatch_emotion_events(&events, 1_000, None);
+        assert!(state.arbiter.current().is_none(), "目录缺失时不得凭空占位");
+    }
+
+    /// 确定性（验收标准 (b)）：**给定输入序列 → 固定输出**。
+    ///
+    /// 两组同构状态喂入完全相同的 tick 序列，末态与全程 Mood 轨迹必须逐点相等
+    /// （内核零随机、零时钟，P/Mood 均为纯函数递推）。
+    #[test]
+    fn emotion_tick_is_deterministic_for_identical_input_sequence() {
+        let drive = || {
+            let mut state = CoreLoopState::new(
+                Vec2::new(960.0, 1040.0),
+                vec![mon_a()],
+                core_cfg(toss_catalog()),
+                7,
+                0,
+            );
+            let wall = FakeWallClock::new(1_800_000_000_000);
+            let mut trace = Vec::new();
+            for k in 0..180u32 {
+                wall.advance_ms(1_000);
+                state.business_tick_present(&wall);
+                trace.push((
+                    state.emotion.state.values.mood,
+                    state.emotion.neglect.p,
+                    state.emotion.neglect.level,
+                ));
+                // 每 60 拍注入一次正向交互，制造非平凡轨迹。
+                if k % 60 == 59 {
+                    state.record_interaction_mood(2.0);
+                }
+            }
+            trace
+        };
+        let a = drive();
+        let b = drive();
+        assert_eq!(a.len(), 180);
+        assert_eq!(a, b, "相同输入序列必须产出逐点相同的输出轨迹");
+    }
+
+    /// 事件按序发出（验收标准 (a)）：阶段迁移事件顺序 = 从 → 到 逐级递进。
+    #[test]
+    fn cold_level_events_are_emitted_in_ascending_order() {
+        // 用极小阈值构造「一 tick 内连跳多级」的极端场景（阈值全为 1）。
+        let mut emotion_cfg = EmotionConfig::default();
+        emotion_cfg.thresholds.l1 = 1;
+        emotion_cfg.thresholds.l2 = 2;
+        emotion_cfg.thresholds.l3 = 3;
+        emotion_cfg.thresholds.l4 = 4;
+        emotion_cfg.thresholds.l5 = 5;
+        emotion_cfg.confirm.up_sec = 0; // 无确认期：立即生效
+        emotion_cfg.personality.threshold_scale_base = 1.0;
+        emotion_cfg.personality.threshold_scale_temper = 0.0;
+        emotion_cfg.levels.truncate(6);
+
+        let cfg: &'static EmotionConfig = Box::leak(Box::new(emotion_cfg));
+        let needs: &'static NeedsConfig = Box::leak(Box::new(NeedsConfig::default()));
+        let mut e = EmotionEngine::new(cfg, needs);
+
+        // 本地时间经 `FakeWallClock` 端口取（C3：`dp-app` 不引入 `chrono` 依赖）。
+        let clock = FakeWallClock::new(1_800_000_000_000);
+        let mk_env = || TickEnv {
+            now_local: clock.now_local(),
+            session_paused: false,
+            // 离场因子加速累积（本用例只关心顺序，不关心速率口径）。
+            preset_idle_ms: u64::MAX,
+            satiety: 100.0,
+            cleanliness: 100.0,
+            ..TickEnv::default()
+        };
+
+        // 首拍基线。
+        e.tick_1s(1_000, mk_env());
+        // 后续每拍累积（速率 = 离场因子 × 敏感度；每拍 ≥1 分钟量级的 ΔP）。
+        let mut seen_levels = Vec::new();
+        let mut last_from = 0u8;
+        for k in 1..=20i64 {
+            let now = 1_000 + k * 60_000;
+            let out = e.tick_1s(now, mk_env());
+            for ev in &out.events {
+                if let EmotionEvent::ColdLevelChanged { from, to, .. } = ev {
+                    assert_eq!(*from, last_from, "事件必须逐级衔接（不跳级、不乱序）");
+                    assert!(*to > *from, "升级路径 to 必须大于 from");
+                    last_from = *to;
+                    seen_levels.push(*to);
+                }
+            }
+        }
+        assert!(!seen_levels.is_empty(), "该场景应至少触发一次阶段迁移");
+        // 严格递增（无重复、无回退）。
+        for w in seen_levels.windows(2) {
+            assert!(w[0] < w[1], "阶段序列必须严格递增：{seen_levels:?}");
+        }
+    }
+}

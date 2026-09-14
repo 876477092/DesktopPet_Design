@@ -1,0 +1,22 @@
+[package]
+name = "dp-assets"
+description = "资源加载：图集 / 掩码 / 骨骼命中覆盖率表 / LRU 缓存"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_assets"
+path = "src/lib.rs"
+
+# S1-M5（T-03）：`image` 仅取 png feature（PNG 解码 + alpha 提取）；
+# `lru` 提供 LRU 底层（字节驱逐逻辑在 cache.rs 内实现）。
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }
+lru = { workspace = true }

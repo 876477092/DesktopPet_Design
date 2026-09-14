@@ -1,0 +1,218 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ActionsConfig",
+  "description": "`actions.json` 根：`{\"version\":1,\"actions\":[...]}`，53 条全量（批次 A 29 + B 8 + C 16）。",
+  "type": "object",
+  "properties": {
+    "actions": {
+      "description": "动作元数据列表（ID 一律 `ACT-` 前缀，RV-12）。",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ActionCfg"
+      }
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ActionCfg": {
+      "description": "动作元数据（字段结构以 `02 §5.11` 样例为准 + performance / disabled 两列）。",
+      "type": "object",
+      "properties": {
+        "blockMotion": {
+          "description": "播放期间是否阻塞漫游移动。",
+          "default": false,
+          "type": "boolean"
+        },
+        "category": {
+          "description": "类别（move / idle / interact / emotion / need / activity / special / perception）。",
+          "default": "",
+          "type": "string"
+        },
+        "disabled": {
+          "description": "是否禁用（资源批次 B/C 未交付 → true，加载侧跳过）。",
+          "default": false,
+          "type": "boolean"
+        },
+        "energyCost": {
+          "description": "精力消耗。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "fadeMs": {
+          "description": "交叉淡入时长（毫秒，默认 200）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "fps": {
+          "description": "帧率。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "helpRequest": {
+          "description": "求助请求参数（仅求助类 need 动作；R-B 退避依据）。",
+          "default": null,
+          "anyOf": [
+            {
+              "$ref": "#/definitions/HelpRequestCfg"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "id": {
+          "description": "动作 ID（`ACT-<类>-<两位序号>`，C5 / RV-12）。",
+          "default": "",
+          "type": "string"
+        },
+        "interruptible": {
+          "description": "是否可打断。",
+          "default": false,
+          "type": "boolean"
+        },
+        "loopRange": {
+          "description": "循环帧区间（行主序帧索引，闭区间）。",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "looping": {
+          "description": "是否循环动作。",
+          "default": false,
+          "type": "boolean"
+        },
+        "minInterruptPriority": {
+          "description": "可打断本动作的最小优先级（0 = 不适用；无条件可打断时 = priority + 1， 对齐 `02 §5.11` 样例 ACT-N-01 的 5→6）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "mirror": {
+          "description": "是否提供镜像翻转版本（`01 §6.3.2` 注：全部动作需镜像）。",
+          "default": false,
+          "type": "boolean"
+        },
+        "name": {
+          "description": "动作名（中文展示名，取自 `01 §6.3.2` 总表）。",
+          "default": "",
+          "type": "string"
+        },
+        "performance": {
+          "description": "演出类（R-A：不可打断，arbiter 运行期 minInterruptPriority 置 255）。",
+          "default": false,
+          "type": "boolean"
+        },
+        "priority": {
+          "description": "优先级（1~10，10 最高；`01 §6.3.1`）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "sound": {
+          "description": "音效资源 ID（蛇形命名；无音效 = None）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "suppressedByEmotionPriority": {
+          "description": "压制本求助类动作的情绪优先级下限（0 = 不适用；`01 §6.3.1`：≥7 压制 N-01/05/06）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "trigger": {
+          "description": "触发条件。",
+          "default": {
+            "type": "",
+            "value": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/TriggerCfg"
+            }
+          ]
+        }
+      }
+    },
+    "HelpRequestCfg": {
+      "description": "求助请求参数（`02 §5.11` 样例：baseIntervalSec 180 / backoffMul 2.0 / max 900 / noResponse 60）。",
+      "type": "object",
+      "properties": {
+        "backoffMul": {
+          "description": "退避乘子（R-C：60s 无响应 ×2）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "baseIntervalSec": {
+          "description": "基础求助间隔（秒）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "maxIntervalSec": {
+          "description": "最大求助间隔（秒）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "noResponseSec": {
+          "description": "视为无响应时长（秒）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "withBubble": {
+          "description": "是否带气泡。",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "TriggerCfg": {
+      "description": "动作触发条件（`02 §5.11` 样例：`{\"type\":\"need\",\"value\":\"satiety<40\"}`）。",
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "触发类型（idle / roam / emotion / interaction / need / activity / sense / random / lifecycle）。",
+          "default": "",
+          "type": "string"
+        },
+        "value": {
+          "description": "条件表达式或标识。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

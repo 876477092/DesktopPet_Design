@@ -1,0 +1,539 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SettingsConfig",
+  "description": "`settings.json` 根：设置项默认值与范围。\n\n合成出处：`01 §6.7 FR-7`（缩放/音量/开关/置顶/透明度/语言/敏感度）、 `02 K-3`（`gravityPxPerSec2` 单一真源 RV-18、roam 漫游参数）、 `02 §5.23`（交互死锁防护三层配置）、`02` Q-18（`privacy.activitySensing`）。",
+  "type": "object",
+  "properties": {
+    "appearance": {
+      "description": "外观：缩放 / 透明度 / 语言。",
+      "default": {
+        "language": "zh-CN",
+        "opacityMaxPercent": 100,
+        "opacityMinPercent": 60,
+        "opacityPercent": 100,
+        "scaleMaxPercent": 200,
+        "scaleMinPercent": 50,
+        "scalePercent": 100,
+        "scaleStepPercent": 10
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AppearanceCfg"
+        }
+      ]
+    },
+    "audio": {
+      "description": "声音：主音量与静音。",
+      "default": {
+        "masterVolumePercent": 80,
+        "muted": false,
+        "volumeMaxPercent": 100,
+        "volumeMinPercent": 0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/AudioCfg"
+        }
+      ]
+    },
+    "behavior": {
+      "description": "行为开关：自动走动 / 勿扰 / 穿透 / 置顶策略。",
+      "default": {
+        "alwaysOnTopPolicy": "Always",
+        "autoRoam": true,
+        "clickThrough": false,
+        "doNotDisturb": false
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BehaviorCfg"
+        }
+      ]
+    },
+    "emotion": {
+      "description": "情绪敏感度设置（`01 FR-7-9` 三档）。",
+      "default": {
+        "sensitivityOptions": [
+          0.699999988079071,
+          1.0,
+          1.2999999523162842
+        ],
+        "sensitivityValue": 1.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/EmotionSettingsCfg"
+        }
+      ]
+    },
+    "interaction": {
+      "description": "交互：重力单一真源（RV-18）与死锁防护配置（`02 §5.23`）。",
+      "default": {
+        "clickFeedback": {
+          "burstCount": 6,
+          "enabled": true
+        },
+        "gesture": {
+          "circleTurnMinDeg": 270,
+          "doubleClickWindowMs": 300,
+          "dragThresholdPx": 8,
+          "hoverEnterMs": 600,
+          "hoverLongMs": 2000,
+          "lineResidualMaxPx": 12,
+          "longPressMs": 500,
+          "strokeSpeedMaxPxPerSec": 800,
+          "throwSpeedMinPxPerSec": 1200,
+          "tickleClicksMin": 5,
+          "tickleWindowMs": 2000,
+          "trailMaxPoints": 32,
+          "zigzagReversalMin": 2,
+          "zigzagTurnMinDeg": 60
+        },
+        "gravityPxPerSec2": 2400.0,
+        "trayFallbackEnabled": true,
+        "unavailablePresenceFactor": 0.05000000074505806,
+        "unreachableHoldSec": 180,
+        "unreachableNaturalFloorLevel": 4,
+        "unreachableNoNegativeSec": 7200
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/InteractionCfg"
+        }
+      ]
+    },
+    "privacy": {
+      "description": "隐私开关（Q-18）。",
+      "default": {
+        "activitySensing": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/PrivacyCfg"
+        }
+      ]
+    },
+    "roam": {
+      "description": "漫游参数（`02 K-3`：决策间隔 5~30s、避让光标 150px）。",
+      "default": {
+        "cursorAvoidRadiusPx": 150,
+        "decisionIntervalSec": [
+          5,
+          30
+        ],
+        "pace": 1.0,
+        "walkSpeedPxPerSec": 60.0
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RoamCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "AppearanceCfg": {
+      "description": "外观设置（`01 FR-7-2 / FR-7-6 / FR-7-7`）。",
+      "type": "object",
+      "properties": {
+        "language": {
+          "description": "界面语言（默认简中，预留 en-US 文案包）。",
+          "default": "zh-CN",
+          "type": "string"
+        },
+        "opacityMaxPercent": {
+          "description": "透明度上限百分比。",
+          "default": 100,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "opacityMinPercent": {
+          "description": "透明度下限百分比。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "opacityPercent": {
+          "description": "主体不透明度百分比（60~100）。",
+          "default": 100,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scaleMaxPercent": {
+          "description": "缩放上限百分比。",
+          "default": 200,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scaleMinPercent": {
+          "description": "缩放下限百分比。",
+          "default": 50,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scalePercent": {
+          "description": "当前缩放百分比（50~200，步进 10）。",
+          "default": 100,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "scaleStepPercent": {
+          "description": "缩放步进百分比。",
+          "default": 10,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "AudioCfg": {
+      "description": "声音设置（`01 FR-7-3`：主音量 0~100 + 托盘一键静音）。",
+      "type": "object",
+      "properties": {
+        "masterVolumePercent": {
+          "description": "主音量百分比（0~100；默认值为实现自定，`01` 仅冻结范围）。",
+          "default": 80,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "muted": {
+          "description": "是否静音。",
+          "default": false,
+          "type": "boolean"
+        },
+        "volumeMaxPercent": {
+          "description": "音量上限百分比。",
+          "default": 100,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "volumeMinPercent": {
+          "description": "音量下限百分比。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "BehaviorCfg": {
+      "description": "行为开关（`01 FR-7-4`）。",
+      "type": "object",
+      "properties": {
+        "alwaysOnTopPolicy": {
+          "description": "置顶策略：`Always` | `BelowFullscreen` | `Never`（`02 K-1`）。",
+          "default": "Always",
+          "type": "string"
+        },
+        "autoRoam": {
+          "description": "自动走动。",
+          "default": true,
+          "type": "boolean"
+        },
+        "clickThrough": {
+          "description": "穿透模式。",
+          "default": false,
+          "type": "boolean"
+        },
+        "doNotDisturb": {
+          "description": "勿扰模式。",
+          "default": false,
+          "type": "boolean"
+        }
+      }
+    },
+    "ClickFeedbackCfg": {
+      "description": "单击微反馈配置（S3-M6 触发映射的配置开关；`interaction.clickFeedback` 段）。\n\n裁定（主理人 brief）：Click → 微反馈尘土，走**配置开关**而非写死行为； serde camelCase + `default` 前向兼容（旧配置缺段不致解析失败，R19）。",
+      "type": "object",
+      "properties": {
+        "burstCount": {
+          "description": "单次微反馈迸发数量（消费端再钳 `maxPerBurst=60` 上限）。",
+          "default": 6,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "enabled": {
+          "description": "是否启用单击微反馈（尘土迸发）。",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "EmotionSettingsCfg": {
+      "description": "情绪敏感度设置（`01 FR-7-9`：慢热 0.7 / 刚刚好 1.0 / 超黏人 1.3）。",
+      "type": "object",
+      "properties": {
+        "sensitivityOptions": {
+          "description": "三档可选值。",
+          "default": [
+            0.699999988079071,
+            1.0,
+            1.2999999523162842
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
+        },
+        "sensitivityValue": {
+          "description": "当前敏感度值。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "GestureCfg": {
+      "description": "手势参数（S3-M3，`02 §5 K-6` 参数表；14 键全部 camelCase + 单位后缀，C7）。\n\n数值外置 `settings.json` 的 `interaction.gesture` 子对象（裁定8：嵌套 + serde default 向后兼容）；缺字段由本 Default 兜底（K-6 表内置默认）。",
+      "type": "object",
+      "properties": {
+        "circleTurnMinDeg": {
+          "description": "画圈净转角阈值（度；FR-4-9：>270° 判画圈）。",
+          "default": 270,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "doubleClickWindowMs": {
+          "description": "双击判定窗（ms；K-6：300ms 内第二次按下 → 双击）。",
+          "default": 300,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "dragThresholdPx": {
+          "description": "拖拽分流位移（px；K-6：位移 >8px 分流拖拽）。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "hoverEnterMs": {
+          "description": "悬停进入时长（ms；K-6：光标停留满 600ms → Hover）。",
+          "default": 600,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "hoverLongMs": {
+          "description": "悬停长驻时长（ms；K-6：>2s → ACT-S-01）。",
+          "default": 2000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "lineResidualMaxPx": {
+          "description": "直线残差阈值（px；FR-4-9：拟合残差 <12px 判直线）。",
+          "default": 12,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "longPressMs": {
+          "description": "长按阈值（ms；K-6：按住满 500ms 且速度达标 → 抚摸域）。",
+          "default": 500,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "strokeSpeedMaxPxPerSec": {
+          "description": "抚摸速度上限（px/s；K-6：速度 <800 判抚摸，否则分流拖拽）。",
+          "default": 800,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "throwSpeedMinPxPerSec": {
+          "description": "甩出速度阈值（px/s；K-6：松手速度 >1200 → 甩出）。",
+          "default": 1200,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tickleClicksMin": {
+          "description": "连点触发次数（次；K-6：窗内 ≥5 击 → 戳痒）。",
+          "default": 5,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "tickleWindowMs": {
+          "description": "连点滚动窗（ms；K-6：2s 内累计点击）。",
+          "default": 2000,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "trailMaxPoints": {
+          "description": "轨迹缓冲点数（点；FR-4-9：最近 32 采样点）。",
+          "default": 32,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "zigzagReversalMin": {
+          "description": "Z 字反转次数阈值（次；FR-4-9：≥2 次方向反转）。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "zigzagTurnMinDeg": {
+          "description": "Z 字反转夹角阈值（度；FR-4-9：夹角 >60°）。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "InteractionCfg": {
+      "description": "交互配置（`02 K-3` RV-18 + `02 §5.23` 三层防护 + `02 §5 K-6` 手势参数）。",
+      "type": "object",
+      "properties": {
+        "clickFeedback": {
+          "description": "单击微反馈（S3-M6 触发映射：Click → 微反馈尘土；`interaction.clickFeedback` 嵌套子对象，serde default 向后兼容——旧 settings.json 缺段时取内置默认）。",
+          "default": {
+            "burstCount": 6,
+            "enabled": true
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ClickFeedbackCfg"
+            }
+          ]
+        },
+        "gesture": {
+          "description": "手势参数（S3-M3，`02 §5 K-6` 表；嵌套子对象，serde default 向后兼容—— 旧 settings.json 缺 `gesture` 段时整体取内置默认，R19）。",
+          "default": {
+            "circleTurnMinDeg": 270,
+            "doubleClickWindowMs": 300,
+            "dragThresholdPx": 8,
+            "hoverEnterMs": 600,
+            "hoverLongMs": 2000,
+            "lineResidualMaxPx": 12,
+            "longPressMs": 500,
+            "strokeSpeedMaxPxPerSec": 800,
+            "throwSpeedMinPxPerSec": 1200,
+            "tickleClicksMin": 5,
+            "tickleWindowMs": 2000,
+            "trailMaxPoints": 32,
+            "zigzagReversalMin": 2,
+            "zigzagTurnMinDeg": 60
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/GestureCfg"
+            }
+          ]
+        },
+        "gravityPxPerSec2": {
+          "description": "重力加速度（`02 K-3` RV-18：`gravityPxPerSec2` 单一真源，默认 2400）。",
+          "default": 2400.0,
+          "type": "number",
+          "format": "float"
+        },
+        "trayFallbackEnabled": {
+          "description": "托盘替代入口开关（`02 §5.23` 首选解法）。",
+          "default": true,
+          "type": "boolean"
+        },
+        "unavailablePresenceFactor": {
+          "description": "交互不可用时的在场因子（`02 §5.23`：与\"不在场\"同档，不归零）。",
+          "default": 0.05000000074505806,
+          "type": "number",
+          "format": "float"
+        },
+        "unreachableHoldSec": {
+          "description": "不可达自然回退保持时长（秒）。",
+          "default": 180,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "unreachableNaturalFloorLevel": {
+          "description": "不可达自然回退等级下限（L4；L5 任何情况不开放）。",
+          "default": 4,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "unreachableNoNegativeSec": {
+          "description": "不可达自然回退要求的无负向窗口时长（秒）。",
+          "default": 7200,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PrivacyCfg": {
+      "description": "隐私开关（`02` Q-18：关闭后 presence/busyness 恒 1.0、退化为纯时间模型）。",
+      "type": "object",
+      "properties": {
+        "activitySensing": {
+          "description": "活跃感知开关。",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "RoamCfg": {
+      "description": "漫游参数（`02 K-3`）。",
+      "type": "object",
+      "properties": {
+        "cursorAvoidRadiusPx": {
+          "description": "避让光标半径（物理像素，`02 K-3`：150px 热区）。",
+          "default": 150,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "decisionIntervalSec": {
+          "description": "漫游决策间隔区间（秒，`02 K-3`：每 5~30s）。",
+          "default": [
+            5,
+            30
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "pace": {
+          "description": "漫游步调节奏缩放系数（`02 K-3` `roamPace`）。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        },
+        "walkSpeedPxPerSec": {
+          "description": "行走速度（VDC 逻辑像素/秒；S2-M4 新增，`01 §6.2` FR-2-7「运动参数可调」 对照项。缺字段由容器级 `default` 兜底为内置默认，向后兼容）。",
+          "default": 60.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    }
+  }
+}

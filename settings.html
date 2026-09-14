@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- 零网络红线（C9）：禁止任何外链资源与 remote URL -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost;" />
+    <title>desktop-pet · 设置</title>
+  </head>
+  <!-- 设置窗口（label = settings，`src-tauri/tauri.conf.json` 声明），React 挂载点 -->
+  <body>
+    <div id="settings-root"></div>
+    <script type="module" src="/src/settings/main.tsx"></script>
+  </body>
+</html>

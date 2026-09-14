@@ -1,0 +1,1180 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NeedsConfig",
+  "description": "`needs.json` 根：生存需求六维、分档、事件扣减、洗澡与耦合矩阵。",
+  "type": "object",
+  "properties": {
+    "bands": {
+      "description": "分档表现。",
+      "default": {
+        "cleanliness": [
+          {
+            "action": null,
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "fresh",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 70.0,
+            "moodDecayMul": null,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": null,
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "normal",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 50.0,
+            "moodDecayMul": null,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-04",
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "stained",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 30.0,
+            "moodDecayMul": null,
+            "patches": [
+              1,
+              2
+            ],
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-05",
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "dirty",
+            "intervalSec": [
+              120,
+              300
+            ],
+            "jobRewardMul": null,
+            "min": 15.0,
+            "moodDecayMul": 1.2999999523162842,
+            "patches": [
+              2,
+              4
+            ],
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-06",
+            "affinityGainMul": 0.5,
+            "deny": [
+              "study"
+            ],
+            "effect": "flies",
+            "emotion": null,
+            "id": "filthy",
+            "intervalSec": null,
+            "jobRewardMul": 0.6000000238418579,
+            "min": 0.0,
+            "moodDecayMul": null,
+            "patches": [
+              4,
+              6
+            ],
+            "speedMul": null,
+            "strokeGainMul": 0.5
+          }
+        ],
+        "satiety": [
+          {
+            "action": null,
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "full",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 70.0,
+            "moodDecayMul": null,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": null,
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "normal",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 40.0,
+            "moodDecayMul": null,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-01",
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "peckish",
+            "intervalSec": [
+              180,
+              480
+            ],
+            "jobRewardMul": null,
+            "min": 20.0,
+            "moodDecayMul": 1.2000000476837158,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-01",
+            "affinityGainMul": null,
+            "deny": [],
+            "effect": null,
+            "emotion": null,
+            "id": "hungry",
+            "intervalSec": null,
+            "jobRewardMul": 0.699999988079071,
+            "min": 5.0,
+            "moodDecayMul": 1.7999999523162842,
+            "patches": null,
+            "speedMul": 0.8500000238418579,
+            "strokeGainMul": null
+          },
+          {
+            "action": "ACT-N-01",
+            "affinityGainMul": null,
+            "deny": [
+              "work",
+              "study",
+              "travel"
+            ],
+            "effect": null,
+            "emotion": "Aggrieved",
+            "id": "starving",
+            "intervalSec": null,
+            "jobRewardMul": null,
+            "min": 0.0,
+            "moodDecayMul": 2.5,
+            "patches": null,
+            "speedMul": null,
+            "strokeGainMul": null
+          }
+        ]
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/NeedsBandsCfg"
+        }
+      ]
+    },
+    "bath": {
+      "description": "洗澡流程配置。",
+      "default": {
+        "actionId": "ACT-N-07",
+        "cleanliness": 100.0,
+        "durationMs": [
+          8000,
+          12000
+        ],
+        "endActionId": "ACT-N-08",
+        "energy": -3.0,
+        "freeCdMin": 30,
+        "mood": 6.0,
+        "priority": 8
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/BathCfg"
+        }
+      ]
+    },
+    "coupling": {
+      "description": "耦合矩阵（`02 §5.10`，含 C-01~C-16 与构建期环检查）。",
+      "default": {
+        "combine": {
+          "affinityGain": "mul",
+          "energyRecover": "mul",
+          "jobReward": "mul",
+          "moodDecay": "max",
+          "speed": "mul",
+          "strokeGain": "mul",
+          "studyEff": "mul"
+        },
+        "rules": [
+          {
+            "id": "C-01",
+            "op": "mul",
+            "reason": null,
+            "target": "moodDecay",
+            "value": 1.7999999523162842,
+            "when": "satiety<20"
+          },
+          {
+            "id": "C-02",
+            "op": "mul",
+            "reason": null,
+            "target": "moodDecay",
+            "value": 2.5,
+            "when": "satiety<=0"
+          },
+          {
+            "id": "C-03",
+            "op": "mul",
+            "reason": null,
+            "target": "energyRecover",
+            "value": 0.5,
+            "when": "satiety<40"
+          },
+          {
+            "id": "C-04",
+            "op": "mul",
+            "reason": null,
+            "target": "jobReward",
+            "value": 0.699999988079071,
+            "when": "satiety<20"
+          },
+          {
+            "id": "C-05",
+            "op": "deny",
+            "reason": "心心没力气了",
+            "target": "dispatch",
+            "value": "work",
+            "when": "satiety<5"
+          },
+          {
+            "id": "C-06",
+            "op": "mul",
+            "reason": null,
+            "target": "moodDecay",
+            "value": 1.2999999523162842,
+            "when": "cleanliness<30"
+          },
+          {
+            "id": "C-07",
+            "op": "mul",
+            "reason": null,
+            "target": "strokeGain",
+            "value": 0.5,
+            "when": "cleanliness<15"
+          },
+          {
+            "id": "C-08",
+            "op": "mul",
+            "reason": null,
+            "target": "affinityGain",
+            "value": 0.5,
+            "when": "cleanliness<15"
+          },
+          {
+            "id": "C-09",
+            "op": "mul",
+            "reason": null,
+            "target": "jobReward",
+            "value": 0.6000000238418579,
+            "when": "cleanliness<15"
+          },
+          {
+            "id": "C-10",
+            "op": "deny",
+            "reason": "洗干净再去上课",
+            "target": "dispatch",
+            "value": "study",
+            "when": "cleanliness<15"
+          },
+          {
+            "id": "C-11",
+            "op": "deny",
+            "reason": "心心太累了",
+            "target": "dispatch",
+            "value": "work,study,travel",
+            "when": "energy<20"
+          },
+          {
+            "id": "C-12",
+            "op": "mul",
+            "reason": null,
+            "target": "speed",
+            "value": 0.800000011920929,
+            "when": "energy<20"
+          },
+          {
+            "id": "C-13",
+            "op": "mul",
+            "reason": null,
+            "target": "studyEff",
+            "value": 0.6000000238418579,
+            "when": "mood<30"
+          },
+          {
+            "id": "C-14",
+            "op": "mul",
+            "reason": null,
+            "target": "jobReward",
+            "value": 0.800000011920929,
+            "when": "mood<30"
+          },
+          {
+            "id": "C-15",
+            "op": "mul",
+            "reason": null,
+            "target": "jobReward",
+            "value": 1.149999976158142,
+            "when": "mood>80"
+          },
+          {
+            "id": "C-16",
+            "op": "mul",
+            "reason": null,
+            "target": "travelGain",
+            "value": 1.2000000476837158,
+            "when": "mood>80"
+          }
+        ],
+        "smoothSec": 5,
+        "version": 1
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/CouplingCfg"
+        }
+      ]
+    },
+    "dimensions": {
+      "description": "六维速率定义（satiety / cleanliness）。",
+      "default": {
+        "cleanliness": {
+          "activityMultiplier": 2.0,
+          "decayPerMin": -0.07999999821186066,
+          "default": 85.0,
+          "max": 100.0,
+          "mealMultiplier": 1.0,
+          "min": 0.0,
+          "sleepMultiplier": 1.0
+        },
+        "satiety": {
+          "activityMultiplier": 2.0,
+          "decayPerMin": -0.05000000074505806,
+          "default": 70.0,
+          "max": 100.0,
+          "mealMultiplier": 2.5,
+          "min": 0.0,
+          "sleepMultiplier": 0.4000000059604645
+        }
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/NeedsDimensionsCfg"
+        }
+      ]
+    },
+    "eventDeltas": {
+      "description": "一次性事件扣减（`02 §5.9` / §5.12）。",
+      "default": {
+        "eat": {
+          "cleanliness": -3.0
+        },
+        "roll": {
+          "cleanliness": -8.0
+        },
+        "study": {
+          "cleanliness": -2.0
+        },
+        "thrownLand": {
+          "cleanliness": -5.0
+        },
+        "trip": {
+          "cleanliness": -15.0
+        }
+      },
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/NeedEventDeltaCfg"
+      }
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "BathCfg": {
+      "description": "洗澡流程配置（`02 §5.12` bath）。",
+      "type": "object",
+      "properties": {
+        "actionId": {
+          "description": "洗澡入场动作。",
+          "default": "ACT-N-07",
+          "type": "string"
+        },
+        "cleanliness": {
+          "description": "结束时清洁度恢复到值。",
+          "default": 100.0,
+          "type": "number",
+          "format": "float"
+        },
+        "durationMs": {
+          "description": "洗澡时长区间（毫秒，8~12s）。",
+          "default": [
+            8000,
+            12000
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "endActionId": {
+          "description": "洗澡结束动作。",
+          "default": "ACT-N-08",
+          "type": "string"
+        },
+        "energy": {
+          "description": "结束精力变化。",
+          "default": -3.0,
+          "type": "number",
+          "format": "float"
+        },
+        "freeCdMin": {
+          "description": "免费冷却（分钟）。",
+          "default": 30,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "mood": {
+          "description": "结束心情变化。",
+          "default": 6.0,
+          "type": "number",
+          "format": "float"
+        },
+        "priority": {
+          "description": "洗澡演出优先级。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "CombineCfg": {
+      "description": "各输出量合并策略（`02 §5.10`）。",
+      "type": "object",
+      "properties": {
+        "affinityGain": {
+          "description": "亲密度增益合并策略。",
+          "default": "mul",
+          "type": "string"
+        },
+        "energyRecover": {
+          "description": "精力恢复合并策略。",
+          "default": "mul",
+          "type": "string"
+        },
+        "jobReward": {
+          "description": "打工收益合并策略。",
+          "default": "mul",
+          "type": "string"
+        },
+        "moodDecay": {
+          "description": "心情衰减合并策略。",
+          "default": "max",
+          "type": "string"
+        },
+        "speed": {
+          "description": "速度合并策略。",
+          "default": "mul",
+          "type": "string"
+        },
+        "strokeGain": {
+          "description": "抚摸增益合并策略。",
+          "default": "mul",
+          "type": "string"
+        },
+        "studyEff": {
+          "description": "学习效率合并策略。",
+          "default": "mul",
+          "type": "string"
+        }
+      }
+    },
+    "CouplingCfg": {
+      "description": "耦合矩阵（`02 §5.10`：combine + smoothSec + C-01~C-16 规则）。",
+      "type": "object",
+      "properties": {
+        "combine": {
+          "description": "各输出量的合并策略（max / mul）。",
+          "default": {
+            "affinityGain": "mul",
+            "energyRecover": "mul",
+            "jobReward": "mul",
+            "moodDecay": "max",
+            "speed": "mul",
+            "strokeGain": "mul",
+            "studyEff": "mul"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CombineCfg"
+            }
+          ]
+        },
+        "rules": {
+          "description": "耦合规则列表。",
+          "default": [
+            {
+              "id": "C-01",
+              "op": "mul",
+              "reason": null,
+              "target": "moodDecay",
+              "value": 1.7999999523162842,
+              "when": "satiety<20"
+            },
+            {
+              "id": "C-02",
+              "op": "mul",
+              "reason": null,
+              "target": "moodDecay",
+              "value": 2.5,
+              "when": "satiety<=0"
+            },
+            {
+              "id": "C-03",
+              "op": "mul",
+              "reason": null,
+              "target": "energyRecover",
+              "value": 0.5,
+              "when": "satiety<40"
+            },
+            {
+              "id": "C-04",
+              "op": "mul",
+              "reason": null,
+              "target": "jobReward",
+              "value": 0.699999988079071,
+              "when": "satiety<20"
+            },
+            {
+              "id": "C-05",
+              "op": "deny",
+              "reason": "心心没力气了",
+              "target": "dispatch",
+              "value": "work",
+              "when": "satiety<5"
+            },
+            {
+              "id": "C-06",
+              "op": "mul",
+              "reason": null,
+              "target": "moodDecay",
+              "value": 1.2999999523162842,
+              "when": "cleanliness<30"
+            },
+            {
+              "id": "C-07",
+              "op": "mul",
+              "reason": null,
+              "target": "strokeGain",
+              "value": 0.5,
+              "when": "cleanliness<15"
+            },
+            {
+              "id": "C-08",
+              "op": "mul",
+              "reason": null,
+              "target": "affinityGain",
+              "value": 0.5,
+              "when": "cleanliness<15"
+            },
+            {
+              "id": "C-09",
+              "op": "mul",
+              "reason": null,
+              "target": "jobReward",
+              "value": 0.6000000238418579,
+              "when": "cleanliness<15"
+            },
+            {
+              "id": "C-10",
+              "op": "deny",
+              "reason": "洗干净再去上课",
+              "target": "dispatch",
+              "value": "study",
+              "when": "cleanliness<15"
+            },
+            {
+              "id": "C-11",
+              "op": "deny",
+              "reason": "心心太累了",
+              "target": "dispatch",
+              "value": "work,study,travel",
+              "when": "energy<20"
+            },
+            {
+              "id": "C-12",
+              "op": "mul",
+              "reason": null,
+              "target": "speed",
+              "value": 0.800000011920929,
+              "when": "energy<20"
+            },
+            {
+              "id": "C-13",
+              "op": "mul",
+              "reason": null,
+              "target": "studyEff",
+              "value": 0.6000000238418579,
+              "when": "mood<30"
+            },
+            {
+              "id": "C-14",
+              "op": "mul",
+              "reason": null,
+              "target": "jobReward",
+              "value": 0.800000011920929,
+              "when": "mood<30"
+            },
+            {
+              "id": "C-15",
+              "op": "mul",
+              "reason": null,
+              "target": "jobReward",
+              "value": 1.149999976158142,
+              "when": "mood>80"
+            },
+            {
+              "id": "C-16",
+              "op": "mul",
+              "reason": null,
+              "target": "travelGain",
+              "value": 1.2000000476837158,
+              "when": "mood>80"
+            }
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CouplingRuleCfg"
+          }
+        },
+        "smoothSec": {
+          "description": "moodDecayMul 移动平均平滑窗口（秒，`02 §5.10`：5s）。",
+          "default": 5,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "version": {
+          "description": "耦合配置版本。",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "CouplingRuleCfg": {
+      "description": "单条耦合规则（`02 §5.10`）。",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "规则 ID（C-xx）。",
+          "default": "",
+          "type": "string"
+        },
+        "op": {
+          "description": "运算（mul / deny 等）。",
+          "default": "",
+          "type": "string"
+        },
+        "reason": {
+          "description": "拒绝原因文案（deny 时）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "description": "目标输出量（moodDecay / energyRecover / ... / dispatch）。",
+          "default": "",
+          "type": "string"
+        },
+        "value": {
+          "description": "取值。",
+          "default": 0.0,
+          "allOf": [
+            {
+              "$ref": "#/definitions/RuleValue"
+            }
+          ]
+        },
+        "when": {
+          "description": "条件表达式（如 `satiety<20`，基于 tick 起始快照）。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "NeedBandCfg": {
+      "description": "单条分档（`02 §5.12` bands）。`None` 数值字段语义 = 不修正（等价乘子 1.0）。",
+      "type": "object",
+      "properties": {
+        "action": {
+          "description": "触发动作 ID（无 = 不触发）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "affinityGainMul": {
+          "description": "亲密度增益乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "deny": {
+          "description": "拒绝派遣列表。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "effect": {
+          "description": "附加视觉特效。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "emotion": {
+          "description": "强制情绪态。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "description": "档位 ID。",
+          "default": "",
+          "type": "string"
+        },
+        "intervalSec": {
+          "description": "触发间隔区间（秒）。",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "jobRewardMul": {
+          "description": "打工收益乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "min": {
+          "description": "进入该档的最小值。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "moodDecayMul": {
+          "description": "心情衰减乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "patches": {
+          "description": "污渍贴片数量区间。",
+          "default": null,
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        },
+        "speedMul": {
+          "description": "移动速度乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "strokeGainMul": {
+          "description": "抚摸增益乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        }
+      }
+    },
+    "NeedDimensionCfg": {
+      "description": "单维度速率定义。",
+      "type": "object",
+      "properties": {
+        "activityMultiplier": {
+          "description": "活动进行倍率。",
+          "default": 2.0,
+          "type": "number",
+          "format": "float"
+        },
+        "decayPerMin": {
+          "description": "每分钟自然变化速率（负 = 衰减）。",
+          "default": -0.05000000074505806,
+          "type": "number",
+          "format": "float"
+        },
+        "default": {
+          "description": "默认值。",
+          "default": 70.0,
+          "type": "number",
+          "format": "float"
+        },
+        "max": {
+          "description": "上限。",
+          "default": 100.0,
+          "type": "number",
+          "format": "float"
+        },
+        "mealMultiplier": {
+          "description": "用餐窗口倍率。",
+          "default": 2.5,
+          "type": "number",
+          "format": "float"
+        },
+        "min": {
+          "description": "下限。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "sleepMultiplier": {
+          "description": "睡眠倍率。",
+          "default": 0.4000000059604645,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "NeedEventDeltaCfg": {
+      "description": "单条事件扣减（`02 §5.12` eventDeltas，当前仅 cleanliness）。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度变化量。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "NeedsBandsCfg": {
+      "description": "分档表现集合。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度分档。",
+          "default": [
+            {
+              "action": null,
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "fresh",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 70.0,
+              "moodDecayMul": null,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": null,
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "normal",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 50.0,
+              "moodDecayMul": null,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-04",
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "stained",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 30.0,
+              "moodDecayMul": null,
+              "patches": [
+                1,
+                2
+              ],
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-05",
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "dirty",
+              "intervalSec": [
+                120,
+                300
+              ],
+              "jobRewardMul": null,
+              "min": 15.0,
+              "moodDecayMul": 1.2999999523162842,
+              "patches": [
+                2,
+                4
+              ],
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-06",
+              "affinityGainMul": 0.5,
+              "deny": [
+                "study"
+              ],
+              "effect": "flies",
+              "emotion": null,
+              "id": "filthy",
+              "intervalSec": null,
+              "jobRewardMul": 0.6000000238418579,
+              "min": 0.0,
+              "moodDecayMul": null,
+              "patches": [
+                4,
+                6
+              ],
+              "speedMul": null,
+              "strokeGainMul": 0.5
+            }
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NeedBandCfg"
+          }
+        },
+        "satiety": {
+          "description": "饱食度分档。",
+          "default": [
+            {
+              "action": null,
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "full",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 70.0,
+              "moodDecayMul": null,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": null,
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "normal",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 40.0,
+              "moodDecayMul": null,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-01",
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "peckish",
+              "intervalSec": [
+                180,
+                480
+              ],
+              "jobRewardMul": null,
+              "min": 20.0,
+              "moodDecayMul": 1.2000000476837158,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-01",
+              "affinityGainMul": null,
+              "deny": [],
+              "effect": null,
+              "emotion": null,
+              "id": "hungry",
+              "intervalSec": null,
+              "jobRewardMul": 0.699999988079071,
+              "min": 5.0,
+              "moodDecayMul": 1.7999999523162842,
+              "patches": null,
+              "speedMul": 0.8500000238418579,
+              "strokeGainMul": null
+            },
+            {
+              "action": "ACT-N-01",
+              "affinityGainMul": null,
+              "deny": [
+                "work",
+                "study",
+                "travel"
+              ],
+              "effect": null,
+              "emotion": "Aggrieved",
+              "id": "starving",
+              "intervalSec": null,
+              "jobRewardMul": null,
+              "min": 0.0,
+              "moodDecayMul": 2.5,
+              "patches": null,
+              "speedMul": null,
+              "strokeGainMul": null
+            }
+          ],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/NeedBandCfg"
+          }
+        }
+      }
+    },
+    "NeedsDimensionsCfg": {
+      "description": "六维速率定义（`02 §5.12`；`decayPerMin` 对齐 RV-01：satiety −0.05 / cleanliness −0.08）。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度维度。",
+          "default": {
+            "activityMultiplier": 2.0,
+            "decayPerMin": -0.07999999821186066,
+            "default": 85.0,
+            "max": 100.0,
+            "mealMultiplier": 1.0,
+            "min": 0.0,
+            "sleepMultiplier": 1.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/NeedDimensionCfg"
+            }
+          ]
+        },
+        "satiety": {
+          "description": "饱食度维度。",
+          "default": {
+            "activityMultiplier": 2.0,
+            "decayPerMin": -0.05000000074505806,
+            "default": 70.0,
+            "max": 100.0,
+            "mealMultiplier": 2.5,
+            "min": 0.0,
+            "sleepMultiplier": 0.4000000059604645
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/NeedDimensionCfg"
+            }
+          ]
+        }
+      }
+    },
+    "RuleValue": {
+      "description": "规则取值：数值乘子或派遣类别字符串（untagged 双型）。",
+      "anyOf": [
+        {
+          "description": "数值（乘子）。",
+          "type": "number",
+          "format": "float"
+        },
+        {
+          "description": "文本（派遣类别，如 \"work,study,travel\"）。",
+          "type": "string"
+        }
+      ]
+    }
+  }
+}

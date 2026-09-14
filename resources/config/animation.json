@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "easing": { "move": "easeOutBack1.2", "emotion": "easeInOutCubic", "entrance": "easeOutBack1.7", "default": "easeInOutCubic" },
+  "fadeMs": { "min": 150, "max": 250, "default": 200 },
+  "physics": {
+    "enabled": true,
+    "subStepMs": 8,
+    "level": "full",
+    "parts": []
+  },
+  "micro": {
+    "intervalSec": [5, 12],
+    "noRepeatSec": 60,
+    "items": [
+      { "id": "ear_twitch", "weight": 25, "clip": "anim_micro_ear" },
+      { "id": "tail_swing", "weight": 20, "clip": "anim_micro_tail" },
+      { "id": "weight_shift", "weight": 15, "clip": "anim_micro_shift" },
+      { "id": "blink_smile", "weight": 15, "clip": "anim_micro_blink" },
+      { "id": "hum", "weight": 10, "clip": "anim_micro_hum", "particle": "note" },
+      { "id": "look_around", "weight": 8, "clip": "anim_micro_look" },
+      { "id": "small_jump", "weight": 5, "clip": "anim_micro_jump" },
+      { "id": "tidy_hair", "weight": 2, "clip": "anim_micro_hair" }
+    ],
+    "lowMoodReplace": ["sigh", "hug_knees"]
+  },
+  "breath": { "periodSec": [3.2, 4.0], "chestScale": 0.015, "headYpx": 1, "sleepPeriodSec": 5.0, "sleepMul": 1.6 },
+  "blink": { "intervalMs": [2000, 6000], "peakMs": 3500, "durationMs": [120, 180], "speakingFactor": 0.3, "shyFactor": 1.5 },
+  "gaze": { "intervalSec": [3, 8], "easeMs": 200 },
+  "squash": { "anticipation": [0.85, 1.15], "stretch": [1.15, 0.9], "landing": [0.8, 1.2], "recoverMs": 200, "overshoot": [0.08, 0.15] },
+  "particles": { "maxPerBurst": 60, "lifeSec": 1.2 }
+}

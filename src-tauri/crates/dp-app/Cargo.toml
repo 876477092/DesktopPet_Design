@@ -1,0 +1,44 @@
+[package]
+name = "dp-app"
+description = "Tauri 应用层：运行时启动、命令出口、事件桥接、主循环与托盘"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+build = "build.rs"
+publish = false
+
+# ---------------------------------------------------------------------------
+# 二进制：与 `tauri.conf.json` 的 `mainBinaryName` 一致，
+# `cargo build` 产出 `DesktopPet.exe`；Tauri CLI 亦按此名定位产物。
+# ---------------------------------------------------------------------------
+[[bin]]
+name = "DesktopPet"
+path = "src/main.rs"
+
+[lib]
+name = "dp_app"
+path = "src/lib.rs"
+
+# Tauri 标准特性：启用后前端从 `build.frontendDist` 加载（发布态），
+# 未启用时从 `build.devUrl` 加载（开发态）。`tauri build` 会自动带上该特性。
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+# S1-M3：托盘需 `tray-icon`（Tauri 2 内置 `TrayIconBuilder`，底层 `Shell_NotifyIcon`）；
+# `image-ico` 用于 `Image::from_bytes` 解析 `icons/tray.ico` / `icons/tray-gray.ico`。
+tauri = { workspace = true, features = ["tray-icon", "image-ico"] }
+# S1-M2：平台窗口层（PlatformWindow Win 实装）——把 pet 窗口接上透明/置顶/全屏能力。
+dp-platform = { path = "../dp-platform" }
+# S2-M2：动作目录与播放器（`dp-core::anim`：ActionCatalog / ActionPlayer /
+# FpsTier 档位 / K-4 镜像规则；同 workspace crate，零新增外部依赖）。
+dp-core = { path = "../dp-core" }
+# S2-M1：`RenderFrameCmd` v1 序列化（`02 §7.6`，MIT OR Apache-2.0）与图集元数据/
+# 目录解析复用（dp-assets 为同 workspace crate，零新增外部依赖）。
+serde = { workspace = true }
+serde_json = { workspace = true }
+dp-assets = { path = "../dp-assets" }
+
+[build-dependencies]
+tauri-build = { workspace = true }

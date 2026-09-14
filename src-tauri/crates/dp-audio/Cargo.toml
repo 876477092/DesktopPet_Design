@@ -1,0 +1,16 @@
+[package]
+name = "dp-audio"
+description = "音频：解码与播放总线（OGG，队列上限 8，溢出丢弃）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "dp_audio"
+path = "src/lib.rs"
+
+# S1-M1 骨架：不预先引入依赖。
+# 随音频模块落地引入 `rodio`（`02 §2.5`，MIT OR Apache-2.0）。
+[dependencies]

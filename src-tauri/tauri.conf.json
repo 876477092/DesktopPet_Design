@@ -1,0 +1,74 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "DesktopPet",
+  "version": "0.1.0",
+  "identifier": "com.desktoppet.app",
+  "mainBinaryName": "DesktopPet",
+  "build": {
+    "beforeDevCommand": "pnpm run dev",
+    "beforeBuildCommand": "pnpm exec vite build",
+    "devUrl": "http://localhost:5173",
+    "frontendDist": "dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "pet",
+        "title": "DesktopPet",
+        "url": "/index.html",
+        "width": 256.0,
+        "height": 256.0,
+        "x": 120.0,
+        "y": 120.0,
+        "resizable": false,
+        "center": false,
+        "focus": false,
+        "shadow": false,
+        "transparent": true,
+        "decorations": false,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true,
+        "additionalBrowserArgs": "--disable-features=msEdgeIdentity,msEdgeAutofill,msEdgePdf,msSmartScreenProtection --no-first-run --disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --disable-breakpad --disable-crash-reporter"
+      },
+      {
+        "label": "settings",
+        "title": "DesktopPet · 设置",
+        "url": "/settings.html",
+        "visible": false,
+        "width": 480.0,
+        "height": 640.0,
+        "resizable": true,
+        "center": true,
+        "shadow": true,
+        "transparent": false,
+        "decorations": false,
+        "skipTaskbar": false,
+        "visibleOnAllWorkspaces": true,
+        "additionalBrowserArgs": "--disable-features=msEdgeIdentity,msEdgeAutofill,msEdgePdf,msSmartScreenProtection --no-first-run --disable-background-networking --disable-component-update --disable-domain-reliability --disable-sync --disable-breakpad --disable-crash-reporter"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; media-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://localhost:5173 ws://localhost:5173; media-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+      "assetProtocol": {
+        "enable": false
+      }
+    },
+    "withGlobalTauri": false
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "resources": ["../resources", "../assets"],
+    "copyright": "Copyright © 2026 desktop-pet",
+    "category": "Utility",
+    "shortDescription": "桌面宠物",
+    "longDescription": "桌面宠物（Tauri 2 + WebView2，完全离线的单机桌面宠物）",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
+  }
+}
