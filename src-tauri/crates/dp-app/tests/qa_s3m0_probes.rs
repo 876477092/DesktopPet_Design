@@ -60,6 +60,9 @@ fn landless_state(now_ms: u64) -> CoreLoopState {
             catalog: ActionCatalog::default(),
             emotion: EmotionConfig::default(),
             needs: NeedsConfig::default(),
+            // S4-M5 / S4-M6 起 `CoreCfg` 追加台词库与音效总线；本探针只关心装配层
+            // 三档 / 相机器 / 时钟回拨，故显式取「无台词 / 无音效」默认形态。
+            ..CoreCfg::default()
         },
         7,
         now_ms,
@@ -127,6 +130,9 @@ fn topology_change_paths_do_not_panic_and_keep_pos_finite() {
             catalog: ActionCatalog::default(),
             emotion: EmotionConfig::default(),
             needs: NeedsConfig::default(),
+            // S4-M5 / S4-M6 起 `CoreCfg` 追加台词库与音效总线；本探针只关心装配层
+            // 三档 / 相机器 / 时钟回拨，故显式取「无台词 / 无音效」默认形态。
+            ..CoreCfg::default()
         },
         7,
         0,

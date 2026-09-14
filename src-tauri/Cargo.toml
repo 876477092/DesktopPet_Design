@@ -38,6 +38,13 @@ license = "MIT OR Apache-2.0"
 #     `Win32_System_Threading`（GetSystemTimes CPU 负载差分；注意该 API 位于 Threading
 #     而非 SystemInformation）、`Win32_UI_Input_KeyboardAndMouse`
 #     （GetLastInputInfo 在场空闲）。
+# S4-M6（T-13 段 · 下 / FR-7-3 音量 / FR-7-4 勿扰）新增：
+#   - `rodio`：音效播放（`02 §2.5` 已登记行，MIT OR Apache-2.0）。**默认特性关闭**，
+#     仅取 `symphonia-vorbis`（OGG Vorbis 解码，`02 §7.7-4` 音效格式）+ `symphonia-wav`
+#     （WAV 兜底），避免拖入 flac/mp3 解码器（`02 §2.5` 最小必需集口径）。
+#     **C9 零网络口径**：rodio → cpal（Windows 走 `windows` crate / WASAPI）+ symphonia，
+#     全为纯本地解码与音频设备访问，`cargo tree` 无 `reqwest` / `hyper` /
+#     `tokio-tungstenite`，运行期零外连；capabilities 与 CSP 不变。
 # S4-M1（T-11 段 · 上 / FR-1-10 / F10 会话暂停）新增：
 #   - `Win32_System_RemoteDesktop`：`WTSQuerySessionInformationW` / `WTSFreeMemory`
 #     （锁屏 / 远程桌面会话状态轮询）。**C9 零网络口径**：仅调用本机 `wtsapi32.dll`，
@@ -56,6 +63,10 @@ lru = { version = "0.12" }
 schemars = { version = "0.8" }
 crossbeam-channel = { version = "0.5" }
 chrono = { version = "0.4" }
+rodio = { version = "0.19", default-features = false, features = [
+    "symphonia-vorbis",
+    "symphonia-wav",
+] }
 
 # Win32 句柄 / 窗口 / 显示器 / DPI / DWM / Shell（ITaskbarList）。
 # feature 为「最小必需集」，避免拖入超重模块拖慢编译。

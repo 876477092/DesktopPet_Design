@@ -25,6 +25,10 @@ Thumbs.db
 # 占位目录：保留 .gitkeep
 assets/*
 !assets/.gitkeep
+# S4-M6：音效资产为版本化交付物（`02 §7.7-4` 音效 OGG ≤200KB/条；`03 §2 S4-M6`
+# 交付物 `assets/audio/*.ogg`），由 `scripts/gen-audio.py` 自制生成后入库。
+!assets/audio/
+!assets/audio/*.ogg
 resources/**
 !resources/.gitkeep
 # S1-M5：外置配置与 JSON Schema 为版本化交付物（02 §4.2），放行两目录下的 .json。

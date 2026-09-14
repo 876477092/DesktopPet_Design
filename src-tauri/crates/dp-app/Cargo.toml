@@ -39,6 +39,9 @@ dp-core = { path = "../dp-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dp-assets = { path = "../dp-assets" }
+# S4-M6：音效服务（rodio 播放 + 门控/队列总线；同 workspace crate，零新增第三方依赖——
+# rodio 由 dp-audio 声明，本 crate 只消费其公开 API）。
+dp-audio = { path = "../dp-audio" }
 
 [build-dependencies]
 tauri-build = { workspace = true }

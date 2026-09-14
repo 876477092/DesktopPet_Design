@@ -574,6 +574,12 @@ pub const EMOTION_EVENT: &str = dp_core::event::EVENT_EMOTION;
 /// **真源 = `dp_core::event::EVENT_COAX`**（同 [`STATE_EVENT`] 口径，C8）。
 pub const COAX_EVENT: &str = dp_core::event::EVENT_COAX;
 
+/// `pet://bubble` 事件名（`02 §7.6` 已登记；**S4-M5 起启用**——Rust 侧生产者补齐）。
+///
+/// **真源 = `dp_core::event::EVENT_BUBBLE`**（同 [`STATE_EVENT`] 口径，C8）。
+/// 载荷类型 = `dp_core::event::BubbleWire`（与前端 `BubbleCmdV1` 九字段同构）。
+pub const BUBBLE_EVENT: &str = dp_core::event::EVENT_BUBBLE;
+
 /// `ParticleCmd` / `MenuCmd` 载荷结构版本（v1；本批 Rust 即生产者，与
 /// `src/shared/ipc.ts` 的 `PARTICLE_CMD_VERSION` / `MENU_CMD_VERSION` 同源）。
 pub const PARTICLE_CMD_VERSION: u32 = 1;
@@ -877,11 +883,21 @@ mod tests {
         assert_eq!(STATE_EVENT, dp_core::event::EVENT_STATE);
         assert_eq!(EMOTION_EVENT, dp_core::event::EVENT_EMOTION);
         assert_eq!(COAX_EVENT, dp_core::event::EVENT_COAX);
+        assert_eq!(BUBBLE_EVENT, dp_core::event::EVENT_BUBBLE);
         assert_eq!(STATE_EVENT, "pet://state");
         assert_eq!(EMOTION_EVENT, "pet://emotion");
         assert_eq!(COAX_EVENT, "pet://coax");
+        assert_eq!(BUBBLE_EVENT, "pet://bubble");
         // 与既有 S3-M6 事件名同为 `pet://<域>` 形态（C8 命名纪律）。
-        for name in [FRAME_EVENT, FX_EVENT, MENU_EVENT, STATE_EVENT, EMOTION_EVENT, COAX_EVENT] {
+        for name in [
+            FRAME_EVENT,
+            FX_EVENT,
+            MENU_EVENT,
+            STATE_EVENT,
+            EMOTION_EVENT,
+            COAX_EVENT,
+            BUBBLE_EVENT,
+        ] {
             assert!(name.starts_with("pet://"), "{name} 必须为 pet:// 命名空间");
             assert!(!name.contains(' '), "{name} 不得含空格");
         }

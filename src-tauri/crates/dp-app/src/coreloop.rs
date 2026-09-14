@@ -51,13 +51,17 @@ use std::time::{Duration, Instant};
 use dp_core::anim::{
     ActionArbiter, ActionCatalog, ActionRequest, ActionSource, Arbitration, Started,
 };
-use dp_core::config::ConfigService;
+use dp_core::config::{ConfigBundle, ConfigService};
 use dp_core::config::model::{
     ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig, RoamCfg,
 };
 use dp_core::emotion::TickEnv;
+use dp_core::emotion::coax::CoaxStep;
+use dp_core::emotion::lines::{
+    BubblePlanner, LinesLibrary, PlaceholderVars, PlannedBubble, render_placeholders,
+};
 use dp_core::emotion::{EmotionEngine, EmotionEvent};
-use dp_core::event::{project_snapshot, wire_for_events};
+use dp_core::event::{project_snapshot, wire_for_bubble, wire_for_events};
 #[cfg(test)]
 use dp_core::event::PetSnapshotV2;
 use dp_core::interaction::{InteractionKind, THROW_LANDING_CHAIN, act_of};
@@ -71,6 +75,7 @@ use dp_core::perception::{
 
 use tauri::{AppHandle, Emitter, Manager};
 
+use dp_audio::{AudioBus, AudioCue, AudioSettings};
 use dp_platform::win::cursor::read_cursor_vdc;
 use dp_platform::win::session::SessionWatcher;
 use dp_platform::win::system::{battery_status, last_input_idle_ms, CpuLoadSampler};
@@ -91,6 +96,12 @@ const FX_HEART_BURST_COUNT: u32 = 12;
 
 /// 甩出落地尘土迸发数量（S3-M6 表现档；落地由 `landed_thrown` 触发，挂落地链起点）。
 const FX_DUST_BURST_COUNT: u32 = 16;
+
+/// 三部曲成功后取词的台词池（S4-M5：`runaway` 池含 AC-04「哼…原谅你啦，下不为例！」）。
+const RUNAWAY_POOL: &str = "runaway";
+
+/// 进入比心窗时取词的台词池（S4-M5：比心撒娇属正向亲昵场景）。
+const HAPPY_POOL: &str = "happy";
 
 // ---------------------------------------------------------------------------
 // 周期常量（三档 + 感知三档；C3 绝对锚定网格的步长）
@@ -205,12 +216,64 @@ pub fn fx_burst_for_intent(
     }
 }
 
+/// 交互意图 → 音效 Cue（**S4-M6**；`01 §9.2` 清单的已落地触发面）。
+///
+/// 映射口径（唯一映射点，避免上层重复分支）：
+///   - `Click` → 「嘿嘿」；`DoubleClick` → 比心「叮」；`Stroke` → 心跳；
+///   - `Tickle` → 「呀啊啊」；`Throw` → 下落风声；
+///   - 其余（Hover / EarTwitch / DragStart / 轨迹彩蛋 / S7-M6 占位变体）→ `None`。
+///
+/// 情绪态 → 音效的**完整**映射表见 `01 §6.5.5`，其尚未落地的表现模块（讨食/求洗澡/
+/// 外出等）随各自里程碑补 Cue；本卡只接当前已存在的触发面。
+#[must_use]
+pub fn audio_cue_for_intent(kind: InteractionKind) -> Option<AudioCue> {
+    match kind {
+        InteractionKind::Click => Some(AudioCue::InteractHehe),
+        InteractionKind::DoubleClick => Some(AudioCue::InteractHeart),
+        InteractionKind::Stroke => Some(AudioCue::InteractHeartbeat),
+        InteractionKind::Tickle => Some(AudioCue::InteractYaa),
+        InteractionKind::Throw => Some(AudioCue::MoveWind),
+        _ => None,
+    }
+}
+
+/// 情绪算法事件 → 音效 Cue（**S4-M6**；`01 §6.5.5` 的 S4 已落地子集）。
+///
+/// 口径：
+///   - 阶段**升级**（`ColdLevelChanged`）按目标档位取音：L1 叹气 / L2 抽泣 / L3「哼」/
+///     L4 怒气音 / L5 脚步渐远（离家演出）；
+///   - 三部曲：进比心窗 → 比心「叮」；离家演出开始 → 脚步渐远；完成 → 欢呼；失败 →「哼！」。
+#[must_use]
+pub fn audio_cue_for_emotion(ev: &EmotionEvent) -> Option<AudioCue> {
+    match ev {
+        EmotionEvent::ColdLevelChanged { to, .. } => match *to {
+            1 => Some(AudioCue::EmotionSigh),
+            2 => Some(AudioCue::EmotionSob),
+            3 => Some(AudioCue::InteractHmph),
+            4 => Some(AudioCue::EmotionAnger),
+            5 => Some(AudioCue::EmotionStepsFade),
+            _ => None,
+        },
+        EmotionEvent::CoaxProgress { step, .. } => match step {
+            CoaxStep::Heart => Some(AudioCue::InteractHeart),
+            CoaxStep::Runaway | CoaxStep::Away => Some(AudioCue::EmotionStepsFade),
+            _ => None,
+        },
+        EmotionEvent::CoaxSucceeded { .. } => Some(AudioCue::EmotionCheer),
+        EmotionEvent::CoaxFailed { .. } => Some(AudioCue::InteractHmph),
+        _ => None,
+    }
+}
+
 /// core-loop 装配用的配置束（S4-M1 起引入：把 4 份配置从 `CoreLoopState::new` 的
 /// 位置参数里收进一个具名结构体，避免参数表膨胀到 clippy 的 7 参数上限）。
 ///
 /// `emotion` / `needs` 在构造时被 `Box::leak` 固化为 `'static`（见
 /// [`CoreLoopState::new`]），故本结构体只在装配期短暂存在。
-#[derive(Debug, Clone)]
+///
+/// `Default` 供**测试夹具**与「只关心个别字段」的装配点用 `..CoreCfg::default()` 补全
+/// （`lines` 为空库、`audio` 为 `None`，即「无台词 / 无音效」的静默形态）。
+#[derive(Debug, Clone, Default)]
 pub struct CoreCfg {
     /// 漫游配置。
     pub roam_cfg: RoamCfg,
@@ -222,6 +285,14 @@ pub struct CoreCfg {
     pub emotion: EmotionConfig,
     /// 需求配置（`needs.json`）。
     pub needs: NeedsConfig,
+    /// 角色默认名（`character.json.defaultName`；C2：`{name}` 变量的唯一来源）。
+    ///
+    /// 用户改名（FR-7-1）经设置页写入存档后由上层重新注入；本卡只取配置默认名。
+    pub character_default_name: String,
+    /// 台词库（`resources/config/lines.json`；缺失时为空库，只少气泡不崩）。
+    pub lines: LinesLibrary,
+    /// 音效总线（S4-M6；`None` = 纯逻辑模式 / 音频未装配：全部播放入口退化为 no-op）。
+    pub audio: Option<AudioBus>,
 }
 
 /// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
@@ -283,6 +354,14 @@ pub struct CoreLoopState {
     pending_mood_delta: f32,
     /// 上一次同步的「离家」可见态（S4-M4：`away` 翻转时隐藏 / 恢复宠物窗口）。
     runaway_away: bool,
+    /// 台词库（S4-M5：`resources/config/lines.json`；缺失时为空库）。
+    lines: LinesLibrary,
+    /// 气泡计划器（S4-M5：抽取冷却 + 求助退避 + 快捷按钮）。
+    bubble: BubblePlanner,
+    /// 占位符变量（C2：`{name}` 取 `character.json.defaultName`，不在代码中硬编码角色名）。
+    vars: PlaceholderVars,
+    /// 音效总线（S4-M6；`None` = 未装配，全部请求退化为 no-op）。
+    audio: Option<AudioBus>,
 }
 
 impl CoreLoopState {
@@ -312,7 +391,16 @@ impl CoreLoopState {
         seed_k: u64,
         now_ms: u64,
     ) -> Self {
-        let CoreCfg { roam_cfg, interaction_cfg, catalog, emotion, needs } = cfg;
+        let CoreCfg {
+            roam_cfg,
+            interaction_cfg,
+            catalog,
+            emotion,
+            needs,
+            character_default_name,
+            lines,
+            audio,
+        } = cfg;
         let motion = MotionEngine::new(pos, monitors.clone(), roam_cfg.clone(), seed_k, now_ms);
         let platform_graph = PlatformGraph::new(monitors.clone(), now_ms);
         let clamped = motion.pos();
@@ -320,6 +408,10 @@ impl CoreLoopState {
         let cfg_ref: &'static EmotionConfig = Box::leak(Box::new(emotion));
         let needs_ref: &'static NeedsConfig = Box::leak(Box::new(needs));
         let emotion = EmotionEngine::new(cfg_ref, needs_ref);
+        // S4-M5：气泡计划器的冷却 / 间隔参数全部取自 `lines.json.selector`（C7）。
+        let bubble = BubblePlanner::from_library(&lines);
+        // S4-M5：`{name}` 变量取配置默认名（C2：代码内零角色名字面量）。
+        let vars = PlaceholderVars::new().with_name(character_default_name);
         Self {
             pos: clamped,
             phase: Phase::Roam,
@@ -344,6 +436,10 @@ impl CoreLoopState {
             presence_idle_ms: None,
             pending_mood_delta: 0.0,
             runaway_away: false,
+            lines,
+            bubble,
+            vars,
+            audio,
         }
     }
 
@@ -794,13 +890,79 @@ impl CoreLoopState {
             );
         }
 
-        // 线上事件（`pet://emotion`）。
+        // 线上事件（`pet://emotion` / `pet://coax`）。
         for wire in wire_for_events(events, &self.emotion) {
             let Some(handle) = app else { continue };
             if let Err(err) = handle.emit(wire.event, &wire.payload) {
                 eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
             }
         }
+
+        // S4-M5：气泡（`pet://bubble`，把算法事件翻译为「抽到的台词 + 语义字段」）。
+        for ev in events {
+            let Some(plan) = self.derive_bubble(ev, wall_now_ms) else {
+                continue;
+            };
+            let wire = wire_for_bubble(&plan);
+            let Some(handle) = app else { continue };
+            if let Err(err) = handle.emit(wire.event, &wire.payload) {
+                eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+            }
+        }
+
+        // S4-M6：音效（`01 §6.5.5` 的已落地子集；门控 / 队列在 `dp-audio` 侧）。
+        for ev in events {
+            if let Some(cue) = audio_cue_for_emotion(ev) {
+                self.request_audio(cue);
+            }
+        }
+    }
+
+    /// S4-M5：把一条算法事件翻译为气泡计划（冷却未过 → `None`）。
+    ///
+    /// 触发面（本卡口径）：
+    ///   - 阶段迁移 → 池键取 `emotion.json.levels[to].linePool`（配置驱动，零硬编码）；
+    ///   - 三部曲完成 → `runaway` 池（含 AC-04「哼…原谅你啦，下不为例！」文案）；
+    ///   - 进入比心窗 → `happy` 池，`preempt = true`（用户交互台词即时覆盖系统台词）。
+    ///
+    /// 求助 / 提醒 / 明信片类气泡的**触发源**（需求阈值 / 提醒调度 / 活动状态）归
+    /// S7-M2 / S10 / S8——本卡交付其冷却策略（[`BubblePlanner`]）与载荷通路。
+    fn derive_bubble(&mut self, ev: &EmotionEvent, now_ms: i64) -> Option<PlannedBubble> {
+        let pool = match ev {
+            EmotionEvent::ColdLevelChanged { to, .. } => return self
+                .bubble
+                .bubble_for_level(&self.lines, self.emotion.cfg().levels.as_slice(), *to, &self.vars, now_ms),
+            EmotionEvent::CoaxSucceeded { .. } => RUNAWAY_POOL,
+            EmotionEvent::CoaxProgress { step: CoaxStep::Heart, .. } => HAPPY_POOL,
+            _ => return None,
+        };
+        let preempt = pool == HAPPY_POOL;
+        self.bubble
+            .bubble_for_pool(&self.lines, pool, &self.vars, now_ms, preempt)
+    }
+
+    /// S4-M6：请求播一条音效（未装配音频 / 被门控 / 队列满 → 静默降级，不 panic）。
+    ///
+    /// 诊断口径：被静默与溢出丢弃**只计数不刷日志**（音效是表现层，日志噪声远大于价值），
+    /// 需要排查时读 [`AudioBus::suppressed_count`] / [`AudioBus::dropped_count`]。
+    pub fn request_audio(&self, cue: AudioCue) -> dp_audio::RequestOutcome {
+        let Some(bus) = self.audio.as_ref() else {
+            return dp_audio::RequestOutcome::Closed;
+        };
+        bus.request(cue)
+    }
+
+    /// S4-M5：当前气泡计划器（只读；单测 / 诊断用）。
+    #[inline]
+    #[must_use]
+    pub fn bubble_planner(&self) -> &BubblePlanner {
+        &self.bubble
+    }
+
+    /// S4-M5：渲染一段台词（`{name}` 取配置默认名；单测 / 诊断用）。
+    #[must_use]
+    pub fn render_line(&self, text: &str) -> String {
+        render_placeholders(text, &self.vars)
     }
 
     /// 广播 1Hz 全量快照（`pet://state`，载荷 [`PetSnapshotV2`]）。
@@ -820,6 +982,17 @@ impl CoreLoopState {
     #[cfg(test)]
     pub(crate) fn snapshot_for_test(&self) -> PetSnapshotV2 {
         project_snapshot(&self.emotion, "", 0)
+    }
+
+    /// 气泡派生探针（`#[cfg(test)]`：验证「算法事件 → 台词池 → 渲染后的文案」链路，
+    /// 而不必构造 Tauri `AppHandle`）。
+    #[cfg(test)]
+    pub(crate) fn derive_bubble_for_test(
+        &mut self,
+        ev: &EmotionEvent,
+        now_ms: i64,
+    ) -> Option<PlannedBubble> {
+        self.derive_bubble(ev, now_ms)
     }
 
     /// 业务档推进（**测试专用**：强制 `session_paused = false`，绕开平台会话查询）。
@@ -1316,13 +1489,39 @@ fn empty_handle() -> JoinHandle<()> {
 fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
     let pet = app.try_state::<PetPlatform>()?;
     let display = pet.platform.display();
-    let (roam_cfg, interaction_cfg, catalog, emotion, needs) = load_config(app);
+    let bundle = load_config(app);
+    let lines = load_lines(app);
     let monitors = ports::to_monitor_geoms(display.monitors());
     let pos = initial_pos(&pet.window, &display, &monitors);
     // 播种：非节拍（C3 三段口径——PRNG 种子非业务时间，从墙钟端口取毫秒摘取）。
     let seed = SystemWallClock.now_ms() as u64;
-    let cfg = CoreCfg { roam_cfg, interaction_cfg, catalog, emotion, needs };
+    // S4-M6：音效总线（`lib.rs` 已在 setup 期 `manage`）。取用时先同步一次设置快照
+    // （`settings.json.audio` + `behavior`），避免启动瞬间用默认音量播第一条音效。
+    let audio = app.try_state::<AudioBus>().map(|bus| {
+        bus.set_settings(audio_settings_from(&bundle));
+        bus.inner().clone()
+    });
+    let cfg = CoreCfg {
+        roam_cfg: bundle.settings.roam.clone(),
+        interaction_cfg: bundle.settings.interaction.clone(),
+        catalog: ActionCatalog::from_config(&bundle.actions),
+        emotion: bundle.emotion.clone(),
+        needs: bundle.needs.clone(),
+        character_default_name: bundle.character.default_name.clone(),
+        lines,
+        audio,
+    };
     Some(CoreLoopState::new(pos, monitors, cfg, seed, 0))
+}
+
+/// 由配置束投影音频设置快照（S4-M6：`settings.json.audio` + `behavior` 的静音相关位）。
+fn audio_settings_from(bundle: &ConfigBundle) -> AudioSettings {
+    AudioSettings {
+        master_volume_percent: bundle.settings.audio.master_volume_percent,
+        muted: bundle.settings.audio.muted,
+        do_not_disturb: bundle.settings.behavior.do_not_disturb,
+        click_through: bundle.settings.behavior.click_through,
+    }
 }
 
 /// 初始 `pos`：窗口物理矩形中心 → VDC（RV-17）；失败退回主屏工作区中心。
@@ -1346,40 +1545,64 @@ fn initial_pos(
         .map_or(Vec2::ZERO, |m| m.work_center())
 }
 
-/// 加载配置（`RoamCfg` / `InteractionCfg` / `ActionCatalog` / `EmotionConfig` / `NeedsConfig`）；
-/// 失败降级内置默认（C1 无盘符字面量）。
+/// 加载配置束（六份 JSON 经 [`ConfigService::load_all`]）；失败降级内置默认
+/// （C1 无盘符字面量；R19：加载失败不崩）。
 ///
-/// S4-M1 起扩至五元组：情绪内核需要 `emotion.json`（档位阈值 / 确认期 / 惯性 / 离线）
-/// 与 `needs.json`（需求维度上下界），二者均按值交出、由 `CoreLoopState` 固化。
-fn load_config(
-    app: &AppHandle,
-) -> (RoamCfg, InteractionCfg, ActionCatalog, EmotionConfig, NeedsConfig) {
+/// 返回整份 [`ConfigBundle`]（S4-M5 起需要 `character.json` 的 `defaultName`、
+/// S4-M6 起需要 `settings.json` 的 `audio`/`behavior`），由 [`build_state`] 按需取用。
+fn load_config(app: &AppHandle) -> ConfigBundle {
     if let Some(dir) = resolve_config_dir(app) {
         match ConfigService::load_all(&dir) {
             Ok((bundle, warnings)) => {
                 if !warnings.is_empty() {
                     eprintln!("[dp-app] core-loop 配置加载告警 {} 条：{:?}", warnings.len(), warnings);
                 }
-                return (
-                    bundle.settings.roam.clone(),
-                    bundle.settings.interaction.clone(),
-                    ActionCatalog::from_config(&bundle.actions),
-                    bundle.emotion.clone(),
-                    bundle.needs.clone(),
-                );
+                return bundle;
             }
             Err(err) => eprintln!("[dp-app] core-loop 配置加载降级：{err}"),
         }
     } else {
         eprintln!("[dp-app] core-loop 未发现配置目录，使用内置默认");
     }
-    (
-        RoamCfg::default(),
-        InteractionCfg::default(),
-        ActionCatalog::default(),
-        EmotionConfig::default(),
-        NeedsConfig::default(),
-    )
+    ConfigBundle::default()
+}
+
+/// 加载台词库（`resources/config/lines.json`，**S4-M5**）。
+///
+/// 降级口径（R19 同源）：文件缺失 / JSON 损坏 → 空库 + 告警 —— 只少气泡，不崩、不阻断启动。
+/// 与 `character.json` 的交叉校验（`linePools.count=13` / 每池 ≥6 条 / 口头禅分布，L-02）
+/// 在此**只告警不阻断**（内容问题不应让桌面宠物起不来），全绿校验由 `lines.rs` 单测保证。
+fn load_lines(app: &AppHandle) -> LinesLibrary {
+    let Some(dir) = resolve_config_dir(app) else {
+        eprintln!("[dp-app] core-loop 未发现配置目录，台词库取空库");
+        return LinesLibrary::empty();
+    };
+    match LinesLibrary::load_dir(&dir) {
+        Ok(lib) => {
+            // 交叉校验需要 character.json 的 linePools / catchphrase；此处再读一次（KB 级、
+            // 仅装配期一次），避免把 `load_one` 的内部形态暴露给装配层。
+            match std::fs::read_to_string(dir.join("character.json"))
+                .map_err(|err| err.to_string())
+                .and_then(|text| {
+                    serde_json::from_str::<dp_core::config::model::CharacterConfig>(&text)
+                        .map_err(|err| err.to_string())
+                }) {
+                Ok(character) => {
+                    if let Err(err) = lib.validate(&character.line_pools, &character.catchphrase) {
+                        eprintln!("[dp-app] core-loop 台词库交叉校验告警：{err}");
+                    }
+                }
+                Err(err) => {
+                    eprintln!("[dp-app] core-loop 台词库跳过交叉校验（character.json 不可用：{err}）");
+                }
+            }
+            lib
+        }
+        Err(err) => {
+            eprintln!("[dp-app] core-loop 台词库加载降级为空库：{err}");
+            LinesLibrary::empty()
+        }
+    }
 }
 
 /// 解析配置目录（`<resource_dir>/resources/config`；dev 兜底工程根相对路径，C1 无盘符字面量）。
@@ -1477,6 +1700,12 @@ fn run_loop(
                         }
                     }
                 }
+                // S4-M6 触发映射：交互意图 → 音效（`01 §9.2`；门控 / 队列 / 溢出丢弃在 `dp-audio`）。
+                for intent in &intents {
+                    if let Some(cue) = audio_cue_for_intent(intent.kind) {
+                        state.request_audio(cue);
+                    }
+                }
                 // S3-M6 右键单击命中 → `pet://menu`（Up 触发；屏幕坐标 + 窗口内 CSS 坐标）。
                 emit_menu_events(&app, &pet, consumer.take_menu_clicks());
 
@@ -1525,6 +1754,8 @@ fn run_loop(
                     if let Err(err) = app.emit(FX_EVENT, &cmd) {
                         eprintln!("[dp-app] core-loop 广播 {FX_EVENT} 降级：{err}");
                     }
+                    // S4-M6：落地「噗 / 咚」（`01 §6.5.5` 移动类）。
+                    state.request_audio(AudioCue::MoveLand);
                 }
                 if let Some(started) = state.poll_arbiter(now) {
                     eprintln!(
@@ -1768,8 +1999,23 @@ mod tests {
         }
     }
 
+    /// 资源目录（`resources/config`；`CARGO_MANIFEST_DIR` 上溯三级，C1 无盘符字面量）。
+    fn resources_config_dir() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../resources/config")
+    }
+
+    /// C2 口径：角色默认名以 Unicode 码点构造，测试内不写角色名字面量。
+    fn name_cp() -> String {
+        ['\u{5FC3}', '\u{6708}', '\u{72F0}'].iter().collect()
+    }
+
+    /// S4-M5 装配夹具：台词库取随包 `lines.json`（真实内容，非空库）。
+    fn test_lines() -> LinesLibrary {
+        LinesLibrary::load_dir(&resources_config_dir()).expect("随包 lines.json 应可加载")
+    }
+
     /// S4-M1 装配夹具：除动作目录外的配置一律取内置默认（数值口径 = `emotion.json` v2
-    /// 冻结值 / `settings.json` 默认）。
+    /// 冻结值 / `settings.json` 默认）；S4-M5/M6 起附台词库与「无音效」占位。
     fn core_cfg(catalog: ActionCatalog) -> CoreCfg {
         CoreCfg {
             roam_cfg: roam_cfg(),
@@ -1777,6 +2023,9 @@ mod tests {
             catalog,
             emotion: EmotionConfig::default(),
             needs: NeedsConfig::default(),
+            character_default_name: name_cp(),
+            lines: test_lines(),
+            audio: None,
         }
     }
 
@@ -3083,5 +3332,156 @@ mod tests {
         for w in seen_levels.windows(2) {
             assert!(w[0] < w[1], "阶段序列必须严格递增：{seen_levels:?}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // S4-M5：台词 / 气泡生产链路
+    // -----------------------------------------------------------------------
+
+    fn state_with_lines() -> CoreLoopState {
+        CoreLoopState::new(Vec2::ZERO, vec![mon_a()], core_cfg(landing_catalog()), 1, 0)
+    }
+
+    fn level_event(to: u8) -> EmotionEvent {
+        EmotionEvent::ColdLevelChanged {
+            from: to.saturating_sub(1),
+            to,
+            mood_delta: -5.0,
+            redirected: false,
+            reason: dp_core::emotion::ColdReason::Accumulate,
+        }
+    }
+
+    /// 阶段迁移 → 池键取 `emotion.json.levels[to].linePool`（配置驱动），且 `{name}` 已被替换。
+    #[test]
+    fn level_change_bubble_uses_level_pool_and_renders_name() {
+        let mut st = state_with_lines();
+        let bubble = st
+            .derive_bubble_for_test(&level_event(2), 0)
+            .expect("L2 迁移应产出气泡");
+        assert_eq!(bubble.cooldown_key, "aggrieved", "L2 对应 aggrieved 池");
+        // 文案必须是「该池某条经 `{name}` 渲染后」的结果（池内含 `{name}` 的行渲染后
+        // 与原文不同，故不能拿原始池直接比对）。
+        let rendered: Vec<String> = test_lines()
+            .pool("aggrieved")
+            .expect("aggrieved 池存在")
+            .iter()
+            .map(|line| st.render_line(line))
+            .collect();
+        assert!(
+            rendered.contains(&bubble.text),
+            "文案必须来自 aggrieved 池（渲染后），实际 {:?}",
+            bubble.text
+        );
+        assert!(!bubble.text.contains("{name}"), "生产端必须完成 {{name}} 渲染（C2）");
+        assert_eq!(st.render_line("{name}"), name_cp(), "渲染变量取 character.json 默认名");
+    }
+
+    /// 同池冷却：窗口内第二次不再出话（`01 §6.5.4` 同状态 ≥20s）。
+    #[test]
+    fn bubble_respects_pool_cooldown() {
+        let mut st = state_with_lines();
+        assert!(st.derive_bubble_for_test(&level_event(2), 0).is_some());
+        assert!(
+            st.derive_bubble_for_test(&level_event(2), 1_000).is_none(),
+            "1s 内同池第二次必须被冷却拦下"
+        );
+        assert!(
+            st.derive_bubble_for_test(&level_event(2), 20_000).is_some(),
+            "恰达 20s 冷却窗口应放行"
+        );
+    }
+
+    /// 三部曲完成 → `runaway` 池（含 AC-04「哼…原谅你啦，下不为例！」文案），非 preempt。
+    #[test]
+    fn coax_success_bubble_uses_runaway_pool() {
+        let mut st = state_with_lines();
+        let bubble = st
+            .derive_bubble_for_test(&EmotionEvent::CoaxSucceeded { mood: 60.0 }, 0)
+            .expect("三部曲完成应产出气泡");
+        assert_eq!(bubble.cooldown_key, "runaway");
+        let pool = test_lines().pool("runaway").expect("runaway 池存在").to_vec();
+        let rendered: Vec<String> = pool.iter().map(|line| st.render_line(line)).collect();
+        assert!(rendered.contains(&bubble.text), "文案必须来自 runaway 池（渲染后）");
+        assert!(!bubble.preempt);
+
+        // AC-04 文案确在池内（以码点构造期望子串，避免测试硬编码中文长的脆弱性）。
+        let ac04_tail: String = ['\u{4E0B}', '\u{4E0D}', '\u{4E3A}', '\u{4F8B}'].iter().collect();
+        assert!(
+            pool.iter().any(|line| line.contains(&ac04_tail)),
+            "runaway 池必须含 AC-04 文案（下不为例）"
+        );
+    }
+
+    /// 进入比心窗 → `happy` 池且 `preempt = true`（用户交互台词即时覆盖系统台词）。
+    #[test]
+    fn coax_heart_bubble_is_preempt_from_happy_pool() {
+        let mut st = state_with_lines();
+        let bubble = st
+            .derive_bubble_for_test(
+                &EmotionEvent::CoaxProgress { ratio: 0.5, step: CoaxStep::Heart },
+                0,
+            )
+            .expect("比心窗应产出气泡");
+        assert_eq!(bubble.cooldown_key, "happy");
+        assert!(bubble.preempt, "交互台词须标记 preempt");
+        let rendered: Vec<String> = test_lines()
+            .pool("happy")
+            .expect("happy 池存在")
+            .iter()
+            .map(|line| st.render_line(line))
+            .collect();
+        assert!(rendered.contains(&bubble.text), "文案必须来自 happy 池（渲染后）");
+    }
+
+    /// 未装配音频 / 未登记意图 → 静默降级，绝不 panic。
+    #[test]
+    fn audio_requests_degrade_gracefully_without_bus() {
+        let st = state_with_lines();
+        assert_eq!(st.request_audio(AudioCue::EmotionHum), dp_audio::RequestOutcome::Closed);
+        assert!(audio_cue_for_intent(InteractionKind::Hover).is_none());
+        assert!(audio_cue_for_intent(InteractionKind::DragStart).is_none());
+    }
+
+    /// 装配音频总线后，请求进入 `dp-audio` 的有界队列（S4-M6 通路）。
+    #[test]
+    fn audio_requests_enqueue_when_bus_attached() {
+        let (bus, rx) = AudioBus::channel(
+            AudioSettings::default(),
+            PathBuf::from("assets").join("audio"),
+            dp_audio::AUDIO_QUEUE_CAP,
+        );
+        let mut cfg = core_cfg(landing_catalog());
+        cfg.audio = Some(bus);
+        let st = CoreLoopState::new(Vec2::ZERO, vec![mon_a()], cfg, 1, 0);
+        assert_eq!(st.request_audio(AudioCue::EmotionHum), dp_audio::RequestOutcome::Enqueued);
+        assert_eq!(rx.try_recv().ok(), Some(AudioCue::EmotionHum));
+    }
+
+    /// 意图 / 事件 → 音效 Cue 的映射表（`01 §9.2` 已落地触发面）。
+    #[test]
+    fn audio_cue_mapping_covers_landed_triggers() {
+        assert_eq!(audio_cue_for_intent(InteractionKind::Click), Some(AudioCue::InteractHehe));
+        assert_eq!(
+            audio_cue_for_intent(InteractionKind::DoubleClick),
+            Some(AudioCue::InteractHeart)
+        );
+        assert_eq!(audio_cue_for_intent(InteractionKind::Stroke), Some(AudioCue::InteractHeartbeat));
+        assert_eq!(audio_cue_for_intent(InteractionKind::Tickle), Some(AudioCue::InteractYaa));
+        assert_eq!(audio_cue_for_intent(InteractionKind::Throw), Some(AudioCue::MoveWind));
+
+        assert_eq!(audio_cue_for_emotion(&level_event(1)), Some(AudioCue::EmotionSigh));
+        assert_eq!(audio_cue_for_emotion(&level_event(4)), Some(AudioCue::EmotionAnger));
+        assert_eq!(
+            audio_cue_for_emotion(&EmotionEvent::CoaxSucceeded { mood: 60.0 }),
+            Some(AudioCue::EmotionCheer)
+        );
+        assert_eq!(
+            audio_cue_for_emotion(&EmotionEvent::CoaxProgress { ratio: 0.2, step: CoaxStep::Heart }),
+            Some(AudioCue::InteractHeart)
+        );
+        // 中性事件不产音效。
+        assert!(audio_cue_for_emotion(&EmotionEvent::PersistNow).is_none());
+        assert!(audio_cue_for_emotion(&level_event(0)).is_none());
     }
 }

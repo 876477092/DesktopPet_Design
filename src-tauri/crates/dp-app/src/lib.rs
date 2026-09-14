@@ -94,6 +94,34 @@ pub struct PetPlatform {
     pub platform: dp_platform::WinPlatform,
 }
 
+/// 解析音效资源目录（`<resource_dir>/resources/assets/audio` 优先，dev 兜底工程根
+/// 相对路径；**C1：无盘符字面量**，与 [`bridge::resolve_atlas_dir`] 同候选链范式）。
+///
+/// 找不到时返回工程根候选路径（不 panic）：`dp-audio` 播放失败只记日志降级
+/// （`02 §7.4.2`），不会阻断启动。
+#[cfg(windows)]
+fn resolve_audio_dir(app: &tauri::AppHandle) -> std::path::PathBuf {
+    use std::path::Path;
+    use tauri::Manager;
+
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(root) = app.path().resource_dir() {
+        candidates.push(root.join("resources").join("assets").join("audio"));
+        candidates.push(root.join("assets").join("audio"));
+    }
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("assets")
+            .join("audio"),
+    );
+    candidates
+        .iter()
+        .find(|c| c.join("emotion_hum.ogg").is_file())
+        .cloned()
+        .unwrap_or_else(|| candidates.last().cloned().unwrap_or_default())
+}
+
 /// 在 `setup` 阶段装配平台窗口层。
 ///
 /// 遵循 `02 §7.4.2`「平台调用失败一律降级不崩溃」：失败只打印告警，保证应用仍能启动。
@@ -160,6 +188,16 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
     // S4-M4：core-loop 入站指令通道（设置页「重置情绪」/ 托盘「把心月狐找回来」→
     // core-loop 逻辑档；与 PlaybackChannel 同为进程内反向通道，非 C8 事件面）。
     app.manage(bridge::CoreInputChannel::default());
+
+    // S4-M6：音效总线（audio 线程：rodio 播放 + 门控/队列上限 8）。
+    // 资源目录复用与配置目录同源的候选链（C1 无盘符字面量）；设置快照由 core-loop
+    // 装配期从 `settings.json` 同步一次（`coreloop::build_state`），热更新归 S5-M4。
+    // 无音频设备时 `dp-audio` 内部降级静默后端（不阻断启动，`02 §7.4.2`）。
+    let audio = dp_audio::AudioBus::spawn(
+        dp_audio::AudioSettings::default(),
+        resolve_audio_dir(app.handle()),
+    );
+    app.manage(audio);
 
     // S3-M2：掩码库后台一次性构建（`dp-mask-build` 线程读图集+PNG → MaskStore；
     // 失败降级 bbox 回退，不阻断启动）。图集目录复用 bridge 同一候选链（C1）。

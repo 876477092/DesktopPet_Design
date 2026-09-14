@@ -12,7 +12,8 @@
 //!   - `--out <dir>`：显式输出目录（供 CI 漂移检查导出到临时目录后 diff）。
 //!
 //! 产物：`settings.schema.json` / `character.schema.json` / `actions.schema.json` /
-//! `emotion.schema.json` / `needs.schema.json` / `animation.schema.json`，与
+//! `emotion.schema.json` / `needs.schema.json` / `animation.schema.json` /
+//! `lines.schema.json`（**S4-M5 新增第 7 份**，`02 §7.7-5`），与
 //! `resources/config/*.json` 一一对应。
 
 use std::path::{Path, PathBuf};
@@ -21,16 +22,22 @@ use std::process::ExitCode;
 use dp_core::config::model::{
     ActionsConfig, AnimationConfig, CharacterConfig, EmotionConfig, NeedsConfig, SettingsConfig,
 };
+use dp_core::emotion::lines::LinesConfig;
 use schemars::schema::RootSchema;
 
 /// 配置文件基名 → schema 文件名（与 resources/config 一一对应）。
-const SCHEMA_TARGETS: [(&str, fn() -> RootSchema); 6] = [
+///
+/// 注：`lines.json` 的模型住在 `dp-core::emotion::lines`（台词库是**内容资产**，
+/// 由 `LinesLibrary` 自行加载与交叉校验），不在 `config::model` 的六份数值配置之列，
+/// 故此处单独取用；schema 产物仍落在同一目录，`gen-schema` 一并校验（`02 §7.7-5`）。
+const SCHEMA_TARGETS: [(&str, fn() -> RootSchema); 7] = [
     ("settings", || schemars::schema_for!(SettingsConfig)),
     ("character", || schemars::schema_for!(CharacterConfig)),
     ("actions", || schemars::schema_for!(ActionsConfig)),
     ("emotion", || schemars::schema_for!(EmotionConfig)),
     ("needs", || schemars::schema_for!(NeedsConfig)),
     ("animation", || schemars::schema_for!(AnimationConfig)),
+    ("lines", || schemars::schema_for!(LinesConfig)),
 ];
 
 /// 解析 `--out <dir>` 参数；缺省时定位工程根下的 `resources/schema`。

@@ -11,6 +11,11 @@ publish = false
 name = "dp_audio"
 path = "src/lib.rs"
 
-# S1-M1 骨架：不预先引入依赖。
-# 随音频模块落地引入 `rodio`（`02 §2.5`，MIT OR Apache-2.0）。
+# S4-M6（T-13 段 · 下）落地：
+#   - `rodio`：唯一新增外部依赖（`02 §2.5` 已登记行，MIT OR Apache-2.0）。
+#     工作区默认特性关闭、只取 `symphonia-vorbis` + `symphonia-wav`（见根 Cargo.toml 注记）。
+#   - `thiserror`：类型化错误（`02 §7.4`）。
+# 本 crate **不依赖 dp-core**（音频无时间概念，事件驱动即可；避免与内核形成环）。
 [dependencies]
+rodio = { workspace = true }
+thiserror = { workspace = true }

@@ -32,6 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::emotion::coax::{CoaxFailReason, CoaxStep};
 use crate::emotion::engine::{ColdReason, EmotionEngine, EmotionEvent};
+use crate::emotion::lines::BubbleKind;
 use crate::emotion::EmotionState;
 use crate::perception::WallClock;
 
@@ -51,6 +52,13 @@ pub const EVENT_EMOTION: &str = "pet://emotion";
 /// `pet://coax` 事件名（`02 §7.6`：core → 宠物窗口，载荷 [`CoaxWire`]，变更时；
 /// **S4-M3 登记 2026-09-14**）。前端对应 `PET_EVENT.COAX`。
 pub const EVENT_COAX: &str = "pet://coax";
+
+/// `pet://bubble` 事件名（`02 §7.6`：core → 宠物窗口，载荷 [`BubbleWire`]，变更时；
+/// **S4-M5 起启用**——前端先行契约见 `src/shared/ipc.ts` 的 `BubbleCmdV1` / `parseBubbleCmd`）。
+///
+/// C8 说明：事件名**早已登记**于 `02 §7.6`（S3-M5 前端先行时登记），S4-M5 只是补齐
+/// Rust 侧生产者，**不新增事件名**。
+pub const EVENT_BUBBLE: &str = "pet://bubble";
 
 /// `CoaxWire` 载荷版本（v1；与前端 `COAX_CMD_VERSION` 同源）。
 pub const COAX_CMD_VERSION: u32 = 1;
@@ -305,6 +313,97 @@ impl Default for CoaxWire {
             reason: None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `pet://bubble` 载荷（S4-M5；气泡文本与语义，`02 §7.6` 已登记）
+// ---------------------------------------------------------------------------
+
+/// `BubbleCmd` 载荷结构版本（v1；与前端 `BUBBLE_CMD_VERSION` 同源）。
+pub const BUBBLE_CMD_VERSION: u32 = 1;
+
+/// 气泡快捷按钮线上格式（`01 §6.12.6 ④`；camelCase）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BubbleActionWire {
+    /// 按钮标识（如 `feed` / `bath` / `later`）。
+    pub id: String,
+    /// 按钮文案（**已**渲染占位符；空白回退 `id`，与前端 `parseActions` 同口径）。
+    pub label: String,
+}
+
+/// `pet://bubble` 载荷（v1，九字段；与前端 `BubbleCmdV1` 逐项同构）。
+///
+/// 字段语义（前端 `parseBubbleCmd` 逐项对齐）：
+///   - `text`：文案（生产端**已**渲染 `{name}` 等占位符，C2；前端 `renderPlaceholders` 兜底）；
+///   - `kind`：类别（定优先级 / 署名 / 勿扰派生）；
+///   - `preempt`：用户交互台词 → 即时覆盖系统台词（`01 §6.5.4`）；
+///   - `cooldownKey`：同状态 ≥20s 冷却分组键（空串时消费侧回退 `kind`）；
+///   - `dwellMs`：停留时长（毫秒，钳 `[3000,5000]`）；
+///   - `showSignature`：是否展示署名「—— {name}」；
+///   - `actions`：快捷按钮列表；
+///   - `highContrast`：高对比（与用户设置取或）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BubbleWire {
+    /// 载荷结构版本（恒 [`BUBBLE_CMD_VERSION`]）。
+    pub version: u32,
+    /// 文案。
+    pub text: String,
+    /// 类别。
+    pub kind: BubbleKind,
+    /// 是否即时覆盖。
+    pub preempt: bool,
+    /// 冷却分组键。
+    pub cooldown_key: String,
+    /// 停留时长（毫秒）。
+    pub dwell_ms: u64,
+    /// 是否展示署名。
+    pub show_signature: bool,
+    /// 快捷按钮。
+    pub actions: Vec<BubbleActionWire>,
+    /// 高对比。
+    pub high_contrast: bool,
+}
+
+impl Default for BubbleWire {
+    fn default() -> Self {
+        Self {
+            version: BUBBLE_CMD_VERSION,
+            text: String::new(),
+            kind: BubbleKind::Chat,
+            preempt: false,
+            cooldown_key: String::new(),
+            dwell_ms: crate::emotion::lines::BUBBLE_DWELL_DEFAULT_MS,
+            show_signature: false,
+            actions: Vec::new(),
+            high_contrast: false,
+        }
+    }
+}
+
+/// 把气泡计划映射为线上事件（`pet://bubble`）。
+///
+/// 停留时长在此**再钳一次** `[3000,5000]`（`02 §5 K-5`）：生产端已钳，此处兜底，
+/// 保证「无论上游如何构造，线上载荷始终满足契约」。
+#[must_use]
+pub fn wire_for_bubble(plan: &crate::emotion::lines::PlannedBubble) -> WireEvent {
+    let payload = BubbleWire {
+        version: BUBBLE_CMD_VERSION,
+        text: plan.text.clone(),
+        kind: plan.kind,
+        preempt: plan.preempt,
+        cooldown_key: plan.cooldown_key.clone(),
+        dwell_ms: crate::emotion::lines::clamp_dwell_ms(plan.dwell_ms),
+        show_signature: plan.show_signature,
+        actions: plan
+            .actions
+            .iter()
+            .map(|a| BubbleActionWire { id: a.id.clone(), label: a.label.clone() })
+            .collect(),
+        high_contrast: plan.high_contrast,
+    };
+    WireEvent::new(EVENT_BUBBLE, &payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -718,7 +817,44 @@ mod tests {
     fn event_names_match_doc_whitelist() {
         assert_eq!(EVENT_STATE, "pet://state");
         assert_eq!(EVENT_EMOTION, "pet://emotion");
+        assert_eq!(EVENT_COAX, "pet://coax");
+        assert_eq!(EVENT_BUBBLE, "pet://bubble");
         assert_eq!(SNAPSHOT_VERSION, 2);
+        assert_eq!(BUBBLE_CMD_VERSION, 1);
+    }
+
+    /// `pet://bubble` 线上载荷与前端 `BubbleCmdV1` 九字段逐项对齐（camelCase）。
+    #[test]
+    fn bubble_wire_serializes_to_frontend_contract() {
+        use crate::emotion::lines::{BubbleAction, PlannedBubble};
+
+        let plan = PlannedBubble {
+            text: "阿狐饿了~".to_string(),
+            kind: BubbleKind::Help,
+            preempt: false,
+            cooldown_key: "begFood".to_string(),
+            dwell_ms: 9_999, // 上游越界 → 线上必须被钳到 5000
+            show_signature: true,
+            actions: vec![BubbleAction { id: "feed".to_string(), label: "去喂食".to_string() }],
+            high_contrast: false,
+        };
+        let wire = wire_for_bubble(&plan);
+        assert_eq!(wire.event, EVENT_BUBBLE);
+        let json = &wire.payload;
+        assert_eq!(json["version"], 1);
+        assert_eq!(json["text"], "阿狐饿了~");
+        assert_eq!(json["kind"], "help");
+        assert_eq!(json["preempt"], false);
+        assert_eq!(json["cooldownKey"], "begFood");
+        assert_eq!(json["dwellMs"], 5_000, "停留时长必须在线上钳到 [3000,5000]");
+        assert_eq!(json["showSignature"], true);
+        assert_eq!(json["actions"][0]["id"], "feed");
+        assert_eq!(json["actions"][0]["label"], "去喂食");
+        assert_eq!(json["highContrast"], false);
+        // 无 snake_case 泄漏。
+        assert!(json.get("cooldown_key").is_none());
+        assert!(json.get("dwell_ms").is_none());
+        assert!(json.get("show_signature").is_none());
     }
 
     #[test]

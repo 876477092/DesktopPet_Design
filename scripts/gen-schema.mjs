@@ -6,10 +6,13 @@
  * **schemars 保持 dev-only**（dp-core 的 `schema` feature 默认关，由本脚本以
  * `cargo run -p dp-core --features schema --bin export-schemas` 触发导出）。
  *
+ * 覆盖范围（S4-M5 起 7 份）：settings / character / actions / emotion / needs /
+ * animation / **lines**（台词库 `lines.json` 由 `dp-core::emotion::lines` 持有模型）。
+ *
  * 模式：
- *   - 默认（无参）：触发导出 → 校验六份 schema 存在且为合法 JSON；
- *   - `--check`：**只比对磁盘内容**（不触发导出、不写文件）——校验六份配置与
- *     六份 schema 一一对应存在、schema 均为合法 JSON；任一缺失/非法 → exit 1
+ *   - 默认（无参）：触发导出 → 校验 7 份 schema 存在且为合法 JSON；
+ *   - `--check`：**只比对磁盘内容**（不触发导出、不写文件）——校验 7 份配置与
+ *     7 份 schema 一一对应存在、schema 均为合法 JSON；任一缺失/非法 → exit 1
  *     （CI 口径；漂移检测可由 CI 编排：导出到临时目录后 diff）。
  *
  * 环境（Windows / Git Bash）：cargo 需 MSVC x64 环境，先执行
@@ -35,13 +38,13 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 /** 工程根（repo/）。 */
 const repoRoot = join(scriptDir, '..');
 
-/** 六份配置与 schema 的基名（一一对应）。 */
-const BASE_NAMES = ['settings', 'character', 'actions', 'emotion', 'needs', 'animation'];
+/** 配置与 schema 的基名（一一对应；S4-M5 起为 7 份，新增 `lines`）。 */
+const BASE_NAMES = ['settings', 'character', 'actions', 'emotion', 'needs', 'animation', 'lines'];
 
 const configDir = join(repoRoot, 'resources', 'config');
 const schemaDir = join(repoRoot, 'resources', 'schema');
 
-/** 校验六份配置存在且为合法 JSON。返回 null（通过）或错误信息列表。 */
+/** 校验各份配置存在且为合法 JSON。返回 null（通过）或错误信息列表。 */
 function checkConfigs() {
   const errors = [];
   for (const base of BASE_NAMES) {
@@ -59,7 +62,7 @@ function checkConfigs() {
   return errors;
 }
 
-/** 校验六份 schema 存在且为合法 JSON。返回 null（通过）或错误信息列表。 */
+/** 校验各份 schema 存在且为合法 JSON。返回 null（通过）或错误信息列表。 */
 function checkSchemas() {
   const errors = [];
   for (const base of BASE_NAMES) {

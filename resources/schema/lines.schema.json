@@ -1,0 +1,84 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "LinesConfig",
+  "description": "`lines.json` 根（`02 §5.8`：13 池 × ≥6 条，含 `idle`）。\n\n字段缺省由 serde `default` 兜底（R19：老包升级不崩）；**池内容不提供内置默认** （内容归美术 / 文案，缺失时降级为空库，只少气泡不崩，`03 §0.5` 纪律 7 红线不涉及）。",
+  "type": "object",
+  "properties": {
+    "bubbleActions": {
+      "description": "气泡快捷按钮 id → 文案（C7：UI 文案外置，代码内不写死中文按钮名）。",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "pools": {
+      "description": "池键 → 台词列表。",
+      "default": {},
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "selector": {
+      "description": "抽取与冷却参数。",
+      "default": {
+        "cooldownSec": 20,
+        "helpIntervalMaxSec": 900,
+        "helpIntervalSec": 180,
+        "helpRejectBackoffFactor": 2
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/SelectorCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本（恒 [`LINES_CONFIG_VERSION`]）。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "SelectorCfg": {
+      "description": "抽取与冷却参数（`lines.json.selector`）。",
+      "type": "object",
+      "properties": {
+        "cooldownSec": {
+          "description": "同池两句话之间的最小间隔（秒；与前端 20s 同状态冷却同源）。",
+          "default": 20,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "helpIntervalMaxSec": {
+          "description": "求助类气泡间隔上限（秒，`01 §6.16.3`：最多 15 分钟一次）。",
+          "default": 900,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "helpIntervalSec": {
+          "description": "求助类气泡基准间隔（秒，`01 §6.16.3`：≥3 分钟）。",
+          "default": 180,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "helpRejectBackoffFactor": {
+          "description": "被拒绝后的间隔放大倍数（`01 §6.16.3`：翻倍）。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}
