@@ -507,6 +507,7 @@ mod tests {
 
     fn interval_cfg(pace: f32) -> RoamCfg {
         RoamCfg {
+            pace_options: crate::config::model::RoamCfg::default().pace_options,
             pace,
             decision_interval_sec: [10, 10],
             cursor_avoid_radius_px: 150,

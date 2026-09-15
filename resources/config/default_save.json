@@ -1,7 +1,7 @@
 {
   "_comment": "全新存档模板（v=2）—— `02 §5 K-7`「存档 Schema v2 新增字段全表」的落地副本。",
   "_note": "本文件与 `dp-core::save::schema::SaveFileV2::default()` 必须逐位一致，由 `save::schema::tests::default_save_template_matches_builtin` 机械校验；改任一侧都会让单测失败（防双真源漂移）。",
-  "_ownership": "段 A（本卡读写）= v/values/emotion.{neglect,sensitivity,state}/meta；段 B（S5-M3/M4/M5）= pet/settings；段 C（S7-M2/M4）= emotion.{personality,personalityRolled,adapt,rough}/needs；段 D（S8）= economy/inventory/album/decor/photoWidget/skills/activity/activityCounter/counters。",
+  "_ownership": "段 A（S5-M1 起读写）= v/values/emotion.{neglect,sensitivity,state}/meta；段 B（S5-M3/M4/M5 已接管）= pet/settings（settings.json 提供出厂默认与取值域，本段存用户改动后的有效值）；段 C（S7-M2/M4）= emotion.{personality,personalityRolled,adapt,rough}/needs；段 D（S8）= economy/inventory/album/decor/photoWidget/skills/activity/activityCounter/counters。",
   "v": 2,
   "values": {
     "mood": 60.0,
@@ -63,6 +63,30 @@
     },
     "performance": {
       "renderer": "auto"
+    },
+    "appearance": {
+      "scalePercent": 100,
+      "opacityPercent": 100,
+      "language": "zh-CN"
+    },
+    "audio": {
+      "masterVolumePercent": 80,
+      "muted": false
+    },
+    "behavior": {
+      "autoRoam": true,
+      "roamPace": 1.0,
+      "doNotDisturb": false,
+      "easyCoaxMode": false,
+      "clickThrough": false,
+      "alwaysOnTopPolicy": "Always",
+      "autostart": false
+    },
+    "reminders": {
+      "sedentaryEnabled": true,
+      "sedentaryIntervalMin": 45,
+      "waterEnabled": true,
+      "waterIntervalMin": 45
     }
   },
   "counters": {

@@ -60,8 +60,17 @@ pub const EVENT_COAX: &str = "pet://coax";
 /// Rust 侧生产者，**不新增事件名**。
 pub const EVENT_BUBBLE: &str = "pet://bubble";
 
+/// `pet://config` 事件名（`02 §7.6`：core → 全部，载荷 `ConfigSet` 摘要，变更时；
+/// **S5-M4 起启用**——S1-M5 前端先行期已登记事件名，本卡只补齐 Rust 侧生产者）。
+///
+/// C8 说明：与 `EVENT_BUBBLE` 同口径——**不新增事件名**，只补生产者 + 冻结载荷字段。
+pub const EVENT_CONFIG: &str = "pet://config";
+
 /// `CoaxWire` 载荷版本（v1；与前端 `COAX_CMD_VERSION` 同源）。
 pub const COAX_CMD_VERSION: u32 = 1;
+
+/// [`ConfigSetWire`] 载荷版本（v1；与前端 `CONFIG_CMD_VERSION` 同源）。
+pub const CONFIG_WIRE_VERSION: u32 = 1;
 
 /// 快照载荷版本（`02 §4.3` `v: 2`；与前端 `PetSnapshotV2.v` 同源）。
 pub const SNAPSHOT_VERSION: u32 = 2;
@@ -801,6 +810,52 @@ pub fn wire_for_events(events: &[EmotionEvent], engine: &EmotionEngine<'_>) -> V
     events.iter().filter_map(|ev| wire_for_event(ev, engine)).collect()
 }
 
+// ---------------------------------------------------------------------------
+// `pet://config` 载荷（`02 §7.6`：`ConfigSet` 摘要；S5-M4 冻结）
+// ---------------------------------------------------------------------------
+
+/// `pet://config` 载荷（`02 §7.6` `ConfigSet` 摘要；camelCase 线上格式）。
+///
+/// ## 为什么是「摘要」而不是全量配置
+/// `02 §7.6` 明确该事件载荷为 `ConfigSet` **摘要**。全量配置（六/七份 JSON）体积
+/// 数十 KB 且含大量与前端无关的算法参数；消费端（设置窗口 / 宠物窗口）真正需要的
+/// 是「**哪些分组变了、当前第几版**」，以便按需重取（设置窗口走 `settings_get`）。
+///
+/// ## 字段语义
+/// - `version`：载荷结构版本（前向兼容锚点）；
+/// - `revision`：**变更序号**（单调递增；core-loop 每次落地设置写入 +1）。消费端只需比较
+///   是否变化即可判定「要不要刷新」，无需理解分组语义；
+/// - `changed`：本次变更涉及的**分组名**列表（`appearance` / `audio` / `behavior` /
+///   `interaction` / `pet` / `reminders`；未知分组名由消费端忽略）；
+/// - `persisted`：本次变更是否已落入存档（`false` = 仅内存生效，如未装配存档的纯逻辑模式）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigSetWire {
+    /// 载荷结构版本（[`CONFIG_WIRE_VERSION`]）。
+    pub version: u32,
+    /// 变更序号（单调递增；0 = 首次装载）。
+    pub revision: u64,
+    /// 本次变更涉及的分组名（保序、去重由生产方保证）。
+    pub changed: Vec<String>,
+    /// 是否已持久化（`false` = 仅内存生效）。
+    pub persisted: bool,
+}
+
+/// 构造 `pet://config` 线上事件（唯一生产点，C8）。
+///
+/// `changed` 中的分组名取自配置束的顶层分组（与 `settings.json` 的键一一对应），
+/// 未知分组名不会出现在此处的产出中；消费端仍需对未知项保持忽略（前向兼容）。
+#[must_use]
+pub fn wire_for_config(revision: u64, changed: &[&str], persisted: bool) -> WireEvent {
+    let payload = ConfigSetWire {
+        version: CONFIG_WIRE_VERSION,
+        revision,
+        changed: changed.iter().map(|s| (*s).to_string()).collect(),
+        persisted,
+    };
+    WireEvent::new(EVENT_CONFIG, &payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1019,5 +1074,32 @@ mod tests {
             let json = serde_json::to_value(wire).expect("展示态可序列化");
             assert!(json.is_string());
         }
+    }
+
+    #[test]
+    fn config_wire_is_registered_event_and_serializes_camel_case() {
+        // C8：事件名必须是 `02 §7.6` 已登记项（`pet://config`，S1-M5 期登记、S5-M4 启用）。
+        assert_eq!(EVENT_CONFIG, "pet://config");
+
+        let wire = wire_for_config(7, &["audio", "appearance"], true);
+        assert_eq!(wire.event, EVENT_CONFIG);
+        assert_eq!(
+            wire.payload,
+            serde_json::json!({
+                "version": CONFIG_WIRE_VERSION,
+                "revision": 7,
+                "changed": ["audio", "appearance"],
+                "persisted": true,
+            })
+        );
+    }
+
+    #[test]
+    fn config_wire_revision_zero_marks_initial_load() {
+        // 首次装载：revision = 0、无分组变更、未落盘（纯内存装载）。
+        let wire = wire_for_config(0, &[], false);
+        assert_eq!(wire.payload["revision"], 0);
+        assert_eq!(wire.payload["changed"], serde_json::json!([]));
+        assert_eq!(wire.payload["persisted"], false);
     }
 }

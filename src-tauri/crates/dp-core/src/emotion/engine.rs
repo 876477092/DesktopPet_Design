@@ -887,6 +887,22 @@ impl<'c> EmotionEngine<'c> {
         self.coax.set_easy_mode(on);
     }
 
+    /// 热更新「情绪敏感度」（`01 FR-7-9 / FR-11-11`；S5-M4 设置热更新入口）。
+    ///
+    /// 语义与边界：
+    /// - 传入值按 `02 §5.2` 的 `rateClamp` **夹紧**到 `[min, max]` 后写入 `sensitivity.value`，
+    ///   使「实时 tick 速率缩放」即刻生效（`rate_from` 在每次 tick 重新求值，无需重建引擎）；
+    /// - 夹紧只作用于**实时**通道；离线补偿窗口与 P 封顶一律走 unclamped raw 速率
+    ///   （`01` P2-2 裁定 / `02 §5.2`），故敏感度调低**不会**削弱离线恢复与封顶上限；
+    /// - 非有限值（`NaN` / `inf`）忽略，保持原值（脏输入不破坏内核状态）。
+    pub fn set_sensitivity_value(&mut self, value: f32) {
+        if !value.is_finite() {
+            return;
+        }
+        let clamped = value.clamp(self.sensitivity.rate_clamp.min, self.sensitivity.rate_clamp.max);
+        self.sensitivity.value = clamped;
+    }
+
     /// 只读：三部曲子状态（`pet://coax` 投影 / 诊断用）。
     #[inline]
     #[must_use]

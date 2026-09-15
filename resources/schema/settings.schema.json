@@ -122,6 +122,11 @@
           30
         ],
         "pace": 1.0,
+        "paceOptions": [
+          0.699999988079071,
+          1.0,
+          1.2999999523162842
+        ],
         "walkSpeedPxPerSec": 60.0
       },
       "allOf": [
@@ -526,6 +531,19 @@
           "default": 1.0,
           "type": "number",
           "format": "float"
+        },
+        "paceOptions": {
+          "description": "节奏可选档位（`01 §8.3` 设置面板「节奏 (●正常)」；与 `emotion.sensitivityOptions` 同范式——**范围外置，UI 不硬编码数值**）。",
+          "default": [
+            0.699999988079071,
+            1.0,
+            1.2999999523162842
+          ],
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
         },
         "walkSpeedPxPerSec": {
           "description": "行走速度（VDC 逻辑像素/秒；S2-M4 新增，`01 §6.2` FR-2-7「运动参数可调」 对照项。缺字段由容器级 `default` 兜底为内置默认，向后兼容）。",

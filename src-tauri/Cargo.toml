@@ -52,6 +52,18 @@ license = "MIT OR Apache-2.0"
 #     （锁屏 / 远程桌面会话状态轮询）。**C9 零网络口径**：仅调用本机 `wtsapi32.dll`，
 #     不产生任何外连，capabilities / CSP 不变。真机受限时按 P1-2 降级 idle 近似
 #     并登记偏离（见 `dp-platform/src/win/session.rs` 模块文档）。
+# S5-M4（T-15 段 · 中 / FR-1-9 开机自启 + FR-1-10 退出确认 + K-7 存档原生提示）新增：
+#   - `Win32_System_Registry` + `Win32_Security`：`RegCreateKeyExW` / `RegSetValueExW` /
+#     `RegDeleteValueW` / `RegQueryValueExW` / `RegOpenKeyExW`（HKCU `...\CurrentVersion\Run`
+#     自启项读写）。注：`RegCreateKeyExW` 在 `windows 0.61` 中由 `Win32_Security`
+#     feature 门控（其签名含 `SECURITY_ATTRIBUTES`），故一并启用。
+#     **C9 零网络口径**：仅操作本机 HKCU 注册表，不触网、不引入任何网络 API；
+#     capabilities / CSP / tauri.conf.json 均不变。
+#   - `MessageBoxW`（`Win32_UI_WindowsAndMessaging`，**已在既有 feature 面内**）：
+#     退出确认与存档异常提示的原生对话框；零新增 feature、零新增依赖。
+#   - `tauri-plugin-single-instance`：单实例锁（R17；二次启动唤醒已运行实例）。
+#     **C9 零网络口径**：插件仅用本机命名互斥体 / 窗口消息实现进程互斥与唤醒，
+#     无任何网络面（`cargo tree` 无 reqwest/hyper/tokio-tungstenite 新增分支）。
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
 tauri = { version = "2" }
@@ -65,6 +77,9 @@ lru = { version = "0.12" }
 schemars = { version = "0.8" }
 crossbeam-channel = { version = "0.5" }
 chrono = { version = "0.4" }
+# S5-M4：单实例守护（`02 §2.5` 已登记行；R17 多开存档竞争防护的①）。
+# 默认特性（不启用 `deep-link`：本项目无 URL scheme 需求，最小必需集口径）。
+tauri-plugin-single-instance = { version = "2" }
 rodio = { version = "0.19", default-features = false, features = [
     "vorbis",
     "wav",
@@ -85,4 +100,6 @@ windows = { version = "0.61", features = [
     "Win32_System_Threading",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Registry",
+    "Win32_Security",
 ] }

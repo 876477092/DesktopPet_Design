@@ -1,7 +1,28 @@
-/* 设置窗口样式（T-01 骨架）：Tailwind 三大指令，具体页面样式随 S1-M3 起扩充。 */
+/* 设置窗口样式（`03 S5-M3` 交付物；`01 §8.3` 480×640 悬浮窗）。
+ *
+ * 约定：
+ * - Tailwind 三大指令保留（`02 §2.5`：设置面板用 Tailwind，宠物窗口不用）；
+ * - 本文件只放**面板专属**类（`.dp-*` 命名空间），不覆盖宠物窗口的 `pet.css`；
+ * - 数值（宽高、行距）取 `01 §8.3` 的 480×640 悬浮窗比例，不引入像素级设计系统；
+ * - 颜色取中性灰阶 + 一个主色（红金主题的降饱和版），与宠物窗口的透明合成无关。
+ */
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  --dp-bg: #f7f7f8;
+  --dp-panel: #ffffff;
+  --dp-border: #e3e3e6;
+  --dp-text: #1f2023;
+  --dp-text-dim: #6b6d75;
+  --dp-primary: #b3352f;
+  --dp-primary-soft: #f4e3e1;
+  --dp-warn: #8a5a00;
+  --dp-warn-bg: #fff5dc;
+  --dp-danger: #a52218;
+}
 
 html,
 body,
@@ -11,4 +32,465 @@ body,
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background: var(--dp-bg);
+  color: var(--dp-text);
+  font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+  font-size: 13px;
+}
+
+/* 面板外壳：标题 + Tab 条（固定）+ 内容（滚动）+ 底部操作条（固定）。 */
+.dp-app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.dp-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--dp-border);
+  background: var(--dp-panel);
+}
+
+.dp-title-text {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.dp-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--dp-warn-bg);
+  color: var(--dp-warn);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.dp-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px 10px 0;
+  background: var(--dp-panel);
+  border-bottom: 1px solid var(--dp-border);
+  overflow-x: auto;
+}
+
+.dp-tab {
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: var(--dp-text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dp-tab-on {
+  background: var(--dp-bg);
+  border-color: var(--dp-border);
+  color: var(--dp-text);
+  font-weight: 600;
+}
+
+.dp-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 12px 14px;
+}
+
+.dp-page {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dp-section-title {
+  margin: 4px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--dp-border);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dp-text-dim);
+}
+
+/* 行：标签 + 控件 */
+.dp-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dp-row-block {
+  display: block;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.dp-row-label {
+  flex: 0 0 40%;
+  color: var(--dp-text);
+}
+
+.dp-row-control {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dp-row-control-inline {
+  justify-content: flex-start;
+}
+
+.dp-row-control-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.dp-row-value {
+  flex: 0 0 auto;
+  min-width: 48px;
+  text-align: right;
+  color: var(--dp-text-dim);
+}
+
+.dp-row-hint {
+  margin: 0;
+  color: var(--dp-text-dim);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 控件：滑杆 / 输入 / 单选 / 分段 / 开关 */
+.dp-slider {
+  flex: 1 1 auto;
+  accent-color: var(--dp-primary);
+}
+
+.dp-input {
+  padding: 4px 8px;
+  border: 1px solid var(--dp-border);
+  border-radius: 4px;
+  background: var(--dp-panel);
+  color: inherit;
+  font: inherit;
+}
+
+.dp-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.dp-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+.dp-segmented {
+  display: inline-flex;
+  margin-top: 6px;
+  border: 1px solid var(--dp-border);
+  border-radius: 6px;
+  overflow: hidden;
+  background: var(--dp-panel);
+}
+
+.dp-segment {
+  padding: 4px 10px;
+  border: none;
+  border-right: 1px solid var(--dp-border);
+  background: transparent;
+  color: var(--dp-text-dim);
+  cursor: pointer;
+}
+
+.dp-segment:last-child {
+  border-right: none;
+}
+
+.dp-segment-on {
+  background: var(--dp-primary-soft);
+  color: var(--dp-primary);
+  font-weight: 600;
+}
+
+.dp-switch {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--dp-border);
+  border-radius: 10px;
+  background: #d8d8dc;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.dp-switch-on {
+  background: var(--dp-primary);
+  border-color: var(--dp-primary);
+}
+
+.dp-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 120ms ease;
+}
+
+.dp-switch-on .dp-switch-knob {
+  transform: translateX(16px);
+}
+
+.dp-keycapture {
+  min-width: 120px;
+  padding: 4px 8px;
+  border: 1px dashed var(--dp-border);
+  border-radius: 4px;
+  background: var(--dp-panel);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dp-keycapture-on {
+  border-color: var(--dp-primary);
+  color: var(--dp-primary);
+}
+
+/* 按钮 */
+.dp-btn {
+  padding: 5px 12px;
+  border: 1px solid var(--dp-border);
+  border-radius: 5px;
+  background: var(--dp-panel);
+  color: inherit;
+  cursor: pointer;
+}
+
+.dp-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.dp-btn-primary {
+  border-color: var(--dp-primary);
+  background: var(--dp-primary);
+  color: #fff;
+}
+
+.dp-btn-danger {
+  border-color: var(--dp-danger);
+  color: var(--dp-danger);
+}
+
+.dp-btn-ghost {
+  border-color: transparent;
+  color: var(--dp-text-dim);
+}
+
+.dp-button-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* 底部操作条 */
+.dp-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--dp-border);
+  background: var(--dp-panel);
+}
+
+.dp-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--dp-text-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 提示条 */
+.dp-notice {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 5px;
+  line-height: 1.5;
+}
+
+.dp-notice-warn {
+  background: var(--dp-warn-bg);
+  color: var(--dp-warn);
+}
+
+.dp-notice-error {
+  background: #fdecea;
+  color: var(--dp-danger);
+}
+
+/* 键值展示 / 备份列表 */
+.dp-kv {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+}
+
+.dp-kv-key {
+  flex: 0 0 40%;
+  color: var(--dp-text-dim);
+}
+
+.dp-kv-value {
+  flex: 1 1 auto;
+  word-break: break-all;
+}
+
+.dp-backup-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dp-backup-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dp-backup-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dp-backup-size {
+  flex: 0 0 auto;
+  color: var(--dp-text-dim);
+  font-size: 11px;
+}
+
+/* 属性面板骨架 */
+.dp-needs-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dp-needs-item {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 4px 8px;
+  align-items: center;
+}
+
+.dp-needs-name {
+  color: var(--dp-text-dim);
+}
+
+.dp-needs-value {
+  text-align: right;
+  color: var(--dp-text-dim);
+  font-size: 11px;
+}
+
+.dp-needs-bar {
+  grid-column: 1 / -1;
+  height: 6px;
+  border-radius: 3px;
+  background: #e6e6e9;
+  overflow: hidden;
+}
+
+.dp-needs-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--dp-primary);
+}
+
+/* 成就骨架 */
+.dp-achievement-progress {
+  margin: 0;
+  color: var(--dp-text-dim);
+}
+
+.dp-achievement-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dp-achievement-item {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--dp-border);
+}
+
+.dp-locked {
+  color: var(--dp-text-dim);
+}
+
+/* 模态确认框 */
+.dp-modal-mask {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 35%);
+}
+
+.dp-modal {
+  width: 320px;
+  padding: 14px;
+  border-radius: 8px;
+  background: var(--dp-panel);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+}
+
+.dp-modal-title {
+  margin: 0 0 8px;
+  font-size: 14px;
+}
+
+.dp-modal-body {
+  margin: 0 0 14px;
+  color: var(--dp-text-dim);
+  line-height: 1.6;
+  white-space: pre-line;
+}
+
+.dp-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }

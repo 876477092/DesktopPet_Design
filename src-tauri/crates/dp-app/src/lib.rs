@@ -62,15 +62,31 @@ pub mod commands;
 /// 故 `../../tauri.conf.json` 稳定指向 `src-tauri/tauri.conf.json`。
 pub fn run() {
     let builder = tauri::Builder::default()
+        // S5-M4（R17）：**单实例锁**——二次启动唤醒已运行实例，不产生第二份存档写入。
+        // 必须是**第一个**注册的插件（插件文档要求：单实例检查需先于其它插件初始化）；
+        // 唤醒动作 = 恢复宠物窗口可见 + 置顶（用户最可能"找不到"宠物）。
+        // C9：本机命名互斥体 / 窗口消息实现，零网络（登记见根 `Cargo.toml`）。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            eprintln!("[dp-app] 检测到二次启动：唤醒已运行实例（单实例锁，R17）");
+            if let Err(err) = crate::tray_menu::set_pet_visible(app, true) {
+                eprintln!("[dp-app] 唤醒已运行实例失败（降级忽略）：{err}");
+            }
+        }))
         // S2-M1：最小命令出口——前端经 invoke 读取图集 PNG 字节
         // （自定义 command，不走 asset 协议网络面，C9）。
         // S3-M6：menu_command 统一收口（右键菜单「隐藏」等命令的唯一出口）。
         // S4-M3/M4：`bridge::atlas_png`（图集字节）、`commands::pet_emotion_command`
         //（设置页「重置情绪」/「找回」兜底）。
+        // S5-M4：设置读取 / 热更新 / 重置、存档健康状态与导入（设置页「数据」Tab）。
         .invoke_handler(tauri::generate_handler![
             bridge::atlas_png,
             commands::menu_command,
-            commands::pet_emotion_command
+            commands::pet_emotion_command,
+            commands::settings_get,
+            commands::settings_apply,
+            commands::settings_reset_all,
+            commands::save_status,
+            commands::save_command
         ]);
 
     // 仅 Windows 落平台窗口层（本项目仅 Windows 目标）。
@@ -93,6 +109,13 @@ pub struct PetPlatform {
     /// 平台入口（持有 `DisplayService`，供坐标换算 / 显示器变更后 `refresh`）。
     pub platform: dp_platform::WinPlatform,
 }
+
+/// 宠物窗口的**基准逻辑尺寸**（`Q-B`：逻辑 128×128，导出 2x 256×256）。
+///
+/// `01 FR-7-2` 的缩放百分比即相对本基准：`logical = BASE × scalePercent / 100`。
+/// 常量放在装配层（`lib.rs`）：它是「窗口尺寸」这一平台概念的单一真源，`dp-core` 的
+/// 运动引擎只处理 VDC 坐标、不关心窗口像素尺寸（`02 §7.2` 坐标系约定）。
+pub const BRIDGE_BASE_LOGICAL_SIZE: u32 = 128;
 
 /// 解析音效资源目录（`<resource_dir>/resources/assets/audio` 优先，dev 兜底工程根
 /// 相对路径；**C1：无盘符字面量**，与 [`bridge::resolve_atlas_dir`] 同候选链范式）。
@@ -181,6 +204,14 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
     let hit_latest = hit_latest::HitLatestHandle::new(bbox.clone());
     app.manage(hit_latest.clone());
 
+    // S5-M4：渲染帧不透明度句柄（`01 FR-7-6`）——帧播放器每帧读、设置热更新每改即写。
+    // 必须在 `bridge::spawn_frame_player` 之前 manage（播放器启动时取用）。
+    app.manage(bridge::FrameAlpha::default());
+
+    // S5-M4：存档健康状态句柄——由 `coreloop::build_state` 载档时写入，
+    // 设置页「数据」Tab 经 `save_status` 命令读取（不新增 `pet://` 事件，见 bridge 文档）。
+    app.manage(bridge::SaveStatusHandle::default());
+
     // S4 前清障 B15-④：播放指令通道（core-loop 发播侧 ⇄ 播放器线程消费侧共享；
     // 须先 manage 再装配 core-loop 与播放器，两侧 try_state 取同一对象）。
     app.manage(bridge::PlaybackChannel::default());
@@ -253,6 +284,11 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
     // S1-M4：启动监督线程（30s 自检 / 全屏轮询 / 显示变更恢复）。后台运行、不 join；
     // `_handle` 以下划线开头具名承接，避免 `-D warnings` 下的 unused 告警。
     let _handle = supervisor::spawn(app.handle().clone());
+
+    // S5-M4：把设置快照（配置 ⊕ 存档 B 段）的**应用层效果**落地一次（窗口缩放/透明度、
+    // 置顶、穿透、音量、自启），保证重启后 UI 记忆的设置真的生效（FR-7「持久化」）。
+    // 装配顺序：`coreloop::spawn` 已 manage `SettingsState`，故此处必然可读。
+    commands::apply_startup_settings(app.handle());
 
     // S2-M2：动作播放器（`dp-core::anim` 目录 + 轮播 + fps 档位 + 镜像规则；
     // 替换 S2-M1 冒烟发射器）。仅当图集可用时启动；后台运行、不 join

@@ -37,6 +37,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -497,6 +498,14 @@ fn publish_frame(
     if let Some(feed) = feed {
         feed.publish(&frame.action_id, frame.frame_index, frame.mirror);
     }
+    // S5-M4：整体不透明度（`01 FR-7-6`）在**每帧**从原子句柄读取后写入载荷——
+    // 这样设置页改透明度后**下一帧**即生效（无需等业务档、无需重建播放器）。
+    let cmd = RenderFrameCmd {
+        alpha: app
+            .try_state::<FrameAlpha>()
+            .map_or(cmd.alpha, |handle| handle.alpha()),
+        ..cmd
+    };
     if let Err(err) = app.emit(FRAME_EVENT, &cmd) {
         eprintln!("[dp-app] bridge 广播 {FRAME_EVENT} 降级：{err}");
     }
@@ -789,17 +798,36 @@ impl PlaybackChannel {
 /// 入站指令队列容量（有界：满丢最旧并计数；8 ≫ 人工触发速率）。
 pub const CORE_INPUT_CAP: usize = 8;
 
-/// dp-app（设置页 / 托盘）→ core-loop 的入站指令（S4-M4）。
+/// dp-app（设置页 / 托盘）→ core-loop 的入站指令（S4-M4 起；S5-M4 扩充）。
 ///
 /// **非 C8 事件面**：进程内状态，不经 `pet://` 事件桥，无需登记；与
 /// [`PlaybackChannel`] 同为「壳 → 核」的反向通道（core-loop 单线程 Actor，入站在
 /// logic 档 drain）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// 注：`ResetAllData` / `ImportSave` / `Shutdown` **不再 `Copy`**（携带存档文件名 / 补丁）；
+/// 队列本身 clone 语义不变（`VecDeque` 里按值存）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreInput {
     /// 设置页「重置情绪」→ `EmotionEngine::force_lower`（`02 §5.23` R18 兜底）。
     ResetEmotion,
     /// 托盘「把心月狐找回来」→ L5 找回走回（`01 §6.5.2`）。
     RecallRunaway,
+    /// 设置页「重置全部数据」（`01 FR-8-4`）→ 清档重建 + 重启进程。
+    ///
+    /// 走 core-loop 的原因：存档**唯一写者**是 core-loop，命令层直写会破坏单写者语义。
+    ResetAllData,
+    /// 设置页「导入存档」（`02 §5 K-7`）→ 用存档目录内的备份档覆盖主档 + 重启进程。
+    ///
+    /// 载荷为**备份文件名**（不是完整路径）：命令层只允许白名单目录内的文件名，
+    /// core-loop 再拼路径，双重收口防路径穿越。
+    ImportSave {
+        /// 备份文件名（如 `save.json.bak` / `save.corrupt.1700000000000.json`）。
+        file: String,
+    },
+    /// 托盘「退出」（`01 FR-1-10`）→ 强制落盘后再退出（**退出前存档确认**，S5-M4）。
+    ///
+    /// 顺序由 core-loop 保证：`flush_force` 成功（或降级）后才 `app.exit(0)`。
+    Shutdown,
 }
 
 /// 入站指令通道（dp-app 持发送侧视图、core-loop 持消费侧视图，同一 [`Clone`]
@@ -837,6 +865,910 @@ impl CoreInputChannel {
     #[must_use]
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 设置状态（S5-M4：设置页 → 应用层 → core-loop 的热更新单一真源）
+// ---------------------------------------------------------------------------
+
+/// 设置快照载荷版本（v1；与前端 `SETTINGS_VERSION` 同源）。
+pub const SETTINGS_VERSION: u32 = 1;
+
+/// `pet://config` 事件名（**真源 = `dp_core::event::EVENT_CONFIG`**；C8 禁字面量）。
+pub const CONFIG_EVENT: &str = dp_core::event::EVENT_CONFIG;
+
+/// 提醒偏好（`01 FR-10-2`；有效值 = 存档用户值 ⊕ `schedule.json` 出厂默认）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemindersSnapshot {
+    /// 久坐提醒开关。
+    pub sedentary_enabled: bool,
+    /// 久坐提醒间隔（分钟）。
+    pub sedentary_interval_min: u32,
+    /// 喝水提醒开关。
+    pub water_enabled: bool,
+    /// 喝水提醒间隔（分钟）。
+    pub water_interval_min: u32,
+    /// 间隔取值域下界（分钟；来自 `schedule.json`，UI 不硬编码）。
+    pub interval_min_min: u32,
+    /// 间隔取值域上界（分钟）。
+    pub interval_max_min: u32,
+    /// 点击「知道了」是否重新计时。
+    pub ack_resets_timer: bool,
+}
+
+/// 设置快照（**有效值**：`settings.json` 出厂默认 ⊕ 存档 B 段用户改动）。
+///
+/// 消费面：
+///   - 设置窗口：`settings_get` 命令返回本结构（UI 直接渲染，不读任何配置文件的数值）；
+///   - core-loop：`settings_apply` 后经 [`SettingsState::take_pending`] 取补丁，落地到引擎与存档；
+///   - `02 §7.6` `pet://config`：只广播**摘要**（[`dp_core::event::ConfigSetWire`]），
+///     全量快照走命令按需拉取（避免 1KB+ 载荷在每次改动时全量广播）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SettingsSnapshot {
+    /// 载荷版本。
+    pub version: u32,
+    /// 变更序号（单调递增；每次 `settings_apply` +1）。
+    pub revision: u64,
+    /// 设置服务是否可写（`false` = 存档未装配 / 待迁移，UI 进只读预览）。
+    pub writable: bool,
+    // --- 身份（FR-7-1 / C2） ---
+    /// 有效角色名（存档 `pet.name` 非空则取之，否则取 `character.json.defaultName`）。
+    pub name: String,
+    /// 出厂默认名（UI「恢复默认」按钮用；C2 唯一来源）。
+    pub default_name: String,
+    // --- 外观（FR-7-2 / FR-7-6 / FR-7-7） ---
+    /// 当前缩放百分比。
+    pub scale_percent: u32,
+    /// 缩放下界。
+    pub scale_min_percent: u32,
+    /// 缩放上界。
+    pub scale_max_percent: u32,
+    /// 缩放步进。
+    pub scale_step_percent: u32,
+    /// 当前不透明度百分比。
+    pub opacity_percent: u32,
+    /// 不透明度下界。
+    pub opacity_min_percent: u32,
+    /// 不透明度上界。
+    pub opacity_max_percent: u32,
+    /// 界面语言（`zh-CN` / `en-US`）。
+    pub language: String,
+    // --- 声音（FR-7-3） ---
+    /// 主音量百分比。
+    pub master_volume_percent: u32,
+    /// 音量下界。
+    pub volume_min_percent: u32,
+    /// 音量上界。
+    pub volume_max_percent: u32,
+    /// 是否静音。
+    pub muted: bool,
+    // --- 行为（FR-7-4 / FR-1-2 / FR-1-9） ---
+    /// 自动走动。
+    pub auto_roam: bool,
+    /// 漫游节奏当前值（`01 §8.3`「节奏」）。
+    pub roam_pace: f32,
+    /// 漫游节奏档位候选值（`settings.json.roam.paceOptions`；UI 不硬编码）。
+    pub roam_pace_options: Vec<f32>,
+    /// 勿扰模式（`01 FR-10-4`）。
+    pub do_not_disturb: bool,
+    /// 轻松模式（`01 §6.5.2` Q-E；S4-M3/M4 遗留的设置接线）。
+    pub easy_coax_mode: bool,
+    /// 鼠标穿透（`01 FR-1-6`；真实窗口态由平台层持有，本字段是设置侧镜像）。
+    pub click_through: bool,
+    /// 置顶策略（`Always` / `BelowFullscreen` / `Never`）。
+    pub always_on_top_policy: String,
+    /// 开机自启（真实注册表状态与设置项可能短暂不一致，见 S5-M4 裁定）。
+    pub autostart: bool,
+    // --- 互动（FR-7-9 / FR-7-10 / Q-18） ---
+    /// 情绪敏感度当前值。
+    pub sensitivity_value: f32,
+    /// 敏感度三档可选值（来自 `emotion.json.sensitivity` 兼容面 → `settings.json.emotion`）。
+    pub sensitivity_options: Vec<f32>,
+    /// 口头禅开关（FR-7-10）。
+    pub catchphrase_enabled: bool,
+    /// 口头禅频率档位（`off` / `low` / `standard` / `high`）。
+    pub catchphrase_frequency: String,
+    /// 单击微反馈开关。
+    pub click_feedback_enabled: bool,
+    /// 活跃感知开关（Q-18）。
+    pub activity_sensing: bool,
+    // --- 提醒（FR-10-2） ---
+    /// 提醒偏好（含取值域）。
+    pub reminders: RemindersSnapshot,
+}
+
+/// 提醒偏好补丁（`None` = 不改）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RemindersPatch {
+    /// 久坐提醒开关。
+    pub sedentary_enabled: Option<bool>,
+    /// 久坐提醒间隔（分钟）。
+    pub sedentary_interval_min: Option<u32>,
+    /// 喝水提醒开关。
+    pub water_enabled: Option<bool>,
+    /// 喝水提醒间隔（分钟）。
+    pub water_interval_min: Option<u32>,
+}
+
+impl RemindersPatch {
+    /// 是否无字段需要改动（全 `None`）。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.sedentary_enabled.is_none()
+            && self.sedentary_interval_min.is_none()
+            && self.water_enabled.is_none()
+            && self.water_interval_min.is_none()
+    }
+}
+
+/// 设置补丁（`01 FR-7`；`None` = 不改该字段）。
+///
+/// 只允许**已定义设置项**（`03 S5-M3` 禁止顺手新增）：字段集合与
+/// [`SettingsSnapshot`] 的「可改项」一一对应，由 `settings_patch_touches_only_defined_fields`
+/// 单测与前端 `SettingsPatchV1` 共同锁定。
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SettingsPatch {
+    /// 角色名（FR-7-1；空串 = 恢复出厂默认名）。
+    pub name: Option<String>,
+    /// 缩放百分比。
+    pub scale_percent: Option<u32>,
+    /// 不透明度百分比。
+    pub opacity_percent: Option<u32>,
+    /// 界面语言。
+    pub language: Option<String>,
+    /// 主音量百分比。
+    pub master_volume_percent: Option<u32>,
+    /// 静音。
+    pub muted: Option<bool>,
+    /// 自动走动。
+    pub auto_roam: Option<bool>,
+    /// 漫游节奏（`01 §8.3`）。
+    pub roam_pace: Option<f32>,
+    /// 勿扰模式。
+    pub do_not_disturb: Option<bool>,
+    /// 轻松模式（`01 §6.5.2`）。
+    pub easy_coax_mode: Option<bool>,
+    /// 鼠标穿透。
+    pub click_through: Option<bool>,
+    /// 置顶策略。
+    pub always_on_top_policy: Option<String>,
+    /// 开机自启。
+    pub autostart: Option<bool>,
+    /// 情绪敏感度。
+    pub sensitivity_value: Option<f32>,
+    /// 口头禅开关。
+    pub catchphrase_enabled: Option<bool>,
+    /// 口头禅频率档位。
+    pub catchphrase_frequency: Option<String>,
+    /// 单击微反馈开关。
+    pub click_feedback_enabled: Option<bool>,
+    /// 活跃感知开关。
+    pub activity_sensing: Option<bool>,
+    /// 提醒偏好。
+    pub reminders: Option<RemindersPatch>,
+}
+
+impl SettingsPatch {
+    /// 是否无字段需要改动（全 `None`）。
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// 补丁涉及的分组名（`pet://config` 载荷的 `changed` 字段；保序去重）。
+    ///
+    /// 分组名与 `settings.json` 顶层键同字面量（`appearance` / `audio` / `behavior` /
+    /// `interaction` / `reminders`）+ `pet`（身份）。**不含 `performance`**：渲染后端切换
+    /// 归 S6-M1，本卡不开放该设置项（`03 S5-M3`「不新增未定义设置项」）。
+    #[must_use]
+    pub fn groups(&self) -> Vec<&'static str> {
+        let mut out: Vec<&'static str> = Vec::new();
+        let mut push = |group: &'static str, hit: bool| {
+            if hit && !out.contains(&group) {
+                out.push(group);
+            }
+        };
+        push("pet", self.name.is_some());
+        push(
+            "appearance",
+            self.scale_percent.is_some() || self.opacity_percent.is_some() || self.language.is_some(),
+        );
+        push("audio", self.master_volume_percent.is_some() || self.muted.is_some());
+        push(
+            "behavior",
+            self.auto_roam.is_some()
+                || self.roam_pace.is_some()
+                || self.do_not_disturb.is_some()
+                || self.easy_coax_mode.is_some()
+                || self.click_through.is_some()
+                || self.always_on_top_policy.is_some()
+                || self.autostart.is_some(),
+        );
+        push(
+            "interaction",
+            self.sensitivity_value.is_some()
+                || self.catchphrase_enabled.is_some()
+                || self.catchphrase_frequency.is_some()
+                || self.click_feedback_enabled.is_some()
+                || self.activity_sensing.is_some(),
+        );
+        push("reminders", self.reminders.is_some_and(|r| !r.is_empty()));
+        out
+    }
+}
+
+/// core-loop 待消费的一次设置变更。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PendingSettings {
+    /// 变更后的 revision（广播用）。
+    pub revision: u64,
+    /// 本次合并后的补丁（core-loop 应用面）。
+    pub patch: SettingsPatch,
+}
+
+/// 设置状态（**应用层唯一设置真源**，`Arc<RwLock<_>>` 共享）。
+///
+/// ## 为什么不放进 core-loop
+/// 设置窗口是**请求/响应**式消费（`settings_get` 必须立刻返回），而 core-loop 是
+/// 1Hz 业务档 + 20Hz 逻辑档的单线程 Actor：把设置放进 core-loop 会让每次「读设置」
+/// 都退化成跨线程往返 + 阻塞等待。故设置快照放在 app 层（读写皆快），
+/// **core-loop 只消费补丁**（[`Self::take_pending`]），并在自己那一档把它落进引擎与存档。
+///
+/// ## 一致性口径
+/// - 补丁**合并**后入队（连续拖动滑块不会堆积成 N 次落盘）；
+/// - `revision` 单调递增（消费端只比较是否变化）；
+/// - 写失败（锁中毒）退化为「静默不生效」而非 panic（`02 §7.4.2`）。
+#[derive(Debug, Clone, Default)]
+pub struct SettingsState {
+    /// 当前快照 + 待消费补丁。
+    inner: Arc<RwLock<SettingsInner>>,
+}
+
+/// [`SettingsState`] 的内部数据。
+#[derive(Debug, Default)]
+struct SettingsInner {
+    /// 当前有效快照。
+    snapshot: SettingsSnapshot,
+    /// 待 core-loop 消费的合并补丁（`None` = 无待处理变更）。
+    pending: Option<SettingsPatch>,
+}
+
+impl SettingsState {
+    /// 以初始快照构造（装配期由 `build_state` 从配置 + 存档推导）。
+    #[must_use]
+    pub fn new(snapshot: SettingsSnapshot) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(SettingsInner { snapshot, pending: None })),
+        }
+    }
+
+    /// 只读快照。
+    #[must_use]
+    pub fn snapshot(&self) -> SettingsSnapshot {
+        match self.inner.read() {
+            Ok(inner) => inner.snapshot.clone(),
+            // 锁中毒：返回默认快照（消费端会以 `writable=false` 呈现只读预览）。
+            Err(_) => SettingsSnapshot::default(),
+        }
+    }
+
+    /// 应用补丁：合并进快照 + 入队待 core-loop 消费；返回新的 `revision`。
+    ///
+    /// 返回 `None` 仅当锁中毒（调用方按失败处理，不谎报成功）。
+    pub fn apply(&self, patch: &SettingsPatch) -> Option<u64> {
+        let Ok(mut inner) = self.inner.write() else {
+            return None;
+        };
+        merge_patch(&mut inner.snapshot, patch);
+        inner.snapshot.revision = inner.snapshot.revision.saturating_add(1);
+        let revision = inner.snapshot.revision;
+        match inner.pending.as_mut() {
+            Some(current) => merge_patch_value(current, patch),
+            None => inner.pending = Some(patch.clone()),
+        }
+        Some(revision)
+    }
+
+    /// 整体替换快照（重置 / 导入存档后刷新；`pending` 保留不动）。
+    pub fn replace_snapshot(&self, snapshot: SettingsSnapshot) {
+        if let Ok(mut inner) = self.inner.write() {
+            inner.snapshot = snapshot;
+        }
+    }
+
+    /// 取出并清空待消费补丁（core-loop 业务档每拍调用一次）。
+    #[must_use]
+    pub fn take_pending(&self) -> Option<PendingSettings> {
+        let Ok(mut inner) = self.inner.write() else {
+            return None;
+        };
+        let patch = inner.pending.take()?;
+        Some(PendingSettings { revision: inner.snapshot.revision, patch })
+    }
+}
+
+impl Default for SettingsSnapshot {
+    /// 兜底快照（锁中毒 / 设置服务未装配时返回）：全部取产品默认，`writable = false`。
+    ///
+    /// 数值与 `settings.json` / `schedule.json` 出厂默认一致（由
+    /// `settings_snapshot_default_matches_schedule_defaults` 单测锁定）。
+    fn default() -> Self {
+        Self {
+            version: SETTINGS_VERSION,
+            revision: 0,
+            writable: false,
+            name: String::new(),
+            default_name: String::new(),
+            scale_percent: 100,
+            scale_min_percent: 50,
+            scale_max_percent: 200,
+            scale_step_percent: 10,
+            opacity_percent: 100,
+            opacity_min_percent: 60,
+            opacity_max_percent: 100,
+            language: "zh-CN".to_string(),
+            master_volume_percent: 80,
+            volume_min_percent: 0,
+            volume_max_percent: 100,
+            muted: false,
+            auto_roam: true,
+            roam_pace: 1.0,
+            roam_pace_options: vec![0.7, 1.0, 1.3],
+            do_not_disturb: false,
+            easy_coax_mode: false,
+            click_through: false,
+            always_on_top_policy: "Always".to_string(),
+            autostart: false,
+            sensitivity_value: 1.0,
+            sensitivity_options: vec![0.7, 1.0, 1.3],
+            catchphrase_enabled: true,
+            catchphrase_frequency: "standard".to_string(),
+            click_feedback_enabled: true,
+            activity_sensing: true,
+            reminders: RemindersSnapshot {
+                sedentary_enabled: true,
+                sedentary_interval_min: 45,
+                water_enabled: true,
+                water_interval_min: 45,
+                interval_min_min: 15,
+                interval_max_min: 180,
+                ack_resets_timer: true,
+            },
+        }
+    }
+}
+
+/// 把补丁合并进快照（仅覆盖 `Some` 字段；数值按取值域夹紧）。
+///
+/// 夹紧放在**应用层**而不是 UI：UI 可被绕过（前端先行 / 手工 invoke），
+/// 边界校验必须在真正写状态的地方（与「不信任客户端输入」同口径）。
+pub fn merge_patch(snapshot: &mut SettingsSnapshot, patch: &SettingsPatch) {
+    if let Some(name) = &patch.name {
+        snapshot.name = name.trim().to_string();
+    }
+    if let Some(value) = patch.scale_percent {
+        snapshot.scale_percent = value.clamp(snapshot.scale_min_percent, snapshot.scale_max_percent);
+    }
+    if let Some(value) = patch.opacity_percent {
+        snapshot.opacity_percent =
+            value.clamp(snapshot.opacity_min_percent, snapshot.opacity_max_percent);
+    }
+    if let Some(value) = &patch.language {
+        // 语言白名单在 `shared/i18n` 侧，此处只做「非空」守门（未知语言由 UI 回退默认）。
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            snapshot.language = trimmed.to_string();
+        }
+    }
+    if let Some(value) = patch.master_volume_percent {
+        snapshot.master_volume_percent =
+            value.clamp(snapshot.volume_min_percent, snapshot.volume_max_percent);
+    }
+    if let Some(value) = patch.muted {
+        snapshot.muted = value;
+    }
+    if let Some(value) = patch.auto_roam {
+        snapshot.auto_roam = value;
+    }
+    if let Some(value) = patch.roam_pace {
+        if value.is_finite() {
+            // 夹紧到档位候选值域（`settings.json.roam.paceOptions` 首末项）。
+            let lo = snapshot.roam_pace_options.first().copied().unwrap_or(0.5);
+            let hi = snapshot.roam_pace_options.last().copied().unwrap_or(2.0);
+            snapshot.roam_pace = value.clamp(lo.min(hi), hi.max(lo));
+        }
+    }
+    if let Some(value) = patch.do_not_disturb {
+        snapshot.do_not_disturb = value;
+    }
+    if let Some(value) = patch.easy_coax_mode {
+        snapshot.easy_coax_mode = value;
+    }
+    if let Some(value) = patch.click_through {
+        snapshot.click_through = value;
+    }
+    if let Some(value) = &patch.always_on_top_policy {
+        if let Some(normalized) = normalize_topmost_policy(value) {
+            snapshot.always_on_top_policy = normalized.to_string();
+        }
+    }
+    if let Some(value) = patch.autostart {
+        snapshot.autostart = value;
+    }
+    if let Some(value) = patch.sensitivity_value {
+        if value.is_finite() {
+            // 夹紧到档位可选值域（`settings.json.emotion.sensitivityOptions` 的首末项）。
+            let lo = snapshot.sensitivity_options.first().copied().unwrap_or(0.5);
+            let hi = snapshot.sensitivity_options.last().copied().unwrap_or(1.6);
+            snapshot.sensitivity_value = value.clamp(lo.min(hi), hi.max(lo));
+        }
+    }
+    if let Some(value) = patch.catchphrase_enabled {
+        snapshot.catchphrase_enabled = value;
+    }
+    if let Some(value) = &patch.catchphrase_frequency {
+        if let Some(normalized) = normalize_catchphrase_frequency(value) {
+            snapshot.catchphrase_frequency = normalized.to_string();
+        }
+    }
+    if let Some(value) = patch.click_feedback_enabled {
+        snapshot.click_feedback_enabled = value;
+    }
+    if let Some(value) = patch.activity_sensing {
+        snapshot.activity_sensing = value;
+    }
+    if let Some(reminders) = patch.reminders {
+        let lo = snapshot.reminders.interval_min_min;
+        let hi = snapshot.reminders.interval_max_min;
+        if let Some(value) = reminders.sedentary_enabled {
+            snapshot.reminders.sedentary_enabled = value;
+        }
+        if let Some(value) = reminders.sedentary_interval_min {
+            snapshot.reminders.sedentary_interval_min = value.clamp(lo, hi);
+        }
+        if let Some(value) = reminders.water_enabled {
+            snapshot.reminders.water_enabled = value;
+        }
+        if let Some(value) = reminders.water_interval_min {
+            snapshot.reminders.water_interval_min = value.clamp(lo, hi);
+        }
+    }
+}
+
+/// 补丁合并（`None` 字段由 `b` 覆盖；用于把多次补丁并成一次消费）。
+fn merge_patch_value(base: &mut SettingsPatch, patch: &SettingsPatch) {
+    macro_rules! take_some {
+        ($field:ident) => {
+            if patch.$field.is_some() {
+                base.$field = patch.$field.clone();
+            }
+        };
+    }
+    take_some!(name);
+    take_some!(scale_percent);
+    take_some!(opacity_percent);
+    take_some!(language);
+    take_some!(master_volume_percent);
+    take_some!(muted);
+    take_some!(auto_roam);
+    take_some!(roam_pace);
+    take_some!(do_not_disturb);
+    take_some!(easy_coax_mode);
+    take_some!(click_through);
+    take_some!(always_on_top_policy);
+    take_some!(autostart);
+    take_some!(sensitivity_value);
+    take_some!(catchphrase_enabled);
+    take_some!(catchphrase_frequency);
+    take_some!(click_feedback_enabled);
+    take_some!(activity_sensing);
+    if let Some(next) = patch.reminders {
+        let mut merged = base.reminders.unwrap_or_default();
+        if next.sedentary_enabled.is_some() {
+            merged.sedentary_enabled = next.sedentary_enabled;
+        }
+        if next.sedentary_interval_min.is_some() {
+            merged.sedentary_interval_min = next.sedentary_interval_min;
+        }
+        if next.water_enabled.is_some() {
+            merged.water_enabled = next.water_enabled;
+        }
+        if next.water_interval_min.is_some() {
+            merged.water_interval_min = next.water_interval_min;
+        }
+        base.reminders = Some(merged);
+    }
+}
+
+/// 置顶策略字面量归一化（`02 K-1` 三态；未知值 → `None`，保持原值）。
+#[must_use]
+pub fn normalize_topmost_policy(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "Always" | "always" => Some("Always"),
+        "BelowFullscreen" | "belowFullscreen" => Some("BelowFullscreen"),
+        "Never" | "never" => Some("Never"),
+        _ => None,
+    }
+}
+
+/// 口头禅频率字面量归一化（L-03 枚举四档；未知值 → `None`，保持原值）。
+#[must_use]
+pub fn normalize_catchphrase_frequency(value: &str) -> Option<&'static str> {
+    match value.trim() {
+        "off" => Some("off"),
+        "low" => Some("low"),
+        "standard" => Some("standard"),
+        "high" => Some("high"),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 渲染帧不透明度（S5-M4：`01 FR-7-6` 主体不透明度 → `RenderFrameCmd.alpha`）
+// ---------------------------------------------------------------------------
+
+/// 渲染帧整体不透明度句柄（原子百分比；帧播放器每帧读取）。
+///
+/// 为什么不用「设置状态读锁」：帧循环是 2~60Hz 的热路径，读锁虽轻仍会与设置写入
+/// 争用；一个 `AtomicU32`（百分比）足够表达，且读侧无锁、无分配。
+///
+/// 窗口本身不做 `WS_EX_LAYERED` alpha 调整（`02 §2.3` 定版口径：透明合成交给
+/// WebView2 侧），故不透明度**只在渲染帧上生效**——这正是 `FR-7-6` 的「主体不透明度」。
+#[derive(Debug)]
+pub struct FrameAlpha {
+    /// 百分比（0~100；越界由 [`Self::set_percent`] 夹紧）。
+    percent: std::sync::atomic::AtomicU32,
+}
+
+impl Default for FrameAlpha {
+    fn default() -> Self {
+        Self { percent: std::sync::atomic::AtomicU32::new(100) }
+    }
+}
+
+impl FrameAlpha {
+    /// 设置百分比（夹紧到 `[min, 100]`；`min` 由 `settings.json.appearance.opacityMinPercent` 决定）。
+    pub fn set_percent(&self, percent: u32, min: u32) {
+        let clamped = percent.clamp(min.min(100), 100);
+        self.percent.store(clamped, Ordering::Relaxed);
+    }
+
+    /// 读取当前百分比。
+    #[must_use]
+    pub fn percent(&self) -> u32 {
+        self.percent.load(Ordering::Relaxed)
+    }
+
+    /// 读取当前 alpha（`0.0~1.0`）。
+    #[must_use]
+    pub fn alpha(&self) -> f32 {
+        self.percent() as f32 / 100.0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 存档目录与备份清单（S5-M4：设置页「数据」Tab 的消费面）
+// ---------------------------------------------------------------------------
+
+/// 存档目录名（`01 FR-8-1`：`%APPDATA%\DesktopPet`；与 `tauri.conf.json.productName` 一致，
+/// 由 `coreloop` 单测锁定；C1：无盘符字面量）。
+pub const SAVE_DIR_NAME: &str = "DesktopPet";
+
+/// 存档主文件名（与 `dp_core::save::store::SAVE_FILE` 同源）。
+pub const SAVE_FILE_NAME: &str = "save.json";
+
+/// 解析存档目录（`PathResolver::data_dir()` = `%APPDATA%` + [`SAVE_DIR_NAME`]）。
+///
+/// 目录**允许不存在**（首次运行由原子写建立）；解析失败（平台 API 不可用）→ `None`，
+/// 调用方退化为「不载档不落盘 / 只读预览」（`02 §7.4.2` 降级不崩）。
+#[must_use]
+pub fn resolve_save_dir(app: &AppHandle) -> Option<PathBuf> {
+    let base = app.path().data_dir().ok()?;
+    Some(base.join(SAVE_DIR_NAME))
+}
+
+/// 备份档用途分类（设置页「数据」Tab 的显示口径）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SaveBackupKind {
+    /// 上一次成功落盘的完整备份（`save.json.bak`）——**可导入**。
+    LastGood,
+    /// 损坏档隔离副本（`save.corrupt.<ts>.json`）——**可导入**（用户可手工修好再导回）。
+    Corrupt,
+    /// 未来版本隔离副本（`save.future.<ts>.json`）——不可导入（版本高于本程序）。
+    Future,
+    /// v1 迁移备份（`save.json.v1bak`）——**待 S8-M7 迁移**，本卡不可导入。
+    V1Migration,
+}
+
+impl SaveBackupKind {
+    /// 是否为「本卡可导入」的类别。
+    ///
+    /// `Future`（版本过高）与 `V1Migration`（需迁移）都**不可导入**：
+    /// 前者导入即触发「版本过高 → 再隔离」的死循环，后者导入即触发
+    /// `MigrationPending`（本卡按裁定①禁写盘），两者都会把用户推进更差的状态。
+    #[must_use]
+    pub fn importable(self) -> bool {
+        matches!(self, Self::LastGood | Self::Corrupt)
+    }
+
+    /// 不可导入时的原因说明（i18n 键的语义标签，前端再本地化）。
+    #[must_use]
+    pub fn blocked_reason(self) -> Option<&'static str> {
+        match self {
+            Self::LastGood | Self::Corrupt => None,
+            Self::Future => Some("futureVersion"),
+            Self::V1Migration => Some("pendingMigration"),
+        }
+    }
+}
+
+/// 一份候选备份（`settings` 命令的返回项）。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveBackup {
+    /// 文件名（相对存档目录；导入时回传的也是它——**只允许文件名**，防路径穿越）。
+    pub file: String,
+    /// 用途分类。
+    pub kind: SaveBackupKind,
+    /// 字节数（0 = 读取失败 / 空文件）。
+    pub size_bytes: u64,
+    /// 当前实现是否允许导入。
+    pub importable: bool,
+    /// 不可导入的原因键（可导入时为 `None`）。
+    pub blocked_reason: Option<&'static str>,
+}
+
+/// 扫描存档目录，列出可导入的候选备份（`01 FR-8-2`「自动备份恢复」的用户手工入口）。
+///
+/// 识别规则（与 `dp_core::save` 的文件命名口径一一对应）：
+///   - `save.json.bak` → [`SaveBackupKind::LastGood`]
+///   - `save.corrupt.*.json` → [`SaveBackupKind::Corrupt`]
+///   - `save.future.*.json` → [`SaveBackupKind::Future`]
+///   - `save.json.v1bak` → [`SaveBackupKind::V1Migration`]
+///
+/// 排序：先按「可导入优先」，再按类别、文件名倒序（时间戳倒序 ⇒ 最新在前）。
+/// 目录不存在 / 不可读 → `[]`（UI 显示「未发现可用备份」，非错误）。
+#[must_use]
+pub fn list_save_backups(dir: &Path) -> Vec<SaveBackup> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SaveBackup> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(kind) = classify_backup(&name) else {
+            continue;
+        };
+        let size_bytes = entry.metadata().map(|meta| meta.len()).unwrap_or(0);
+        out.push(SaveBackup {
+            file: name,
+            kind,
+            size_bytes,
+            importable: kind.importable(),
+            blocked_reason: kind.blocked_reason(),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.importable
+            .cmp(&a.importable)
+            .then_with(|| kind_rank(a.kind).cmp(&kind_rank(b.kind)))
+            .then_with(|| b.file.cmp(&a.file))
+    });
+    out
+}
+
+/// 文件名 → 备份类别（非备份文件 → `None`；纯函数，可单测）。
+///
+/// 注意：只接受**纯文件名**（含路径分隔符的一律拒绝），这是路径穿越的第一道收口。
+#[must_use]
+pub fn classify_backup(name: &str) -> Option<SaveBackupKind> {
+    if name.contains('/') || name.contains('\\') || name.contains(':') {
+        return None;
+    }
+    if name == "save.json.bak" {
+        return Some(SaveBackupKind::LastGood);
+    }
+    if name == "save.json.v1bak" {
+        return Some(SaveBackupKind::V1Migration);
+    }
+    let stripped = name.strip_prefix("save.")?.strip_suffix(".json")?;
+    if stripped.starts_with("corrupt.") {
+        return Some(SaveBackupKind::Corrupt);
+    }
+    if stripped.starts_with("future.") {
+        return Some(SaveBackupKind::Future);
+    }
+    None
+}
+
+/// 备份类别排序权重（可导入类别靠前）。
+fn kind_rank(kind: SaveBackupKind) -> u8 {
+    match kind {
+        SaveBackupKind::LastGood => 0,
+        SaveBackupKind::Corrupt => 1,
+        SaveBackupKind::Future => 2,
+        SaveBackupKind::V1Migration => 3,
+    }
+}
+
+/// 推导**有效设置快照**（`settings.json` / `schedule.json` / `emotion.json` / `character.json`
+/// 的出厂默认 ⊕ 存档 B 段用户值）。
+///
+/// 划分口径（`02 §3`：安装目录资源只读）：
+/// - **出厂默认与取值域**（上下界 / 步进 / 档位候选值）永远来自配置束；
+/// - **用户改动后的有效值**来自存档 `pet.*` / `settings.*`（B 段，S5-M1 已冻结结构）；
+/// - 无存档（纯逻辑模式 / `%APPDATA%` 不可解析）→ 全部取配置默认 + `writable = false`
+///   （设置页进只读预览，而不是显示一份"看起来能改"的假设置）。
+#[must_use]
+pub fn build_settings_snapshot(
+    bundle: &dp_core::config::ConfigBundle,
+    save: Option<&dp_core::save::SaveStore>,
+) -> SettingsSnapshot {
+    let cfg = &bundle.settings;
+    let sched = &bundle.schedule;
+    let fallback = SettingsSnapshot::default();
+    let default_name = bundle.character.default_name.clone();
+
+    let Some(store) = save else {
+        return SettingsSnapshot {
+            name: String::new(),
+            default_name,
+            scale_min_percent: cfg.appearance.scale_min_percent,
+            scale_max_percent: cfg.appearance.scale_max_percent,
+            scale_step_percent: cfg.appearance.scale_step_percent,
+            opacity_min_percent: cfg.appearance.opacity_min_percent,
+            opacity_max_percent: cfg.appearance.opacity_max_percent,
+            volume_min_percent: cfg.audio.volume_min_percent,
+            volume_max_percent: cfg.audio.volume_max_percent,
+            sensitivity_options: cfg.emotion.sensitivity_options.clone(),
+            roam_pace_options: cfg.roam.pace_options.clone(),
+            reminders: RemindersSnapshot {
+                sedentary_enabled: sched.reminders.sedentary_enabled,
+                sedentary_interval_min: sched.reminders.sedentary_interval_min,
+                water_enabled: sched.reminders.water_enabled,
+                water_interval_min: sched.reminders.water_interval_min,
+                interval_min_min: sched.reminders.interval_min_min,
+                interval_max_min: sched.reminders.interval_max_min,
+                ack_resets_timer: sched.reminders.ack_resets_timer,
+            },
+            writable: false,
+            ..fallback
+        };
+    };
+
+    let cached = store.cache();
+    let pet = &cached.pet;
+    let set = &cached.settings;
+    SettingsSnapshot {
+        version: SETTINGS_VERSION,
+        revision: 0,
+        writable: store.is_writable(),
+        name: pet.name.clone(),
+        default_name,
+        scale_percent: set.appearance.scale_percent,
+        scale_min_percent: cfg.appearance.scale_min_percent,
+        scale_max_percent: cfg.appearance.scale_max_percent,
+        scale_step_percent: cfg.appearance.scale_step_percent,
+        opacity_percent: set.appearance.opacity_percent,
+        opacity_min_percent: cfg.appearance.opacity_min_percent,
+        opacity_max_percent: cfg.appearance.opacity_max_percent,
+        language: set.appearance.language.clone(),
+        master_volume_percent: set.audio.master_volume_percent,
+        volume_min_percent: cfg.audio.volume_min_percent,
+        volume_max_percent: cfg.audio.volume_max_percent,
+        muted: set.audio.muted,
+        auto_roam: set.behavior.auto_roam,
+        roam_pace: set.behavior.roam_pace,
+        roam_pace_options: cfg.roam.pace_options.clone(),
+        do_not_disturb: set.behavior.do_not_disturb,
+        easy_coax_mode: set.behavior.easy_coax_mode,
+        click_through: set.behavior.click_through,
+        always_on_top_policy: set.behavior.always_on_top_policy.clone(),
+        autostart: set.behavior.autostart,
+        sensitivity_value: set.emotion_sensitivity,
+        sensitivity_options: cfg.emotion.sensitivity_options.clone(),
+        catchphrase_enabled: pet.catchphrase.enabled,
+        catchphrase_frequency: pet.catchphrase.frequency.as_cfg_name().to_string(),
+        click_feedback_enabled: cfg.interaction.click_feedback.enabled,
+        activity_sensing: set.privacy.activity_sensing,
+        reminders: RemindersSnapshot {
+            sedentary_enabled: set.reminders.sedentary_enabled,
+            sedentary_interval_min: set.reminders.sedentary_interval_min,
+            water_enabled: set.reminders.water_enabled,
+            water_interval_min: set.reminders.water_interval_min,
+            interval_min_min: sched.reminders.interval_min_min,
+            interval_max_min: sched.reminders.interval_max_min,
+            ack_resets_timer: sched.reminders.ack_resets_timer,
+        },
+    }
+}
+
+/// 校验「导入存档」请求的文件名是否合法（**第二道收口**：只允许清单内的候选）。
+///
+/// 返回 `Ok(PathBuf)` = 存档目录内的绝对路径；`Err` = 中文可读原因（前端直接展示）。
+pub fn resolve_backup_path(dir: &Path, file: &str) -> Result<PathBuf, String> {
+    let Some(kind) = classify_backup(file) else {
+        return Err(format!("不是可识别的存档备份文件名：{file}"));
+    };
+    if !kind.importable() {
+        return Err(match kind {
+            SaveBackupKind::Future => "该备份来自更高版本的存档，无法导入".to_string(),
+            _ => "v1 旧档需先迁移（归 S8-M7），本版本不支持导入".to_string(),
+        });
+    }
+    let path = dir.join(file);
+    if !path.is_file() {
+        return Err(format!("备份文件不存在：{file}"));
+    }
+    Ok(path)
+}
+
+/// 存档健康状态快照（供设置页「数据」Tab 展示；`save_status` 命令的返回内核）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveStatusInfo {
+    /// 加载落点词表名（与 `dp_core::save::LoadStatus` 一一对应）。
+    pub state: String,
+    /// 是否健康。
+    pub healthy: bool,
+    /// 是否需要提示用户。
+    pub needs_notice: bool,
+    /// 是否允许写盘。
+    pub writable: bool,
+    /// 最近一次落盘的墙钟毫秒。
+    pub last_seen_ms: i64,
+}
+
+impl Default for SaveStatusInfo {
+    fn default() -> Self {
+        Self {
+            state: "unknown".to_string(),
+            healthy: false,
+            needs_notice: true,
+            writable: false,
+            last_seen_ms: 0,
+        }
+    }
+}
+
+/// core-loop 装配期写入的存档健康状态句柄（设置页按需读取，不引入新事件面）。
+///
+/// 为什么用**命令 + 句柄**而不是新事件：`02 §7.6` 没有「存档状态」事件，新增事件名
+/// 需走 C8 登记流程且要改 3 处文档；而「数据」Tab 是**按需查询**场景（打开设置页才需要），
+/// 请求/响应天然合适（S5-M1 裁定 ④ 指定的承载面）。
+#[derive(Debug, Clone, Default)]
+pub struct SaveStatusHandle {
+    /// 当前状态（core-loop 唯一写者）。
+    inner: Arc<Mutex<SaveStatusInfo>>,
+}
+
+impl SaveStatusHandle {
+    /// 读取当前状态（锁中毒 → 默认值，即「需提示」，保守方向）。
+    #[must_use]
+    pub fn get(&self) -> SaveStatusInfo {
+        match self.inner.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => SaveStatusInfo::default(),
+        }
+    }
+
+    /// 写入状态（core-loop 装配期 / 每次成功落盘后刷新 `last_seen_ms`）。
+    pub fn set(&self, info: SaveStatusInfo) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = info;
+        }
+    }
+
+    /// 只刷新 `last_seen_ms`（落盘后调用；避免每次落盘都重建整个结构）。
+    pub fn note_flush(&self, last_seen_ms: i64) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.last_seen_ms = last_seen_ms;
+        }
     }
 }
 

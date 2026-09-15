@@ -24,6 +24,7 @@
   },
   "roam": {
     "pace": 1.0,
+    "paceOptions": [0.7, 1.0, 1.3],
     "decisionIntervalSec": [5, 30],
     "cursorAvoidRadiusPx": 150
   },

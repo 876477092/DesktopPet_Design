@@ -1,22 +1,35 @@
 import { createRoot } from 'react-dom/client';
 import React from 'react';
+
 import '../styles/settings.css';
+import App from './App';
+import { SettingsContext, createIpcSettingsPort, createNullSettingsPort, useSettingsStoreLifecycle } from './store/useSettings';
 
 /**
- * 设置窗口引导（T-01 骨架）。
+ * 设置窗口引导（`03 S5-M3` 交付物；替换 T-01 骨架）。
  *
- * 本阶段只验证「React 能在 Tauri WebView2 中挂载」，不实现任何业务页面。
- * S1-M3 起按 `02 §3` 拆分出 `src/settings/App.tsx` 与 `pages/*`。
+ * 端口选择：运行在 Tauri WebView 内时用真实 IPC 端口（`settings_get` / `settings_apply` …）；
+ * 其余环境（浏览器直开 `settings.html` 做视觉走查 / vitest）退化为只读端口——
+ * 这样 UI 永远能挂载（`02 §7.4.2` 降级不崩），只是改不动设置。
+ *
+ * 判定方式：Tauri 2 在 WebView 内注入 `window.__TAURI_INTERNALS__`；本模块**只读该标记**
+ * 而不导入 `@tauri-apps/api` 的运行时判定，避免在非 Tauri 环境下抛错。
  */
-function App(): React.ReactElement {
+function hasTauriRuntime(): boolean {
+  return typeof (globalThis as Record<string, unknown>).__TAURI_INTERNALS__ !== 'undefined';
+}
+
+/** 挂载设置面板（含 Provider 装配）。 */
+function SettingsRoot(): React.ReactElement {
+  const port = React.useMemo(
+    () => (hasTauriRuntime() ? createIpcSettingsPort() : createNullSettingsPort()),
+    [],
+  );
+  const store = useSettingsStoreLifecycle(port);
   return (
-    <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-neutral-900 text-neutral-100">
-      <h1 className="text-lg font-medium">desktop-pet · 设置</h1>
-      <p className="text-sm text-neutral-400">工程骨架（T-01）：设置窗口已就绪。</p>
-      <p className="text-sm text-neutral-400">
-        角色名一律经 <code className="text-neutral-200">{'{name}'}</code> 占位符渲染（C2）。
-      </p>
-    </div>
+    <SettingsContext.Provider value={store}>
+      <App />
+    </SettingsContext.Provider>
   );
 }
 
@@ -29,7 +42,7 @@ function bootstrapSettingsWindow(): void {
 
   createRoot(container).render(
     <React.StrictMode>
-      <App />
+      <SettingsRoot />
     </React.StrictMode>,
   );
 }

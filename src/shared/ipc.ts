@@ -431,3 +431,365 @@ export function parseCoaxCmd(raw: unknown): CoaxCmdV1 | null {
     reason,
   };
 }
+
+// ---------------------------------------------------------------------------
+// SettingsSnapshot / SettingsPatch v1（设置页 ⇄ 应用层；`01 FR-7`，S5-M3/M4）
+// ---------------------------------------------------------------------------
+
+/** 设置快照载荷版本（v1；与 Rust 侧 `bridge::SETTINGS_VERSION` 同源）。 */
+export const SETTINGS_VERSION = 1;
+
+/** 置顶策略三态（`02 K-1`；字面量与 `settings.json` / 存档 B 段一致）。 */
+export type TopmostPolicy = 'Always' | 'BelowFullscreen' | 'Never';
+
+/** 合法置顶策略集合。 */
+const TOPMOST_POLICIES: readonly TopmostPolicy[] = ['Always', 'BelowFullscreen', 'Never'];
+
+/** 口头禅频率四档（L-03 枚举；作废 `"1:3"` 字符串比例）。 */
+export type CatchphraseFrequency = 'off' | 'low' | 'standard' | 'high';
+
+/** 合法频率档位集合。 */
+const CATCHPHRASE_FREQUENCIES: readonly CatchphraseFrequency[] = ['off', 'low', 'standard', 'high'];
+
+/** 提醒偏好（`01 FR-10-2`；含取值域，UI 不硬编码数值）。 */
+export interface RemindersSnapshotV1 {
+  readonly sedentaryEnabled: boolean;
+  readonly sedentaryIntervalMin: number;
+  readonly waterEnabled: boolean;
+  readonly waterIntervalMin: number;
+  readonly intervalMinMin: number;
+  readonly intervalMaxMin: number;
+  readonly ackResetsTimer: boolean;
+}
+
+/**
+ * 设置快照 v1（`settings_get` 返回；**有效值** = settings.json 出厂默认 ⊕ 存档 B 段）。
+ *
+ * 约束（`03 S5-M3`「不在 UI 硬编码数值」）：
+ * - 上下界 / 步进 / 档位候选值**一律随快照下发**，UI 只渲染不发明；
+ * - `writable === false` → 设置服务不可用，UI 进只读预览（改不了但看得见）。
+ */
+export interface SettingsSnapshotV1 {
+  readonly version: number;
+  readonly revision: number;
+  readonly writable: boolean;
+  readonly name: string;
+  readonly defaultName: string;
+  readonly scalePercent: number;
+  readonly scaleMinPercent: number;
+  readonly scaleMaxPercent: number;
+  readonly scaleStepPercent: number;
+  readonly opacityPercent: number;
+  readonly opacityMinPercent: number;
+  readonly opacityMaxPercent: number;
+  readonly language: string;
+  readonly masterVolumePercent: number;
+  readonly volumeMinPercent: number;
+  readonly volumeMaxPercent: number;
+  readonly muted: boolean;
+  readonly autoRoam: boolean;
+  readonly roamPace: number;
+  readonly roamPaceOptions: readonly number[];
+  readonly doNotDisturb: boolean;
+  readonly easyCoaxMode: boolean;
+  readonly clickThrough: boolean;
+  readonly alwaysOnTopPolicy: TopmostPolicy;
+  readonly autostart: boolean;
+  readonly sensitivityValue: number;
+  readonly sensitivityOptions: readonly number[];
+  readonly catchphraseEnabled: boolean;
+  readonly catchphraseFrequency: CatchphraseFrequency;
+  readonly clickFeedbackEnabled: boolean;
+  readonly activitySensing: boolean;
+  readonly reminders: RemindersSnapshotV1;
+}
+
+/** 提醒偏好补丁（缺省 = 不改）。 */
+export interface RemindersPatchV1 {
+  readonly sedentaryEnabled?: boolean;
+  readonly sedentaryIntervalMin?: number;
+  readonly waterEnabled?: boolean;
+  readonly waterIntervalMin?: number;
+}
+
+/**
+ * 设置补丁 v1（`settings_apply` 入参；**只含已定义设置项**）。
+ *
+ * Rust 侧为 `Option<T>` + `serde(default)`：缺省字段 = 不改；未知字段被忽略
+ * （与配置加载同容错口径）。`performance.renderer` 刻意**不在此列**（归 S6-M1）。
+ */
+export interface SettingsPatchV1 {
+  readonly name?: string;
+  readonly scalePercent?: number;
+  readonly opacityPercent?: number;
+  readonly language?: string;
+  readonly masterVolumePercent?: number;
+  readonly muted?: boolean;
+  readonly autoRoam?: boolean;
+  readonly roamPace?: number;
+  readonly doNotDisturb?: boolean;
+  readonly easyCoaxMode?: boolean;
+  readonly clickThrough?: boolean;
+  readonly alwaysOnTopPolicy?: TopmostPolicy;
+  readonly autostart?: boolean;
+  readonly sensitivityValue?: number;
+  readonly catchphraseEnabled?: boolean;
+  readonly catchphraseFrequency?: CatchphraseFrequency;
+  readonly clickFeedbackEnabled?: boolean;
+  readonly activitySensing?: boolean;
+  readonly reminders?: RemindersPatchV1;
+}
+
+/** 设置快照兜底（`settings_get` 失败 / 载荷非法时使用；与 Rust `SettingsSnapshot::default` 同值域）。 */
+export const SETTINGS_FALLBACK: SettingsSnapshotV1 = {
+  version: SETTINGS_VERSION,
+  revision: 0,
+  writable: false,
+  name: '',
+  defaultName: '',
+  scalePercent: 100,
+  scaleMinPercent: 50,
+  scaleMaxPercent: 200,
+  scaleStepPercent: 10,
+  opacityPercent: 100,
+  opacityMinPercent: 60,
+  opacityMaxPercent: 100,
+  language: 'zh-CN',
+  masterVolumePercent: 80,
+  volumeMinPercent: 0,
+  volumeMaxPercent: 100,
+  muted: false,
+  autoRoam: true,
+  roamPace: 1.0,
+  roamPaceOptions: [0.7, 1.0, 1.3],
+  doNotDisturb: false,
+  easyCoaxMode: false,
+  clickThrough: false,
+  alwaysOnTopPolicy: 'Always',
+  autostart: false,
+  sensitivityValue: 1.0,
+  sensitivityOptions: [0.7, 1.0, 1.3],
+  catchphraseEnabled: true,
+  catchphraseFrequency: 'standard',
+  clickFeedbackEnabled: true,
+  activitySensing: true,
+  reminders: {
+    sedentaryEnabled: true,
+    sedentaryIntervalMin: 45,
+    waterEnabled: true,
+    waterIntervalMin: 45,
+    intervalMinMin: 15,
+    intervalMaxMin: 180,
+    ackResetsTimer: true,
+  },
+};
+
+/** 解析数值数组（非数组 → 空；元素非有限数 → 丢弃）。 */
+function numArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is number => typeof item === 'number' && Number.isFinite(item));
+}
+
+/** 解析提醒偏好（缺字段取兜底值；间隔不下钳——上界来自快照自身，避免与配置双真源）。 */
+function parseReminders(raw: unknown): RemindersSnapshotV1 {
+  const fallback = SETTINGS_FALLBACK.reminders;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return fallback;
+  }
+  const o = raw as Record<string, unknown>;
+  return {
+    sedentaryEnabled: bool(o.sedentaryEnabled, fallback.sedentaryEnabled),
+    sedentaryIntervalMin: Math.max(0, Math.trunc(num(o.sedentaryIntervalMin, fallback.sedentaryIntervalMin))),
+    waterEnabled: bool(o.waterEnabled, fallback.waterEnabled),
+    waterIntervalMin: Math.max(0, Math.trunc(num(o.waterIntervalMin, fallback.waterIntervalMin))),
+    intervalMinMin: Math.max(1, Math.trunc(num(o.intervalMinMin, fallback.intervalMinMin))),
+    intervalMaxMin: Math.max(1, Math.trunc(num(o.intervalMaxMin, fallback.intervalMaxMin))),
+    ackResetsTimer: bool(o.ackResetsTimer, fallback.ackResetsTimer),
+  };
+}
+
+/**
+ * 解析 `settings_get` 返回值为 `SettingsSnapshotV1`（纯函数，可单测）。
+ *
+ * 前向兼容策略（与既有各 `parse*` 同范式）：缺失 / 类型错的字段取 [`SETTINGS_FALLBACK`]；
+ * 枚举字段（置顶策略 / 频率档位）取白名单兜底；未知字段忽略；
+ * **载荷非对象 → `null`**，调用方回退 [`SETTINGS_FALLBACK`] + 只读预览。
+ */
+export function parseSettingsSnapshot(raw: unknown): SettingsSnapshotV1 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const f = SETTINGS_FALLBACK;
+  const options = numArray(o.sensitivityOptions);
+  const paceOptions = numArray(o.roamPaceOptions);
+  return {
+    version: num(o.version, SETTINGS_VERSION),
+    revision: Math.max(0, Math.trunc(num(o.revision, 0))),
+    writable: bool(o.writable, false),
+    name: typeof o.name === 'string' ? o.name : f.name,
+    defaultName: typeof o.defaultName === 'string' ? o.defaultName : f.defaultName,
+    scalePercent: Math.trunc(num(o.scalePercent, f.scalePercent)),
+    scaleMinPercent: Math.trunc(num(o.scaleMinPercent, f.scaleMinPercent)),
+    scaleMaxPercent: Math.trunc(num(o.scaleMaxPercent, f.scaleMaxPercent)),
+    scaleStepPercent: Math.max(1, Math.trunc(num(o.scaleStepPercent, f.scaleStepPercent))),
+    opacityPercent: Math.trunc(num(o.opacityPercent, f.opacityPercent)),
+    opacityMinPercent: Math.trunc(num(o.opacityMinPercent, f.opacityMinPercent)),
+    opacityMaxPercent: Math.trunc(num(o.opacityMaxPercent, f.opacityMaxPercent)),
+    language: str(o.language, f.language),
+    masterVolumePercent: Math.trunc(num(o.masterVolumePercent, f.masterVolumePercent)),
+    volumeMinPercent: Math.trunc(num(o.volumeMinPercent, f.volumeMinPercent)),
+    volumeMaxPercent: Math.trunc(num(o.volumeMaxPercent, f.volumeMaxPercent)),
+    muted: bool(o.muted, f.muted),
+    autoRoam: bool(o.autoRoam, f.autoRoam),
+    roamPace: num(o.roamPace, f.roamPace),
+    roamPaceOptions: paceOptions.length > 0 ? paceOptions : f.roamPaceOptions,
+    doNotDisturb: bool(o.doNotDisturb, f.doNotDisturb),
+    easyCoaxMode: bool(o.easyCoaxMode, f.easyCoaxMode),
+    clickThrough: bool(o.clickThrough, f.clickThrough),
+    alwaysOnTopPolicy: oneOf(o.alwaysOnTopPolicy, TOPMOST_POLICIES, f.alwaysOnTopPolicy),
+    autostart: bool(o.autostart, f.autostart),
+    sensitivityValue: num(o.sensitivityValue, f.sensitivityValue),
+    sensitivityOptions: options.length > 0 ? options : f.sensitivityOptions,
+    catchphraseEnabled: bool(o.catchphraseEnabled, f.catchphraseEnabled),
+    catchphraseFrequency: oneOf(o.catchphraseFrequency, CATCHPHRASE_FREQUENCIES, f.catchphraseFrequency),
+    clickFeedbackEnabled: bool(o.clickFeedbackEnabled, f.clickFeedbackEnabled),
+    activitySensing: bool(o.activitySensing, f.activitySensing),
+    reminders: parseReminders(o.reminders),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// SaveStatus v1（设置页「数据」Tab；`save_status` 命令返回值，S5-M4）
+// ---------------------------------------------------------------------------
+
+/** 备份档用途分类（与 Rust `bridge::SaveBackupKind` 同词表）。 */
+export type SaveBackupKind = 'lastGood' | 'corrupt' | 'future' | 'v1Migration';
+
+/** 合法备份类别集合。 */
+const SAVE_BACKUP_KINDS: readonly SaveBackupKind[] = ['lastGood', 'corrupt', 'future', 'v1Migration'];
+
+/** 一份候选备份。 */
+export interface SaveBackupV1 {
+  /** 备份文件名（导入时原样回传；只允许文件名，防路径穿越）。 */
+  readonly file: string;
+  /** 用途分类。 */
+  readonly kind: SaveBackupKind;
+  /** 字节数。 */
+  readonly sizeBytes: number;
+  /** 是否允许导入。 */
+  readonly importable: boolean;
+  /** 不可导入的原因键（前端本地化为文案；可导入时为 `null`）。 */
+  readonly blockedReason: string | null;
+}
+
+/** 存档健康状态（`save_status` 返回值）。 */
+export interface SaveStatusV1 {
+  readonly path: string;
+  readonly exists: boolean;
+  readonly state: string;
+  readonly healthy: boolean;
+  readonly needsNotice: boolean;
+  readonly writable: boolean;
+  readonly available: boolean;
+  readonly lastSeenMs: number;
+  readonly backups: readonly SaveBackupV1[];
+}
+
+/** 解析备份清单（脏项丢弃：缺 `file` 的一律不要）。 */
+function parseBackups(raw: unknown): SaveBackupV1[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: SaveBackupV1[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    const o = item as Record<string, unknown>;
+    if (typeof o.file !== 'string' || o.file.length === 0) {
+      continue;
+    }
+    out.push({
+      file: o.file,
+      kind: oneOf(o.kind, SAVE_BACKUP_KINDS, 'lastGood'),
+      sizeBytes: Math.max(0, Math.trunc(num(o.sizeBytes, 0))),
+      importable: bool(o.importable, false),
+      blockedReason: typeof o.blockedReason === 'string' ? o.blockedReason : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * 解析 `save_status` 返回值为 `SaveStatusV1`（纯函数，可单测）。
+ *
+ * 载荷非对象 → `null`（调用方显示「存档状态不可用」，不 panic）。
+ */
+export function parseSaveStatus(raw: unknown): SaveStatusV1 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  return {
+    path: typeof o.path === 'string' ? o.path : '',
+    exists: bool(o.exists, false),
+    state: str(o.state, 'unknown'),
+    healthy: bool(o.healthy, false),
+    needsNotice: bool(o.needsNotice, true),
+    writable: bool(o.writable, false),
+    available: bool(o.available, false),
+    lastSeenMs: num(o.lastSeenMs, 0),
+    backups: parseBackups(o.backups),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ConfigCmd v1（`pet://config`，`02 §7.6` S5-M4 起启用；Rust 侧生产者为
+// `dp_core::event::wire_for_config`，两端同构）
+// ---------------------------------------------------------------------------
+
+/** `pet://config` 载荷结构版本（v1；与 Rust `CONFIG_WIRE_VERSION` 同源）。 */
+export const CONFIG_CMD_VERSION = 1;
+
+/**
+ * `pet://config` 载荷 v1（**摘要**，非全量配置）。
+ *
+ * 消费口径：只需比较 `revision` 是否变化 → 变化则用 `settings_get` 重新拉全量快照。
+ * 这样「每次改动」的广播载荷恒定 ~80B，与配置规模无关。
+ */
+export interface ConfigCmdV1 {
+  /** 载荷结构版本（v1）。 */
+  readonly version: number;
+  /** 变更序号（单调递增；0 = 首次装载）。 */
+  readonly revision: number;
+  /** 本次变更涉及的分组名（`pet` / `appearance` / `audio` / `behavior` / `interaction` / `reminders`）。 */
+  readonly changed: readonly string[];
+  /** 是否已持久化（`false` = 仅内存生效）。 */
+  readonly persisted: boolean;
+}
+
+/**
+ * 解析 `pet://config` 载荷为 `ConfigCmdV1`（纯函数，可单测）。
+ *
+ * 前向兼容策略：`changed` 非数组 → `[]`（非字符串项丢弃）；未知分组名**原样保留**
+ * （消费端忽略即可，便于诊断「新版本发了我不认识的分组」）；载荷非对象 → `null`。
+ */
+export function parseConfigCmd(raw: unknown): ConfigCmdV1 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const changed = Array.isArray(o.changed)
+    ? o.changed.filter((item): item is string => typeof item === 'string')
+    : [];
+  return {
+    version: num(o.version, CONFIG_CMD_VERSION),
+    revision: Math.max(0, Math.trunc(num(o.revision, 0))),
+    changed,
+    persisted: bool(o.persisted, false),
+  };
+}
+

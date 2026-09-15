@@ -62,6 +62,47 @@ const ICON_BYTES_NORMAL: &[u8] = include_bytes!("../../../icons/tray.ico");
 /// 离家出走（L5）灰色图标字节（编译期内嵌）。
 const ICON_BYTES_GRAY: &[u8] = include_bytes!("../../../icons/tray-gray.ico");
 
+/// 当前角色名的运行时镜像（S5-M4：设置页改名后由 core-loop 写入；`None` = 用占位名）。
+///
+/// 为什么用 `RwLock` 静态而不是 Tauri 状态：托盘回调里读名字的地方（`install` /
+/// `set_state`）拿不到 `AppHandle` 之外的上下文，且名字是**单值**（非结构）——
+/// 一个静态字符串槽比再引入一个状态类型更直白。`RwLock::new` 为 const，无初始化顺序问题。
+static PET_NAME: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// 当前用于托盘文案的角色名（未设置 → 中性占位，C2：绝不回退到硬编码角色名）。
+#[must_use]
+pub fn current_pet_name() -> String {
+    match PET_NAME.read() {
+        Ok(guard) => guard.clone().unwrap_or_else(|| DEFAULT_PET_NAME.to_string()),
+        Err(_) => DEFAULT_PET_NAME.to_string(),
+    }
+}
+
+/// 更新角色名并刷新托盘 tooltip（S5-M4：设置页改名 → core-loop 落地 → 此处刷新）。
+///
+/// 空串表示「未改名」→ 回退占位名；`tray_by_id` 不存在（托盘未安装）时静默忽略。
+pub fn set_pet_name(app: &AppHandle, name: &str) {
+    let effective = if name.trim().is_empty() {
+        None
+    } else {
+        Some(name.trim().to_string())
+    };
+    if let Ok(mut guard) = PET_NAME.write() {
+        *guard = effective;
+    }
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(tooltip_for(TrayIconState::Normal, &current_pet_name())));
+    }
+}
+
+/// 同步置顶镜像（S5-M4：设置页改置顶策略后由应用层调用）。
+///
+/// 托盘菜单的置顶勾选态取自 [`TOPMOST_ON`] 镜像，设置页改置顶策略后若不回写，
+/// 托盘下一次「置顶开关」会基于**过期镜像**翻转（表现为"点一次不动、点两次才生效"）。
+pub fn note_topmost(on: bool) {
+    TOPMOST_ON.store(on, Ordering::Relaxed);
+}
+
 /// `ShowHide` 动作的可见态镜像（`AtomicBool`，无锁）。
 ///
 /// 平台窗口层未暴露「读取可见态」的接口，故在 app 层维护一份镜像；初值 `true`
@@ -129,14 +170,15 @@ pub fn emit_tray_action(app: &AppHandle, action: TrayAction) -> Result<(), Strin
 /// 左键单击 → 显示 / 隐藏；右键 → 弹出菜单（`.show_menu_on_left_click(false)`）。
 pub fn install(app: &AppHandle) -> Result<(), String> {
     let state = current_menu_state(app);
-    let items = menu_spec(state, DEFAULT_PET_NAME);
+    let pet_name = current_pet_name();
+    let items = menu_spec(state, &pet_name);
     let menu = build_menu(app, &items)?;
     let icon = load_icon(TrayIconState::Normal)?;
 
     // `build` 会把托盘注册进 Tauri 资源表并返回可克隆句柄；此处无需保留句柄。
     let _tray = TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
-        .tooltip(tooltip_for(TrayIconState::Normal, DEFAULT_PET_NAME))
+        .tooltip(tooltip_for(TrayIconState::Normal, &pet_name))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| on_menu_event(app, event.id().as_ref()))
@@ -155,7 +197,7 @@ pub fn set_state(app: &AppHandle, state: TrayIconState) -> Result<(), String> {
     let icon = load_icon(state)?;
     tray.set_icon(Some(icon))
         .map_err(|e| format!("切换托盘图标失败：{e}"))?;
-    tray.set_tooltip(Some(tooltip_for(state, DEFAULT_PET_NAME)))
+    tray.set_tooltip(Some(tooltip_for(state, &current_pet_name())))
         .map_err(|e| format!("切换托盘提示失败：{e}"))?;
     Ok(())
 }
@@ -278,17 +320,34 @@ fn apply_action(app: &AppHandle, action: TrayAction) {
                 eprintln!("[dp-app] 托盘显示/隐藏失败：{err}");
             }
         }
-        // N1（2026-09-13）：退出为真实生效动作——先卸载全局钩子线程（`shutdown`
-        // 幂等，S3-M1 起钩子常驻，不卸载会残留全局鼠标钩子），再优雅退出。
-        // 当前 S5-M1 存档尚未引入，无「退出前存档确认」流程，直接退出（存档确认
-        // 属 S5-M4；此前误记为 S1-M4，已按 N5 检查报告修正归属）。
+        // N1（2026-09-13）+ S5-M4：退出 = **确认 → 卸钩子 → 强制落盘 → 退出**。
+        //
+        // 顺序（每步都必须在下一步之前）：
+        //   ① 原生确认框（`01 FR-1-10`「退出前弹确认（含『保存进度』提示）」）——
+        //      用户取消则**什么都不做**（不卸钩子、不落盘、不退出）；
+        //   ② 卸载全局低阶鼠标钩子（`shutdown` 幂等；不卸载会残留全局钩子，S3-M1）；
+        //   ③ 把 `Shutdown` 投给 core-loop：由它 `flush_force`（存档唯一写者）后 `exit(0)`。
+        // **不**在本函数里直接落盘 / 退出：落盘必须由 core-loop 单线程完成（S5-M1 口径），
+        // 「先落盘再退出」的时序由 core-loop 保证（见 `CoreLoopState::handle_admin_input`）。
         TrayAction::Quit => {
+            let name = current_pet_name();
+            let title = format!("退出 {name}？");
+            let body = "退出前会自动保存进度。".to_string();
+            if !dp_platform::win::dialog::confirm(&title, &body).is_confirmed() {
+                eprintln!("[dp-app] 退出被用户取消（存档保持现状）");
+                return;
+            }
             if let Some(svc) =
                 app.try_state::<std::sync::Arc<dp_platform::win::hook::HookService>>()
             {
                 svc.shutdown();
             }
-            app.exit(0);
+            if let Some(channel) = app.try_state::<crate::bridge::CoreInputChannel>() {
+                channel.push(crate::bridge::CoreInput::Shutdown);
+            } else {
+                // 入站通道未装配（装配降级态）→ 兜底直接退出，避免"点了退出没反应"。
+                app.exit(0);
+            }
         }
         // S4-M4：L5 离家 → 「把心月狐找回来」走回。经入站通道交给 core-loop 逻辑档
         // 落地（单线程 Actor 口径，避免跨线程直改内核状态）。
@@ -299,10 +358,20 @@ fn apply_action(app: &AppHandle, action: TrayAction) {
                 eprintln!("[dp-app] 托盘找回：core-loop 入站通道尚未装配，降级忽略");
             }
         }
-        // 设置 / 关于的 UI 在 S5；摸摸 / 喂食 / 洗澡的完整闭环在 S7-M6。
+        // S5-M4：托盘「设置」→ 显示设置窗口（`tauri.conf.json` 的 `settings` 窗口，
+        // 默认 `visible:false`）。前端是 S5-M3 交付的 480×640 面板。
+        // 失败降级：记录日志，不影响其它托盘功能（`02 §7.4.2`）。
+        TrayAction::Settings => match app.get_webview_window("settings") {
+            Some(window) => {
+                if let Err(err) = window.show().and_then(|()| window.set_focus()) {
+                    eprintln!("[dp-app] 打开设置窗口失败：{err}");
+                }
+            }
+            None => eprintln!("[dp-app] 未找到 settings 窗口（请检查 tauri.conf.json）"),
+        },
+        // 关于对话框在 S5 之后的版本页；摸摸 / 喂食 / 洗澡的完整闭环在 S7-M6。
         // 本模块只负责把事件送达（见文件头「职责边界」）。
-        TrayAction::Settings
-        | TrayAction::About
+        TrayAction::About
         | TrayAction::Coax
         | TrayAction::Feed
         | TrayAction::Bath => {}

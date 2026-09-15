@@ -1,6 +1,8 @@
-//! 配置中心：`ConfigService::load_all` —— 六份外置 JSON 的加载、合并与校验。
+//! 配置中心：`ConfigService::load_all` —— 外置 JSON 的加载、合并与校验。
 //!
-//! 时序锚点：`02 §6.1`（`load_all` 六份 JSON + 默认合并）；R19 兜底（`02 行 2434`）：
+//! 份数：**七份**（S1-M5 六份 + S5-M5 新增 `schedule.json`）。
+//!
+//! 时序锚点：`02 §6.1`（`load_all` 配置加载 + 默认合并）；R19 兜底（`02 行 2434`）：
 //! 加载失败 → 内置默认启动，不崩。字段缺省由 serde `default` 补齐并记 warning
 //! （老包升级不崩，`03` S1-M5 要点 1）。
 //!
@@ -17,7 +19,7 @@ pub mod model;
 
 pub use model::{
     ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, EmotionConfig, NeedsConfig,
-    SettingsConfig,
+    ScheduleConfig, SettingsConfig,
 };
 
 use std::path::Path;
@@ -50,7 +52,7 @@ pub enum ConfigError {
     },
 }
 
-/// 六份配置的捆绑结果。
+/// 配置的捆绑结果（S5-M5 起 **七份**：新增 `schedule.json`）。
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBundle {
     /// settings.json。
@@ -65,6 +67,8 @@ pub struct ConfigBundle {
     pub needs: NeedsConfig,
     /// animation.json。
     pub animation: AnimationConfig,
+    /// schedule.json（`01 FR-10`；S5-M5 交付）。
+    pub schedule: ScheduleConfig,
 }
 
 impl ConfigBundle {
@@ -84,7 +88,7 @@ impl ConfigBundle {
 pub struct ConfigService;
 
 impl ConfigService {
-    /// 读取 `config_dir` 下的六份 JSON，与内置默认合并。
+    /// 读取 `config_dir` 下的七份 JSON，与内置默认合并。
     ///
     /// 语义：
     ///   1. 文件缺失 / 读取失败 / JSON 解析失败 → 使用该文件的内置 `Default`，
@@ -126,12 +130,18 @@ impl ConfigService {
             ANIMATION_TOP_FIELDS,
             &mut warnings,
         );
+        let schedule = load_one::<ScheduleConfig>(
+            config_dir,
+            "schedule.json",
+            SCHEDULE_TOP_FIELDS,
+            &mut warnings,
+        );
 
         validate_actions(&actions)?;
         check_coupling_cycles(&needs)?;
 
         Ok((
-            ConfigBundle { settings, character, actions, emotion, needs, animation },
+            ConfigBundle { settings, character, actions, emotion, needs, animation, schedule },
             warnings,
         ))
     }
@@ -166,6 +176,8 @@ pub const ANIMATION_TOP_FIELDS: &[&str] = &[
     "version", "easing", "fadeMs", "physics", "micro", "breath", "blink", "gaze", "squash",
     "particles",
 ];
+/// schedule.json 顶层字段（S5-M5：`01 FR-10` 提醒默认间隔 + 勿扰默认行为）。
+pub const SCHEDULE_TOP_FIELDS: &[&str] = &["version", "reminders", "doNotDisturb"];
 
 // ---------------------------------------------------------------------------
 // 内部实现
@@ -368,7 +380,7 @@ mod tests {
         dir
     }
 
-    /// 把工程根六份配置复制到临时目录，便于逐项改写。
+    /// 把工程根七份配置复制到临时目录，便于逐项改写。
     fn copy_defaults(dir: &Path) {
         for file in [
             "settings.json",
@@ -377,6 +389,7 @@ mod tests {
             "emotion.json",
             "needs.json",
             "animation.json",
+            "schedule.json",
         ] {
             let src = resources_config_dir().join(file);
             let dst = dir.join(file);
@@ -385,9 +398,9 @@ mod tests {
     }
 
     #[test]
-    fn load_all_reads_six_files_from_resources() {
+    fn load_all_reads_seven_files_from_resources() {
         let (bundle, warnings) = ConfigService::load_all(&resources_config_dir())
-            .expect("六份默认配置应能加载成功");
+            .expect("七份默认配置应能加载成功");
 
         // 顶层字段与 JSON 完全一致时不应产生告警。
         assert!(warnings.is_empty(), "默认包不应产生告警：{warnings:?}");
@@ -429,6 +442,18 @@ mod tests {
         assert!(bundle.animation.physics.enabled);
         assert_eq!(bundle.animation.fade_ms.default, 200);
 
+        // schedule（S5-M5）：FR-10-2 默认 45min 间隔 + FR-10-4 勿扰默认关。
+        assert!(bundle.schedule.reminders.sedentary_enabled);
+        assert_eq!(bundle.schedule.reminders.sedentary_interval_min, 45);
+        assert_eq!(bundle.schedule.reminders.water_interval_min, 45);
+        assert_eq!(bundle.schedule.reminders.interval_min_min, 15);
+        assert_eq!(bundle.schedule.reminders.interval_max_min, 180);
+        assert!(bundle.schedule.reminders.ack_resets_timer);
+        assert!(!bundle.schedule.do_not_disturb.default_on);
+        assert!(bundle.schedule.do_not_disturb.pause_bubbles);
+        assert!(bundle.schedule.do_not_disturb.keep_idle_anim);
+        assert!(bundle.schedule.do_not_disturb.mute_audio);
+
         // actions：53 条全量；批次 A 29 条启用、B/C 24 条禁用。
         assert_eq!(bundle.actions().len(), 53);
         assert_eq!(bundle.enabled_actions().count(), 29);
@@ -467,10 +492,11 @@ mod tests {
         let dir = temp_dir("missing-files");
         let (bundle, warnings) =
             ConfigService::load_all(&dir).expect("空目录应降级默认而非报错");
-        assert_eq!(warnings.len(), 6, "六份缺失文件各记一条告警：{warnings:?}");
+        assert_eq!(warnings.len(), 7, "七份缺失文件各记一条告警：{warnings:?}");
         assert_eq!(bundle.emotion.thresholds.l4, 60);
         assert_eq!(bundle.settings.interaction.gravity_px_per_sec2, 2400.0);
         assert_eq!(bundle.needs.coupling.rules.len(), 16);
+        assert_eq!(bundle.schedule.reminders.sedentary_interval_min, 45);
         assert!(bundle.actions().is_empty());
         // 内置默认名同样以码点构造比对（C2）。
         let expected_name: String = ['\u{5FC3}', '\u{6708}', '\u{72D0}'].iter().collect();
@@ -605,10 +631,12 @@ mod tests {
         assert!(matches!(err, ConfigError::InvalidConfig { .. }));
     }
 
-    /// schema 产物：六份存在、合法 JSON、与配置文件一一对应。
+    /// schema 产物：七份存在、合法 JSON、与配置文件一一对应。
     #[test]
     fn schema_files_match_config_files() {
-        for base in ["settings", "character", "actions", "emotion", "needs", "animation"] {
+        for base in [
+            "settings", "character", "actions", "emotion", "needs", "animation", "schedule",
+        ] {
             let cfg = resources_config_dir().join(format!("{base}.json"));
             let schema = resources_schema_dir().join(format!("{base}.schema.json"));
             assert!(cfg.exists(), "缺少配置文件：{}", cfg.display());

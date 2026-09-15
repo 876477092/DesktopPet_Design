@@ -42,6 +42,7 @@ fn mon_b() -> MonitorGeom {
 
 fn roam_cfg() -> RoamCfg {
     RoamCfg {
+        pace_options: dp_core::config::model::RoamCfg::default().pace_options,
         pace: 1.0,
         decision_interval_sec: [5, 30],
         cursor_avoid_radius_px: 150,

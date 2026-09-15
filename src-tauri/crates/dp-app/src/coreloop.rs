@@ -85,7 +85,7 @@ use dp_platform::{DisplayService, PlatformWindow, WinPlatformWindow};
 use crate::PetPlatform;
 use crate::bridge::{
     self, CoreInput, CoreInputChannel, FX_EVENT, MENU_EVENT, ParticleCmd, ParticleKind,
-    PlaybackChannel, PlaybackOrder, PlaybackReport, STATE_EVENT,
+    PlaybackChannel, PlaybackOrder, PlaybackReport, STATE_EVENT, resolve_save_dir,
 };
 use crate::hit_latest::HitLatestHandle;
 use crate::hook_sink::ChannelSink;
@@ -110,11 +110,8 @@ const HAPPY_POOL: &str = "happy";
 /// ——「启动或长时间离开后返回」，与本处的调用时机（离线补偿之后）逐字对应。
 const STARTUP_GREETING_ACTION: &str = "ACT-T-01";
 
-/// 存档目录名（`01 FR-8-1` / `02 §6.1`：`%APPDATA%\DesktopPet\`）。
-///
-/// **与 `tauri.conf.json.productName` 必须一致**（C1：不写盘符字面量，但目录名是产品
-/// 标识而非绝对路径）；由 `tests::save_dir_name_matches_tauri_product_name` 机械锁定。
-const SAVE_DIR_NAME: &str = "DesktopPet";
+// 存档目录名 `SAVE_DIR_NAME` 与目录解析 `resolve_save_dir` 已上移到 `crate::bridge`
+// （S5-M4：设置页「数据」Tab 的 `save_status` 命令同样需要它，上移避免双份实现）。
 
 // ---------------------------------------------------------------------------
 // 周期常量（三档 + 感知三档；C3 绝对锚定网格的步长）
@@ -393,6 +390,21 @@ pub struct CoreLoopState {
     ///
     /// `build_state` 阶段 core-loop 线程尚未启动、播放通道尚未接入，故不能就地发播。
     startup_greeting: Option<StartupGreeting>,
+    /// 勿扰模式当前值（S5-M4 热更新；`01 FR-10-4`：暂停气泡与主动漫游）。
+    dnd: bool,
+    /// 勿扰是否静默气泡（`schedule.json.doNotDisturb.pauseBubbles`；出厂默认 `true`）。
+    dnd_pause_bubbles: bool,
+    /// 活跃感知开关（Q-18 / S5-M4 热更新）：关闭后在场判定退化为「恒在场」（纯时间模型）。
+    activity_sensing: bool,
+    /// 自动走动开关（S5-M4）。
+    ///
+    /// ⚠️ **已知缺口（登记 §3.3 遗留，非本卡可闭环）**：本卡只把它落到设置状态、存档 B 段
+    /// 与 `pet://config` 广播，**运行期消费点尚未承接**。原因是 `MotionEngine` 目前没有
+    /// 「漫游使能位」接口（只有 `walk_to` / `is_walking`），在 core-loop 侧反复
+    /// `walk_to(self.pos)` 会造成起步-急停抖动，比不做更糟。按 F-01「悬空归口禁止」纪律，
+    /// **不**把它指派给任何尚未开卡核实的模块。故 FR-7-4 的「每项即时生效」在 `autoRoam`
+    /// 一项上**未闭环**，验收时不得据本字段判定该项通过。
+    auto_roam: bool,
 }
 
 /// 回归问候（S5-M2：`02 §6.1` 启动时序「ACT-T-01 挥手 + 时段问候」）。
@@ -502,12 +514,170 @@ impl CoreLoopState {
             save,
             save_requested: false,
             startup_greeting: None,
+            // S5-M4：初值 = 出厂默认（与 `settings.json` / `schedule.json` 同值域）；
+            // 装配期由 [`Self::apply_settings_snapshot`] 用真实有效值覆盖。
+            dnd: false,
+            dnd_pause_bubbles: true,
+            activity_sensing: true,
+            auto_roam: true,
         }
+    }
+
+    /// 把设置快照落到**内核侧**状态（S5-M4：装配期一次 + 每次热更新补丁后一次）。
+    ///
+    /// 只处理与内核 / 引擎有关的部分；窗口、音频总线、注册表等**应用层**效果在
+    /// `commands::apply_platform_effects` 同步落地（见该函数文档的时序说明）。
+    pub fn apply_settings_snapshot(&mut self, snapshot: &bridge::SettingsSnapshot) {
+        self.emotion.set_sensitivity_value(snapshot.sensitivity_value);
+        self.emotion.set_easy_coax_mode(snapshot.easy_coax_mode);
+        self.dnd = snapshot.do_not_disturb;
+        self.activity_sensing = snapshot.activity_sensing;
+        self.auto_roam = snapshot.auto_roam;
+        self.interaction_cfg.click_feedback.enabled = snapshot.click_feedback_enabled;
+        // 节奏：写进「换相重建用」的配置副本。**口径说明**：`MotionEngine` 在构造时持有
+        // 自己的 `roam_cfg` 快照，故节奏变更作用于**下一次重建**（显示变更 / 换相），
+        // 本卡刻意不打断进行中的漫游（中止行走比晚一拍生效更糟）。
+        self.roam_cfg.pace = snapshot.roam_pace;
+        if !snapshot.name.is_empty() {
+            self.vars = self.vars.clone().with_name(snapshot.name.clone());
+        }
+    }
+
+    /// 落地 `schedule.json` 的勿扰行为位（S5-M4 装配期一次；未做热更新——该文件是
+    /// 出厂默认，用户改动落在存档 `settings.behavior.doNotDisturb`）。
+    pub fn apply_schedule_flags(&mut self, pause_bubbles: bool) {
+        self.dnd_pause_bubbles = pause_bubbles;
+    }
+
+    /// 消费应用层投递的设置补丁（S5-M4 业务档每拍调用一次；无待消费 → 立即返回）。
+    ///
+    /// 职责分工：**应用层**（`commands::settings_apply`）负责快照合并与窗口 / 音频 / 注册表；
+    /// **本函数**负责内核侧落地 + **存档 B 段写入**（存档唯一写者在 core-loop）+ `pet://config`
+    /// 摘要广播。这样既保住单写者语义，又让「10s 内生效」由 1Hz 业务档保证（远小于 10s）。
+    fn apply_pending_settings(&mut self, app: Option<&AppHandle>, now_mono_ms: u64) {
+        let Some(handle) = app else { return };
+        let Some(state) = handle.try_state::<bridge::SettingsState>() else {
+            return;
+        };
+        let Some(pending) = state.take_pending() else {
+            return;
+        };
+        let patch = pending.patch.clone();
+        // 内核侧：用「应用层已合并后的快照」整体覆盖（避免逐字段重复实现合并语义）。
+        self.apply_settings_snapshot(&state.snapshot());
+        // 托盘文案里的角色名同步（C2：名字经 `{name}` 模板渲染，不硬编码）。
+        crate::tray_menu::set_pet_name(handle, &state.snapshot().name);
+        // 存档 B 段（pet / settings）。
+        let persisted = self.persist_settings_patch(&patch);
+        if persisted {
+            self.save_requested = true;
+        }
+        // C8：事件名与载荷生产在 `dp-core::event`（本层只 emit）。
+        let wire = dp_core::event::wire_for_config(pending.revision, &patch.groups(), persisted);
+        if let Err(err) = handle.emit(wire.event, &wire.payload) {
+            eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+        }
+        // 落盘探针（`now_mono_ms` 仅用于日志对齐，不参与判定）。
+        eprintln!(
+            "[dp-app] core-loop 设置热更新：revision={} 分组={:?} 已落盘={persisted}（t={now_mono_ms}ms）",
+            pending.revision,
+            patch.groups()
+        );
+    }
+
+    /// 把设置补丁写进存档 B 段；返回「存档是否可写」（`false` = 未装配 / v1 待迁移保护态）。
+    fn persist_settings_patch(&mut self, patch: &bridge::SettingsPatch) -> bool {
+        let Some(save) = self.save.as_mut() else {
+            return false;
+        };
+        let writable = save.is_writable();
+        if !writable {
+            return false;
+        }
+        let cache = save.cache_mut();
+        if let Some(name) = &patch.name {
+            cache.pet.name = name.clone();
+        }
+        if let Some(value) = patch.catchphrase_enabled {
+            cache.pet.catchphrase.enabled = value;
+        }
+        if let Some(value) = &patch.catchphrase_frequency {
+            if let Ok(freq) = serde_json::from_value::<dp_core::emotion::lines::CatchphraseFrequency>(
+                serde_json::Value::String(value.clone()),
+            ) {
+                cache.pet.catchphrase.frequency = freq;
+            }
+        }
+        let settings = &mut cache.settings;
+        if let Some(value) = patch.scale_percent {
+            settings.appearance.scale_percent = value;
+        }
+        if let Some(value) = patch.opacity_percent {
+            settings.appearance.opacity_percent = value;
+        }
+        if let Some(value) = &patch.language {
+            settings.appearance.language = value.clone();
+        }
+        if let Some(value) = patch.master_volume_percent {
+            settings.audio.master_volume_percent = value;
+        }
+        if let Some(value) = patch.muted {
+            settings.audio.muted = value;
+        }
+        if let Some(value) = patch.auto_roam {
+            settings.behavior.auto_roam = value;
+        }
+        if let Some(value) = patch.roam_pace {
+            settings.behavior.roam_pace = value;
+        }
+        if let Some(value) = patch.do_not_disturb {
+            settings.behavior.do_not_disturb = value;
+        }
+        if let Some(value) = patch.easy_coax_mode {
+            settings.behavior.easy_coax_mode = value;
+        }
+        if let Some(value) = patch.click_through {
+            settings.behavior.click_through = value;
+        }
+        if let Some(value) = &patch.always_on_top_policy {
+            settings.behavior.always_on_top_policy = value.clone();
+        }
+        if let Some(value) = patch.autostart {
+            settings.behavior.autostart = value;
+        }
+        if let Some(value) = patch.sensitivity_value {
+            settings.emotion_sensitivity = value;
+        }
+        if let Some(value) = patch.activity_sensing {
+            settings.privacy.activity_sensing = value;
+        }
+        if let Some(reminders) = patch.reminders {
+            if let Some(value) = reminders.sedentary_enabled {
+                settings.reminders.sedentary_enabled = value;
+            }
+            if let Some(value) = reminders.sedentary_interval_min {
+                settings.reminders.sedentary_interval_min = value;
+            }
+            if let Some(value) = reminders.water_enabled {
+                settings.reminders.water_enabled = value;
+            }
+            if let Some(value) = reminders.water_interval_min {
+                settings.reminders.water_interval_min = value;
+            }
+        }
+        true
     }
 
     /// 接入播放指令通道（S4 前清障 B15-④；装配点 `spawn` 在起线程前调用一次）。
     pub fn attach_playback(&mut self, channel: PlaybackChannel) {
         self.playback = Some(channel);
+    }
+
+    /// 只读：存档门面（S5-M4 装配期由 `build_state` 用它推导设置快照；运行期不暴露可变引用）。
+    #[inline]
+    #[must_use]
+    pub fn save_ref(&self) -> Option<&SaveStore> {
+        self.save.as_ref()
     }
 
     // -----------------------------------------------------------------------
@@ -698,6 +868,94 @@ impl CoreLoopState {
             CoreInput::RecallRunaway => {
                 eprintln!("[dp-app] core-loop 收到「把心月狐找回来」：L5 走回，仍需完成三部曲");
                 self.emotion.coax_recall(now_ms as i64)
+            }
+            // S5-M4：重置数据 / 导入存档 / 退出需要 `AppHandle`（重启进程 / 强制落盘后退出），
+            // 由 [`Self::handle_admin_input`] 在 drain 处先行消化；走到这里说明调用方
+            // 未走该出口（属实现错误），按「不产生情绪事件」处理并记日志。
+            CoreInput::ResetAllData | CoreInput::ImportSave { .. } | CoreInput::Shutdown => {
+                eprintln!("[dp-app] core-loop 收到特权指令但未走 handle_admin_input 出口，已忽略");
+                Vec::new()
+            }
+        }
+    }
+
+    /// S5-M4：需要 `AppHandle` 的入站指令（重置全部数据 / 导入存档 / 退出）。
+    ///
+    /// 返回 `true` = 本函数已消化该指令（调用方**不再**把它交给 `apply_core_input`）。
+    ///
+    /// ## 为什么必须在 core-loop 里做
+    /// `SaveStore` 的唯一写者是 core-loop 业务档（`save::store` 模块文档），命令层直写会
+    /// 破坏单写者语义。故三条指令都只**投递**进来，由本函数在 core-loop 线程内：
+    ///   1. 重置：`SaveStore::reset_to_default`（内存档替换 + **立即落盘**）→ `app.restart()`；
+    ///   2. 导入：白名单校验后的备份路径（命令层已校验一次）→ `SaveStore::import_from` → 重启；
+    ///   3. 退出：`flush_force`（退出前存档确认，`01 FR-1-10`）→ `app.exit(0)`。
+    ///
+    /// ## 重启而非「原地重建」
+    /// B/C/D 段（性格 / 需求 / 经济 / 背包 / 成就）由后续里程碑接管，本卡无法逐段实现
+    /// 「运行时重置」；`app.restart()` 让**所有段**（含未来新增段）都从出厂态启动，
+    /// 是唯一不会随里程碑推进而腐化的实现（`01 FR-8-4`「清档重建」）。
+    pub fn handle_admin_input(
+        &mut self,
+        app: &AppHandle,
+        input: &CoreInput,
+        now_mono_ms: u64,
+    ) -> bool {
+        match input {
+            CoreInput::ResetEmotion | CoreInput::RecallRunaway => false,
+            CoreInput::ResetAllData => {
+                match self.save.as_mut() {
+                    Some(save) => match save.reset_to_default(now_mono_ms) {
+                        Ok(_) => {
+                            eprintln!(
+                                "[dp-app] core-loop 重置全部数据：默认档已落盘，重启进程（{}）",
+                                save.save_path().display()
+                            );
+                            app.restart();
+                        }
+                        Err(err) => {
+                            eprintln!("[dp-app] core-loop 重置全部数据失败（降级不重启）：{err}");
+                        }
+                    },
+                    None => eprintln!("[dp-app] core-loop 重置全部数据：存档未装配，忽略"),
+                }
+                true
+            }
+            CoreInput::ImportSave { file } => {
+                let Some(dir) = resolve_save_dir(app) else {
+                    eprintln!("[dp-app] core-loop 导入存档：存档目录不可用，忽略");
+                    return true;
+                };
+                // 命令层已校验一次；此处**再校验一次**（防内部调用绕过命令层）。
+                let path = match bridge::resolve_backup_path(&dir, file) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        eprintln!("[dp-app] core-loop 导入存档被拒绝：{err}");
+                        return true;
+                    }
+                };
+                match self.save.as_mut() {
+                    Some(save) => match save.import_from(&path, now_mono_ms) {
+                        Ok(()) => {
+                            eprintln!("[dp-app] core-loop 已导入存档 {}，重启进程", path.display());
+                            app.restart();
+                        }
+                        Err(err) => eprintln!("[dp-app] core-loop 导入存档失败（降级不重启）：{err}"),
+                    },
+                    None => eprintln!("[dp-app] core-loop 导入存档：存档未装配，忽略"),
+                }
+                true
+            }
+            CoreInput::Shutdown => {
+                // 退出前存档确认（`01 FR-1-10`）：强制落盘（跳过 30s 定时与 2s 合并窗口）。
+                if let Some(save) = self.save.as_mut() {
+                    match save.flush_force(now_mono_ms) {
+                        Ok(true) => eprintln!("[dp-app] core-loop 退出前已强制落盘（段 A）"),
+                        Ok(false) => eprintln!("[dp-app] core-loop 退出前落盘被跳过（禁写盘态）"),
+                        Err(err) => eprintln!("[dp-app] core-loop 退出前落盘失败（仍退出）：{err}"),
+                    }
+                }
+                app.exit(0);
+                true
             }
         }
     }
@@ -1015,6 +1273,10 @@ impl CoreLoopState {
         //    此时 core-loop 线程已起、播放通道已接入、`app` 句柄可用）。
         self.flush_startup_greeting(app, wall_now_ms.max(0) as u64);
 
+        // ①' S5-M4：设置热更新消费（应用层已落地窗口 / 音频 / 注册表；此处落内核与存档）。
+        //     放在最前：本拍的 TickEnv 与事件派生都应当使用**最新**设置。
+        self.apply_pending_settings(app, wall_now_ms.max(0) as u64);
+
         // ② 环境组装（本地时间同经端口取；需求快照取自内核当前状态）。
         let env = TickEnv {
             now_local: wall.now_local(),
@@ -1024,7 +1286,12 @@ impl CoreLoopState {
             event_delta: self.pending_mood_delta,
             // 采样不可用（`None`）→ 保守取 0 = 判定「在场」，避免把检测失败
             // 误算成用户离开而虚增冷落压力。
-            preset_idle_ms: self.presence_idle_ms.unwrap_or(0),
+            // S5-M4 / Q-18：活跃感知关闭 → 恒取 0（恒在场），退化为纯时间模型。
+            preset_idle_ms: if self.activity_sensing {
+                self.presence_idle_ms.unwrap_or(0)
+            } else {
+                0
+            },
             interaction_available: true,
             satiety: self.emotion.state.values.satiety,
             cleanliness: self.emotion.state.values.cleanliness,
@@ -1106,14 +1373,20 @@ impl CoreLoopState {
         }
 
         // S4-M5：气泡（`pet://bubble`，把算法事件翻译为「抽到的台词 + 语义字段」）。
-        for ev in events {
-            let Some(plan) = self.derive_bubble(ev, wall_now_ms) else {
-                continue;
-            };
-            let wire = wire_for_bubble(&plan);
-            let Some(handle) = app else { continue };
-            if let Err(err) = handle.emit(wire.event, &wire.payload) {
-                eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+        //
+        // S5-M4 / FR-10-4：**勿扰模式静默气泡**——勿扰的前提是「暂停气泡与主动漫游，
+        // 仅保留待机动画」。此处只掐**气泡产出**（不产事件即不弹），音频侧的静默由
+        // `dp-audio::resolve_play` 的勿扰门控负责（S4-M6），两边口径一致、互不重复。
+        if !(self.dnd && self.dnd_pause_bubbles) {
+            for ev in events {
+                let Some(plan) = self.derive_bubble(ev, wall_now_ms) else {
+                    continue;
+                };
+                let wire = wire_for_bubble(&plan);
+                let Some(handle) = app else { continue };
+                if let Err(err) = handle.emit(wire.event, &wire.payload) {
+                    eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+                }
             }
         }
 
@@ -1713,6 +1986,17 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
     let save = resolve_save_dir(app).map(|dir| {
         let (store, outcome) = SaveStore::load(&dir, SystemWallClock.now_ms());
         log_save_outcome(&outcome);
+        // S5-M4：把加载落点登记进「数据」Tab 的查询句柄（`save_status` 命令的真源）。
+        // 这是 S5-M1 裁定 ④「用户可见提示」的可观测面——设置页据此显示健康状态与提示条。
+        if let Some(handle) = app.try_state::<bridge::SaveStatusHandle>() {
+            handle.set(bridge::SaveStatusInfo {
+                state: save_state_key(&outcome.status),
+                healthy: outcome.is_healthy(),
+                needs_notice: outcome.needs_notice(),
+                writable: store.is_writable(),
+                last_seen_ms: store.cache().meta.last_seen_ms,
+            });
+        }
         store
     });
     let cfg = CoreCfg {
@@ -1727,11 +2011,31 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         save,
     };
     let mut state = CoreLoopState::new(pos, monitors, cfg, seed, 0);
+    // S5-M4：设置状态（应用层唯一设置真源）由配置束 ⊕ 存档 B 段推导，装配后
+    // `manage` 进 Tauri 状态管理器（设置窗口的 `settings_get` / 热更新都读它）。
+    let snapshot = bridge::build_settings_snapshot(&bundle, state.save_ref());
+    state.apply_settings_snapshot(&snapshot);
+    // schedule.json 的勿扰行为位（`01 FR-10-4`：勿扰静默气泡，与 S4-M6 音频门控同口径）。
+    state.apply_schedule_flags(bundle.schedule.do_not_disturb.pause_bubbles);
+    app.manage(bridge::SettingsState::new(snapshot));
     // S5-M2：离线补偿（**必须在首个业务 tick 之前**——`restore` 已把起点置为存档里的
     // `lastTickMs`，若先跑首拍则离线时长被压缩成 1 秒；见 `compensate_offline` 文档）。
     // 无存档 / 无离线 → `None`，不做任何演出（全新安装路径）。
     let _ = state.compensate_offline(&SystemWallClock);
     Some(state)
+}
+
+/// 存档加载落点 → 词表名（`save_status` 与设置页「数据」Tab 共用；与 `LoadStatus` 一一对应）。
+fn save_state_key(status: &dp_core::save::LoadStatus) -> String {
+    match status {
+        dp_core::save::LoadStatus::Fresh => "fresh",
+        dp_core::save::LoadStatus::Loaded => "loaded",
+        dp_core::save::LoadStatus::RecoveredFromBak { .. } => "recoveredFromBak",
+        dp_core::save::LoadStatus::IsolatedCorrupt { .. } => "isolatedCorrupt",
+        dp_core::save::LoadStatus::IsolatedFuture { .. } => "isolatedFuture",
+        dp_core::save::LoadStatus::MigrationPending { .. } => "migrationPending",
+    }
+    .to_string()
 }
 
 /// 记录存档装载结果（S5-M1：降级链的可观测面）。
@@ -1751,16 +2055,6 @@ fn log_save_outcome(outcome: &LoadOutcome) {
     } else {
         eprintln!("[dp-app] core-loop 存档正常：{line}");
     }
-}
-
-/// 解析存档目录（`01 FR-8-1` / `02 §6.1`：`%APPDATA%\DesktopPet`；C1：无盘符字面量）。
-///
-/// `PathResolver::data_dir()` = `%APPDATA%`（Roaming），再拼产品目录名 [`SAVE_DIR_NAME`]。
-/// 目录**允许不存在**（首次运行由原子写的 `create_dir_all` 建立），故此处不预建、不校验。
-/// 解析失败（平台 API 不可用）→ `None`：退化为「不载档不落盘」，不阻断启动（`02 §7.4.2`）。
-fn resolve_save_dir(app: &AppHandle) -> Option<PathBuf> {
-    let base = app.path().data_dir().ok()?;
-    Some(base.join(SAVE_DIR_NAME))
 }
 
 /// 由配置束投影音频设置快照（S4-M6：`settings.json.audio` + `behavior` 的静音相关位）。
@@ -1967,6 +2261,11 @@ fn run_loop(
                 emotion_events.extend(state.coax_stroke_tick(now, consumer.is_stroking()));
                 if let Some(channel) = app.try_state::<CoreInputChannel>() {
                     for input in channel.drain() {
+                        // S5-M4：重置数据 / 导入存档 / 退出需要 `AppHandle`（重启进程 /
+                        // 强制落盘后退出），走独立出口；其余仍走纯逻辑 `apply_core_input`。
+                        if state.handle_admin_input(&app, &input, now) {
+                            continue;
+                        }
                         emotion_events.extend(state.apply_core_input(input, now));
                     }
                 }
@@ -2265,6 +2564,7 @@ mod tests {
 
     fn roam_cfg() -> RoamCfg {
         RoamCfg {
+            pace_options: dp_core::config::model::RoamCfg::default().pace_options,
             pace: 1.0,
             decision_interval_sec: [5, 30],
             cursor_avoid_radius_px: 150,
@@ -3804,7 +4104,7 @@ mod tests {
             serde_json::from_str(&text).expect("tauri.conf.json 应为合法 JSON");
         assert_eq!(
             value["productName"].as_str(),
-            Some(SAVE_DIR_NAME),
+            Some(crate::bridge::SAVE_DIR_NAME),
             "存档目录名与 productName 漂移会导致存档路径与 `02 §6.1` 不符"
         );
     }

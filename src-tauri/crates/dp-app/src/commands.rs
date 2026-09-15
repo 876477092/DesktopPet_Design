@@ -16,7 +16,7 @@
 //! Windows 专属实现下沉到 [`hide_pet_window`] 的 cfg 分支（非 Windows 目标返回
 //! 可读错误，保证 `cargo check` 跨平台可编译）。
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 /// 右键菜单命令枚举（S3-M6；新增命令在此登记，勿在前端自创字符串）。
@@ -92,6 +92,339 @@ pub fn pet_emotion_command(app: AppHandle, command: EmotionCommand) -> Result<()
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// S5-M4：设置命令（设置页 ⇄ 应用层设置状态；`01 FR-7` / `02 §7.6 pet://config`）
+// ---------------------------------------------------------------------------
+
+/// 读取当前**有效设置快照**（`settings.json` 出厂默认 ⊕ 存档 B 段用户值）。
+///
+/// 设置窗口挂载后第一件事即调用本命令；`pet://config` 事件只广播摘要（revision），
+/// 窗口收到后据此**再拉一次**本命令（避免每次改动全量广播 ~1KB 载荷）。
+///
+/// # Errors
+/// 设置状态尚未装配（core-loop 未起来 / 纯逻辑模式）时返回可读错误串：前端降级为
+/// 内置默认 + 只读预览（`02 §7.4.2`），不阻断窗口显示。
+#[tauri::command]
+pub fn settings_get(app: AppHandle) -> Result<crate::bridge::SettingsSnapshot, String> {
+    use tauri::Manager;
+    let state = app
+        .try_state::<crate::bridge::SettingsState>()
+        .ok_or_else(|| "设置服务尚未装配".to_string())?;
+    Ok(state.snapshot())
+}
+
+/// 应用设置补丁（**热更新的唯一写入点**）。
+///
+/// 执行顺序（重要，保证「10s 内生效」与「单写者」两条硬约束同时成立）：
+///   1. 合并补丁进设置快照（含取值域夹紧）+ `revision += 1`；
+///   2. **立即**落地应用层效果（窗口缩放/不透明度、置顶、穿透、音量/静音、自启）；
+///   3. 把补丁入队交 core-loop（由其在业务档落到引擎与存档，并广播 `pet://config`）。
+///
+/// 第 2 步在此处同步完成的原因：这些设置项作用于**应用层**（窗口 / 音频总线 / 注册表），
+/// 与 core-loop 无关；走 core-loop 只会平白引入一拍延迟。第 3 步留给 core-loop 的是
+/// **内核侧**设置（敏感度 / 勿扰 / 感知 / 名字 / 提醒偏好）与**存档写入**。
+///
+/// # Errors
+/// 设置服务未装配 / 补丁写入失败（锁中毒）时返回可读错误串。
+#[tauri::command]
+pub fn settings_apply(
+    app: AppHandle,
+    patch: crate::bridge::SettingsPatch,
+) -> Result<crate::bridge::SettingsSnapshot, String> {
+    use tauri::Manager;
+    let state = app
+        .try_state::<crate::bridge::SettingsState>()
+        .ok_or_else(|| "设置服务尚未装配".to_string())?;
+    let revision = state
+        .apply(&patch)
+        .ok_or_else(|| "设置状态写入失败（内部锁异常）".to_string())?;
+    let snapshot = state.snapshot();
+    apply_platform_effects(&app, &snapshot, revision);
+    Ok(snapshot)
+}
+
+/// 重置全部数据（`01 FR-8-4`：二次确认后清档重建）。
+///
+/// 只**投递**给 core-loop（存档唯一写者）：core-loop 重置内存档 + 立刻落盘 → 重启进程，
+/// 使 B/C/D 段全部回到出厂态（未来 S8 经济/背包/成就也一并清空，无需逐段实现重置）。
+///
+/// # Errors
+/// 入站通道未装配时返回可读错误串。
+#[tauri::command]
+pub fn settings_reset_all(app: AppHandle) -> Result<(), String> {
+    push_core_input(&app, crate::bridge::CoreInput::ResetAllData)
+}
+
+// ---------------------------------------------------------------------------
+// S5-M4：存档命令（设置页「数据」Tab；`01 FR-8-2` / `02 §5 K-7`）
+// ---------------------------------------------------------------------------
+
+/// 存档操作命令（收口单一出口；未登记动作一律拒绝）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveCommand {
+    /// 重置全部数据（清档重建 + 重启）。
+    Reset,
+    /// 导入指定备份档（`save.json.bak` / `save.corrupt.*.json`）。
+    Import,
+}
+
+/// 「数据」Tab 的存档健康状态（`01 FR-8-2` 的**用户可见提示面**）。
+///
+/// 背景（S5-M1 裁定 ④）：`02 §5 K-7` 要求损坏档「重建默认档**并提示**」，而 S5-M1
+/// 只做到「隔离 + 重建 + 日志」——`pet://` 事件面无存档状态事件、托盘无通知 API，
+/// 提示必须有一处 UI 承载。本命令即为该承载面：设置页「数据」Tab 挂载时查询并展示。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveStatus {
+    /// 存档主文件绝对路径（只读展示；用户可据此手工回捞）。
+    pub path: String,
+    /// 主档是否存在。
+    pub exists: bool,
+    /// 加载落点（`fresh` / `loaded` / `recoveredFromBak` / `isolatedCorrupt` /
+    /// `isolatedFuture` / `migrationPending` / `unknown` / `unavailable`）。
+    pub state: String,
+    /// 是否健康（`false` → UI 必须显示提示条）。
+    pub healthy: bool,
+    /// 是否需要向用户提示（损坏 / 未来版本 / 待迁移）。
+    pub needs_notice: bool,
+    /// 当前是否允许写盘（`false` = v1 待迁移的保护态 / 存档未装配）。
+    pub writable: bool,
+    /// 是否已装配存档（`false` = `%APPDATA%` 解析失败等降级态）。
+    pub available: bool,
+    /// 最近一次落盘记录的墙钟毫秒（0 = 从未落盘）。
+    pub last_seen_ms: i64,
+    /// 候选备份清单（可导入者在前）。
+    pub backups: Vec<crate::bridge::SaveBackup>,
+}
+
+/// 查询存档健康状态与可用备份（设置页「数据」Tab）。
+///
+/// 永不 `Err`：存档不可用时返回 `available = false` + `needs_notice = true` 的降级状态
+/// （UI 仍能如实显示「存档不可用」，比抛错更有用）。
+#[tauri::command]
+#[must_use]
+pub fn save_status(app: AppHandle) -> SaveStatus {
+    use tauri::Manager;
+
+    let Some(dir) = crate::bridge::resolve_save_dir(&app) else {
+        return SaveStatus {
+            path: String::new(),
+            exists: false,
+            state: "unavailable".to_string(),
+            healthy: false,
+            needs_notice: true,
+            writable: false,
+            available: false,
+            last_seen_ms: 0,
+            backups: Vec::new(),
+        };
+    };
+
+    let main = dir.join(crate::bridge::SAVE_FILE_NAME);
+    let exists = main.is_file();
+    let backups = crate::bridge::list_save_backups(&dir);
+
+    // 状态真源 = core-loop 装配期记录的加载落点（未装配 → `unknown`，按「需提示」处理）。
+    let loaded = app.try_state::<crate::bridge::SaveStatusHandle>();
+    let (state, healthy, needs_notice, writable, last_seen_ms) = match loaded.as_deref() {
+        Some(handle) => {
+            let info = handle.get();
+            (info.state, info.healthy, info.needs_notice, info.writable, info.last_seen_ms)
+        }
+        None => ("unknown".to_string(), !exists, !exists, false, 0),
+    };
+
+    SaveStatus {
+        path: main.to_string_lossy().to_string(),
+        exists,
+        state,
+        healthy,
+        needs_notice,
+        writable,
+        available: true,
+        last_seen_ms,
+        backups,
+    }
+}
+
+/// 存档操作（`reset` 清档重建 / `import` 导入指定备份；两者均以「重启」收尾）。
+///
+/// `file` 仅 `import` 时需要：**只接受存档目录内的备份文件名**（第二道收口；
+/// 白名单判定在 [`crate::bridge::resolve_backup_path`]）。
+///
+/// # Errors
+/// 未登记命令 / 文件名不合法 / 入站通道未装配时返回可读错误串。
+#[tauri::command]
+pub fn save_command(
+    app: AppHandle,
+    command: SaveCommand,
+    file: Option<String>,
+) -> Result<(), String> {
+    match command {
+        SaveCommand::Reset => push_core_input(&app, crate::bridge::CoreInput::ResetAllData),
+        SaveCommand::Import => {
+            let Some(name) = file else {
+                return Err("导入存档需要提供备份文件名".to_string());
+            };
+            let dir = crate::bridge::resolve_save_dir(&app)
+                .ok_or_else(|| "存档目录不可用，无法导入".to_string())?;
+            // 先做白名单 + 存在性校验（命令层即拒绝非法请求，不把脏输入交给 core-loop）。
+            let _ = crate::bridge::resolve_backup_path(&dir, &name)?;
+            push_core_input(&app, crate::bridge::CoreInput::ImportSave { file: name })
+        }
+    }
+}
+
+/// 投递入站指令（core-loop 未装配 → 可读错误；不 panic）。
+fn push_core_input(app: &AppHandle, input: crate::bridge::CoreInput) -> Result<(), String> {
+    use tauri::Manager;
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法下发指令".to_string())?;
+    channel.push(input);
+    Ok(())
+}
+
+/// 装配期落地一次设置的应用层效果（`lib.rs` 的 `setup` 末尾调用）。
+///
+/// 存在的理由（`01 FR-7`「持久化」）：设置存在存档里，重启后若不在装配期重新落地，
+/// 用户会看到「设置记住了但没生效」（体积/透明度/音量回到默认）。此函数把
+/// [`apply_platform_effects`] 在启动时跑一遍，与「改设置时立即落地」共用同一实现。
+///
+/// 未装配 `SettingsState`（纯逻辑模式 / 平台层降级）→ 静默返回（`02 §7.4.2`）。
+pub fn apply_startup_settings(app: &AppHandle) {
+    use tauri::Manager;
+
+    let Some(state) = app.try_state::<crate::bridge::SettingsState>() else {
+        return;
+    };
+    let snapshot = state.snapshot();
+    apply_platform_effects(app, &snapshot, snapshot.revision);
+}
+
+/// 应用层设置项的**立即生效**落地（窗口 / 音频 / 注册表）。
+///
+/// 非 Windows 目标为空实现（跨平台 `cargo check` 可编译；本项目仅 Windows 目标）。
+#[cfg(not(windows))]
+fn apply_platform_effects(
+    _app: &AppHandle,
+    _snapshot: &crate::bridge::SettingsSnapshot,
+    _revision: u64,
+) {
+}
+
+/// Windows 实现：逐项落地应用层设置（每一项独立降级，单项失败不影响其余项）。
+#[cfg(windows)]
+fn apply_platform_effects(
+    app: &AppHandle,
+    snapshot: &crate::bridge::SettingsSnapshot,
+    revision: u64,
+) {
+    apply_window_effects(app, snapshot);
+    apply_alpha_effect(app, snapshot);
+    apply_audio_effect(app, snapshot);
+    apply_autostart_effect(app, snapshot, revision);
+}
+
+/// ① 窗口：缩放（逻辑尺寸 + 用户缩放系数）、置顶、穿透。
+#[cfg(windows)]
+fn apply_window_effects(app: &AppHandle, snapshot: &crate::bridge::SettingsSnapshot) {
+    use dp_platform::PlatformWindow;
+    use dp_platform::traits::TopmostMode;
+    use tauri::Manager;
+
+    let Some(platform) = app.try_state::<crate::PetPlatform>() else {
+        return;
+    };
+    let window = &platform.window;
+    let logical = crate::BRIDGE_BASE_LOGICAL_SIZE * snapshot.scale_percent / 100;
+    if let Err(err) = window.set_size_logical(logical, logical) {
+        eprintln!("[dp-app] 设置热更新：窗口缩放失败（{err}）");
+    }
+    window.set_user_scale(snapshot.scale_percent as f32 / 100.0);
+    let mode = crate::bridge::normalize_topmost_policy(&snapshot.always_on_top_policy)
+        .unwrap_or("Always");
+    let mode = match mode {
+        "Never" => TopmostMode::Never,
+        "BelowFullscreen" => TopmostMode::BelowFullscreen,
+        _ => TopmostMode::Always,
+    };
+    if let Err(err) = window.set_topmost(mode) {
+        eprintln!("[dp-app] 设置热更新：置顶策略失败（{err}）");
+    }
+    if let Err(err) = window.set_click_through(snapshot.click_through) {
+        eprintln!("[dp-app] 设置热更新：穿透开关失败（{err}）");
+    }
+    crate::tray_menu::note_topmost(snapshot.always_on_top_policy == "Always");
+}
+
+/// ② 不透明度：走渲染帧 alpha（窗口不做分层 alpha，`02 §2.3` 定版口径）。
+#[cfg(windows)]
+fn apply_alpha_effect(app: &AppHandle, snapshot: &crate::bridge::SettingsSnapshot) {
+    use tauri::Manager;
+
+    if let Some(alpha) = app.try_state::<crate::bridge::FrameAlpha>() {
+        alpha.set_percent(snapshot.opacity_percent, snapshot.opacity_min_percent);
+    }
+}
+
+/// ③ 音频：音量 / 静音 / 勿扰（勿扰同时影响门控优先级，见 `dp_audio::resolve_play`）。
+#[cfg(windows)]
+fn apply_audio_effect(app: &AppHandle, snapshot: &crate::bridge::SettingsSnapshot) {
+    use tauri::Manager;
+
+    if let Some(bus) = app.try_state::<dp_audio::AudioBus>() {
+        bus.set_settings(dp_audio::AudioSettings {
+            master_volume_percent: snapshot.master_volume_percent,
+            muted: snapshot.muted,
+            do_not_disturb: snapshot.do_not_disturb,
+            click_through: snapshot.click_through,
+        });
+    }
+}
+
+/// ④ 开机自启：真实写注册表；失败**不谎报**（把开关位回滚为用户可见的真实态）。
+#[cfg(windows)]
+fn apply_autostart_effect(
+    app: &AppHandle,
+    snapshot: &crate::bridge::SettingsSnapshot,
+    revision: u64,
+) {
+    use tauri::Manager;
+
+    let Some(state) = app.try_state::<crate::bridge::SettingsState>() else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        eprintln!("[dp-app] 设置热更新：取当前可执行文件路径失败，自启跳过");
+        return;
+    };
+    match dp_platform::win::autostart::set_enabled(snapshot.autostart, &exe) {
+        Ok(actual) => {
+            let actual_on = actual.is_on();
+            if actual_on != snapshot.autostart {
+                eprintln!(
+                    "[dp-app] 设置热更新：自启真实状态为 {actual:?}，回写设置快照（revision={revision}）"
+                );
+                let fix = crate::bridge::SettingsPatch {
+                    autostart: Some(actual_on),
+                    ..crate::bridge::SettingsPatch::default()
+                };
+                let _ = state.apply(&fix);
+            }
+        }
+        Err(err) => {
+            eprintln!("[dp-app] 设置热更新：写入自启注册表失败（{err}），开关回滚为关闭");
+            let fix = crate::bridge::SettingsPatch {
+                autostart: Some(false),
+                ..crate::bridge::SettingsPatch::default()
+            };
+            let _ = state.apply(&fix);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +456,64 @@ mod tests {
             serde_json::from_str::<EmotionCommand>("\"reboot\"").is_err(),
             "未登记情绪命令必须拒绝（收口单一出口）"
         );
+    }
+
+    /// S5-M4：存档操作命令枚举同样是「收口单一出口」——未登记动作一律拒绝。
+    #[test]
+    fn save_command_deserializes_and_rejects_unknown() {
+        assert_eq!(
+            serde_json::from_str::<SaveCommand>("\"reset\"").expect("reset 应可解析"),
+            SaveCommand::Reset
+        );
+        assert_eq!(
+            serde_json::from_str::<SaveCommand>("\"import\"").expect("import 应可解析"),
+            SaveCommand::Import
+        );
+        assert!(serde_json::from_str::<SaveCommand>("\"wipe\"").is_err(), "未登记存档命令必须拒绝");
+    }
+
+    /// S5-M4：设置补丁只接受**已定义设置项**；未知字段（拼写错误）被忽略而非报错，
+    /// 且不会因为「拼错一个键」而整包失败（与配置加载同容错口径，R19）。
+    #[test]
+    fn settings_patch_parses_partial_and_ignores_unknown_fields() {
+        let patch: crate::bridge::SettingsPatch = serde_json::from_str(
+            "{\"scalePercent\":150,\"muted\":true,\"scalePercnet\":999,\"unknown\":1}",
+        )
+        .expect("脏字段应被忽略而非报错");
+        assert_eq!(patch.scale_percent, Some(150));
+        assert_eq!(patch.muted, Some(true));
+        assert!(patch.opacity_percent.is_none());
+        assert_eq!(patch.groups(), vec!["appearance", "audio"]);
+    }
+
+    /// S5-M4：空补丁是 no-op（不产生分组、不触发落盘）。
+    #[test]
+    fn empty_settings_patch_is_noop() {
+        let patch = crate::bridge::SettingsPatch::default();
+        assert!(patch.is_empty());
+        assert!(patch.groups().is_empty());
+    }
+
+    /// S5-M4：`pet://config` 只广播摘要；分组名必须与 `settings.json` 顶层键同字面量。
+    #[test]
+    fn settings_patch_groups_use_config_section_names() {
+        let known = ["pet", "appearance", "audio", "behavior", "interaction", "reminders"];
+        let patch: crate::bridge::SettingsPatch = serde_json::from_str(
+            "{\"name\":\"x\",\"opacityPercent\":80,\"masterVolumePercent\":10,\"muted\":false,\
+              \"autoRoam\":false,\"clickThrough\":true,\"autostart\":true,\
+              \"doNotDisturb\":true,\"alwaysOnTopPolicy\":\"Never\",\
+              \"sensitivityValue\":1.3,\"catchphraseEnabled\":false,\
+              \"catchphraseFrequency\":\"low\",\"clickFeedbackEnabled\":false,\
+              \"activitySensing\":false,\"reminders\":{\"waterIntervalMin\":60}}",
+        )
+        .expect("完整补丁应可解析");
+        let groups = patch.groups();
+        assert_eq!(
+            groups,
+            vec!["pet", "appearance", "audio", "behavior", "interaction", "reminders"]
+        );
+        for group in groups {
+            assert!(known.contains(&group), "未知分组名：{group}");
+        }
     }
 }

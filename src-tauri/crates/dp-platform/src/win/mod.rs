@@ -7,6 +7,12 @@
 
 pub mod cursor;
 pub mod display;
+// S5-M4（T-15 段 · 中 / `01 FR-1-9`）：开机自启——HKCU `...\CurrentVersion\Run` 读写。
+// C9：新增 `Win32_System_Registry` feature（已登记 `src-tauri/Cargo.toml` 根清单），零网络。
+pub mod autostart;
+// S5-M4（T-15 段 · 中 / `01 FR-1-10` + `02 §5 K-7`）：原生对话框——退出确认 / 存档异常提示。
+// 复用已启用的 `Win32_UI_WindowsAndMessaging`（`MessageBoxW`），零新增 feature、零新增依赖。
+pub mod dialog;
 // S3-M1（T-08 段 · 上 / `02 §5 K-2`）：全局低阶鼠标钩子（`WH_MOUSE_LL`）· 穿透兜底与幂等装卸。
 pub mod hook;
 // S4-M1（T-11 段 · 上 / FR-1-10 / F10）：会话状态检测（锁屏 / 远程桌面）→ 情绪 P 暂停。
@@ -21,6 +27,10 @@ pub mod system;
 pub mod winenum;
 
 pub use display::{select_monitor_at, DisplayService, MonitorId, MonitorInfo, RectI};
+// S5-M4：开机自启（注册表 Run 项）——设置项「开机自启」的唯一落地点。
+pub use autostart::{AutostartState, AUTOSTART_VALUE_NAME, RUN_KEY_PATH};
+// S5-M4：原生对话框（退出确认 / 存档异常提示；零依赖，文案由调用方本地化）。
+pub use dialog::DialogOutcome;
 // S4-M1：会话暂停判定（轮询 + 迟滞；平台不可用时降级 idle 近似，P1-2）。
 pub use session::{query_session_state, SessionState, SessionWatcher};
 // S3-M1：低阶鼠标钩子端口与幂等服务（回调类型与 `CursorEventsHook` 同构：平台定义、app 注入）。

@@ -459,6 +459,7 @@ mod tests {
     /// 测试配置工厂。
     fn cfg(interval_sec: [u64; 2], pace: f32, speed: f32) -> RoamCfg {
         RoamCfg {
+            pace_options: crate::config::model::RoamCfg::default().pace_options,
             pace,
             decision_interval_sec: interval_sec,
             cursor_avoid_radius_px: 150,

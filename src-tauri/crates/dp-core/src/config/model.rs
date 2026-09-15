@@ -159,6 +159,9 @@ impl Default for BehaviorCfg {
 pub struct RoamCfg {
     /// 漫游步调节奏缩放系数（`02 K-3` `roamPace`）。
     pub pace: f32,
+    /// 节奏可选档位（`01 §8.3` 设置面板「节奏 (●正常)」；与
+    /// `emotion.sensitivityOptions` 同范式——**范围外置，UI 不硬编码数值**）。
+    pub pace_options: Vec<f32>,
     /// 漫游决策间隔区间（秒，`02 K-3`：每 5~30s）。
     pub decision_interval_sec: [u64; 2],
     /// 避让光标半径（物理像素，`02 K-3`：150px 热区）。
@@ -172,6 +175,7 @@ impl Default for RoamCfg {
     fn default() -> Self {
         Self {
             pace: 1.0,
+            pace_options: vec![0.7, 1.0, 1.3],
             decision_interval_sec: [5, 30],
             cursor_avoid_radius_px: 150,
             walk_speed_px_per_sec: 60.0,
@@ -330,6 +334,111 @@ pub struct PrivacyCfg {
 impl Default for PrivacyCfg {
     fn default() -> Self {
         Self { activity_sensing: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// schedule.json —— 时段与提醒默认间隔（`01 FR-10` / `02 §3`；S5-M5 交付并冻结）
+// ---------------------------------------------------------------------------
+
+/// `schedule.json` 根：提醒默认间隔与勿扰默认行为（`03 §4.2` 已登记该契约行）。
+///
+/// 出处：`01 FR-10-2`（久坐/喝水提醒，默认 45min，间隔可配；勿扰静默；点击「知道了」
+/// 重新计时）与 `01 FR-10-4`（全局勿扰：暂停气泡与主动漫游，仅保留待机动画）。
+///
+/// 边界（S5-M5）：本文件只提供**默认值与时序参数**；提醒的**调度与触发**（计时器、
+/// 气泡、`ACT-P-03` 演出）归 **S7-M2**——其卡片「前置依赖」已显式列出本模块
+/// （提醒偏好），故此处不是悬空归口。用户改过的间隔写入存档（`settings.reminders`），
+/// 本文件退回为「出厂默认 + 取值域」。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ScheduleConfig {
+    /// 配置版本。
+    pub version: u32,
+    /// 提醒默认间隔与开关。
+    pub reminders: RemindersCfg,
+    /// 勿扰默认行为。
+    pub do_not_disturb: DoNotDisturbCfg,
+}
+
+impl Default for ScheduleConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            reminders: RemindersCfg::default(),
+            do_not_disturb: DoNotDisturbCfg::default(),
+        }
+    }
+}
+
+/// 提醒默认间隔（`01 FR-10-2`）。
+///
+/// `interval_min_min` / `interval_max_min` 是滑杆取值域（与 `settings.json` 的
+/// `scaleMinPercent/scaleMaxPercent` 同范式：**范围随配置外置**，UI 不硬编码数值）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RemindersCfg {
+    /// 久坐提醒开关默认值。
+    pub sedentary_enabled: bool,
+    /// 久坐提醒默认间隔（分钟；`01 FR-10-2` 默认 45）。
+    pub sedentary_interval_min: u32,
+    /// 喝水提醒开关默认值。
+    pub water_enabled: bool,
+    /// 喝水提醒默认间隔（分钟）。
+    pub water_interval_min: u32,
+    /// 间隔可配下界（分钟）。
+    pub interval_min_min: u32,
+    /// 间隔可配上界（分钟）。
+    pub interval_max_min: u32,
+    /// 点击「知道了」是否重新计时（`01 FR-10-2`）。
+    pub ack_resets_timer: bool,
+}
+
+impl Default for RemindersCfg {
+    fn default() -> Self {
+        Self {
+            sedentary_enabled: true,
+            sedentary_interval_min: 45,
+            water_enabled: true,
+            water_interval_min: 45,
+            interval_min_min: 15,
+            interval_max_min: 180,
+            ack_resets_timer: true,
+        }
+    }
+}
+
+/// 勿扰默认行为（`01 FR-10-4`）。
+///
+/// `mute_audio` 默认 `true` 与 **S4-M6 门控口径**一致：`resolve_play` 的优先级为
+/// 「静音 > 音量 0 > 勿扰 > 穿透」，即勿扰态**不播**主动音效（K-6）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DoNotDisturbCfg {
+    /// 出厂默认是否开启勿扰（`false`：首次安装不打扰用户）。
+    pub default_on: bool,
+    /// 勿扰是否暂停气泡。
+    pub pause_bubbles: bool,
+    /// 勿扰是否暂停主动漫游。
+    pub pause_roam: bool,
+    /// 勿扰是否保留待机动画（`01 FR-10-4`：仅保留待机动画）。
+    pub keep_idle_anim: bool,
+    /// 勿扰是否静音音效（与 S4-M6 门控同口径）。
+    pub mute_audio: bool,
+}
+
+impl Default for DoNotDisturbCfg {
+    fn default() -> Self {
+        Self {
+            default_on: false,
+            pause_bubbles: true,
+            pause_roam: true,
+            keep_idle_anim: true,
+            mute_audio: true,
+        }
     }
 }
 

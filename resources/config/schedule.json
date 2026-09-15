@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "reminders": {
+    "sedentaryEnabled": true,
+    "sedentaryIntervalMin": 45,
+    "waterEnabled": true,
+    "waterIntervalMin": 45,
+    "intervalMinMin": 15,
+    "intervalMaxMin": 180,
+    "ackResetsTimer": true
+  },
+  "doNotDisturb": {
+    "defaultOn": false,
+    "pauseBubbles": true,
+    "pauseRoam": true,
+    "keepIdleAnim": true,
+    "muteAudio": true
+  }
+}

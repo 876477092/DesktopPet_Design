@@ -8,12 +8,17 @@
 //! ## 字段归属四段（避免「谁写这个字段」扯皮）
 //!
 //! ```text
-//!   A. 内核承接段（本卡起真实读写）  v / values / emotion.{neglect,sensitivity,state} / meta
-//!   B. 配置承接段（随 S5-M3/M4/M5）  pet.name / pet.catchphrase / settings.*
-//!   C. 占位段（S7-M2 / S7-M4 接管）  emotion.{personality,personalityRolled,adapt,rough} / needs
-//!   D. 占位段（S8-M5/M6/M7 接管）    economy / inventory / album / decor / photoWidget
-//!                                    / skills / activity / activityCounter / counters
+//!   A. 内核承接段（S5-M1 起真实读写）   v / values / emotion.{neglect,sensitivity,state} / meta
+//!   B. 配置承接段（S5-M3/M4/M5 已接管）  pet.name / pet.catchphrase / settings.*
+//!   C. 占位段（S7-M2 / S7-M4 接管）      emotion.{personality,personalityRolled,adapt,rough} / needs
+//!   D. 占位段（S8-M5/M6/M7 接管）        economy / inventory / album / decor / photoWidget
+//!                                        / skills / activity / activityCounter / counters
 //! ```
+//!
+//! **B 段落地（T-15）**：`settings.*` 已由 S5-M1 的「三行占位」补齐为用户可改设置的全量
+//! 有效值（`appearance` / `audio` / `behavior` / `reminders` + 既有 `emotionSensitivity` /
+//! `privacy` / `performance`）。划分口径：`settings.json` = 出厂默认 + 取值域（安装目录只读），
+//! 存档 B 段 = 用户改动后的有效值；`pet.name` 空串 = 未改名（取 `character.json.defaultName`）。
 //!
 //! C / D 两段在本卡**只冻结「字段名 + 默认值 + 往返不丢」三件事**，类型不发明领域语义：
 //! 用 `serde_json::Value` 承载（与 `crate::event::PetSnapshotV2.activity` 的既有先例同口径）。
@@ -392,7 +397,11 @@ pub struct NeedsSave {
     pub clean_slow_until_ms: i64,
 }
 
-/// 设置覆盖存档（`02 §5 K-7` `settings.*` 三行；完整设置项归 S5-M3/M4/M5）。
+/// 设置覆盖存档（`02 §5 K-7` `settings.*` 三行 + **T-15/S5-M3/M4/M5 补齐段 B 全量**）。
+///
+/// 段归属：本段由 **S5-M3（设置面板 UI）/ S5-M4（热更新） / S5-M5（偏好项）** 读写；
+/// `settings.json` 提供**出厂默认与取值域**，本段承载**用户改动后的有效值**——
+/// 「配置只读 / 用户数据落在存档」的既有划分（`02 §3`：安装目录资源只读）。
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SettingsSave {
@@ -402,6 +411,14 @@ pub struct SettingsSave {
     pub privacy: PrivacySave,
     /// 性能。
     pub performance: PerformanceSave,
+    /// 外观（T-15 / FR-7-2 / FR-7-6 / FR-7-7）。
+    pub appearance: AppearanceSave,
+    /// 声音（T-15 / FR-7-3）。
+    pub audio: AudioSave,
+    /// 行为（T-15 / FR-7-4 / FR-1-2 / FR-1-9）。
+    pub behavior: BehaviorSave,
+    /// 提醒偏好（T-15 / FR-10-2；出厂默认值来自 `schedule.json`）。
+    pub reminders: RemindersSave,
 }
 
 impl Default for SettingsSave {
@@ -410,6 +427,106 @@ impl Default for SettingsSave {
             emotion_sensitivity: 1.0,
             privacy: PrivacySave::default(),
             performance: PerformanceSave::default(),
+            appearance: AppearanceSave::default(),
+            audio: AudioSave::default(),
+            behavior: BehaviorSave::default(),
+            reminders: RemindersSave::default(),
+        }
+    }
+}
+
+/// 外观设置存档（`01 FR-7-2 / FR-7-6 / FR-7-7`；默认值与 `settings.json` 同源）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppearanceSave {
+    /// 缩放百分比（50~200）。
+    pub scale_percent: u32,
+    /// 主体不透明度百分比（60~100）。
+    pub opacity_percent: u32,
+    /// 界面语言（`zh-CN` / `en-US`；非法值由消费侧回退默认语言）。
+    pub language: String,
+}
+
+impl Default for AppearanceSave {
+    fn default() -> Self {
+        Self { scale_percent: 100, opacity_percent: 100, language: "zh-CN".to_string() }
+    }
+}
+
+/// 声音设置存档（`01 FR-7-3`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AudioSave {
+    /// 主音量百分比（0~100）。
+    pub master_volume_percent: u32,
+    /// 是否静音。
+    pub muted: bool,
+}
+
+impl Default for AudioSave {
+    fn default() -> Self {
+        Self { master_volume_percent: 80, muted: false }
+    }
+}
+
+/// 行为开关存档（`01 FR-7-4 / FR-1-2 / FR-1-9`）。
+///
+/// `always_on_top_policy` 取值 `Always` / `BelowFullscreen` / `Never`（`02 K-1` 三态；
+/// 与 `settings.json` 同字面量，**不新增枚举**，避免 Rust ⇄ 配置双向映射表）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct BehaviorSave {
+    /// 自动走动。
+    pub auto_roam: bool,
+    /// 漫游节奏（`01 §8.3`「节奏」；档位候选值来自 `settings.json.roam.paceOptions`）。
+    pub roam_pace: f32,
+    /// 勿扰模式（`01 FR-10-4`）。
+    pub do_not_disturb: bool,
+    /// 轻松模式（`01 §6.5.2` Q-E：抚摸门槛 5s → `easyModeStrokeSec`）。
+    pub easy_coax_mode: bool,
+    /// 鼠标穿透（`01 FR-1-6`）。
+    pub click_through: bool,
+    /// 置顶策略（三态字面量）。
+    pub always_on_top_policy: String,
+    /// 开机自启（`01 FR-1-9`；注册表 Run 项的真实状态由 S5-M4 写入后回填）。
+    pub autostart: bool,
+}
+
+impl Default for BehaviorSave {
+    fn default() -> Self {
+        Self {
+            auto_roam: true,
+            roam_pace: 1.0,
+            do_not_disturb: false,
+            easy_coax_mode: false,
+            click_through: false,
+            always_on_top_policy: "Always".to_string(),
+            autostart: false,
+        }
+    }
+}
+
+/// 提醒偏好存档（`01 FR-10-2`；出厂默认值来自 `schedule.json`，此处存用户改动值）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RemindersSave {
+    /// 久坐提醒开关。
+    pub sedentary_enabled: bool,
+    /// 久坐提醒间隔（分钟）。
+    pub sedentary_interval_min: u32,
+    /// 喝水提醒开关。
+    pub water_enabled: bool,
+    /// 喝水提醒间隔（分钟）。
+    pub water_interval_min: u32,
+}
+
+impl Default for RemindersSave {
+    fn default() -> Self {
+        Self {
+            sedentary_enabled: true,
+            sedentary_interval_min: 45,
+            water_enabled: true,
+            water_interval_min: 45,
         }
     }
 }
@@ -623,6 +740,68 @@ mod tests {
         // 往返无损
         let back: SaveFileV2 = serde_json::from_value(json).expect("可反序列化");
         assert_eq!(back, s);
+    }
+
+    /// T-15（段 B 落地）：用户可改设置全量落存档，且与 `settings.json` 出厂默认同值。
+    #[test]
+    fn settings_segment_covers_sections_with_config_defaults() {
+        let s = SettingsSave::default();
+        let cfg = crate::config::model::SettingsConfig::default();
+        // 外观 / 声音 / 行为：默认值与 settings.json 同源（三处逐项比对，防双真源）。
+        assert_eq!(s.appearance.scale_percent, cfg.appearance.scale_percent);
+        assert_eq!(s.appearance.opacity_percent, cfg.appearance.opacity_percent);
+        assert_eq!(s.appearance.language, cfg.appearance.language);
+        assert_eq!(s.audio.master_volume_percent, cfg.audio.master_volume_percent);
+        assert_eq!(s.audio.muted, cfg.audio.muted);
+        assert_eq!(s.behavior.auto_roam, cfg.behavior.auto_roam);
+        assert_eq!(s.behavior.do_not_disturb, cfg.behavior.do_not_disturb);
+        assert_eq!(s.behavior.click_through, cfg.behavior.click_through);
+        assert_eq!(s.behavior.always_on_top_policy, cfg.behavior.always_on_top_policy);
+        assert_eq!(s.emotion_sensitivity, cfg.emotion.sensitivity_value);
+        assert_eq!(s.privacy.activity_sensing, cfg.privacy.activity_sensing);
+        // 自启默认关（`01 FR-1-9`：用户显式开启才写注册表）。
+        assert!(!s.behavior.autostart);
+
+        // 序列化后四段齐全且 camelCase（设置页「数据」Tab / 设置窗口读档同源）。
+        let json = serde_json::to_value(&s).expect("可序列化");
+        for key in ["appearance", "audio", "behavior", "reminders", "privacy", "performance"] {
+            assert!(json.get(key).is_some(), "settings 段缺少 {key}");
+        }
+        assert_eq!(json["behavior"]["alwaysOnTopPolicy"], "Always");
+        assert_eq!(json["reminders"]["sedentaryIntervalMin"], 45);
+    }
+
+    /// 提醒偏好默认值必须与 `schedule.json` 出厂默认同值（两处默认值漂移即测试失败）。
+    #[test]
+    fn reminder_save_defaults_match_schedule_config() {
+        let save = RemindersSave::default();
+        let schedule = crate::config::model::ScheduleConfig::default();
+        assert_eq!(save.sedentary_enabled, schedule.reminders.sedentary_enabled);
+        assert_eq!(save.sedentary_interval_min, schedule.reminders.sedentary_interval_min);
+        assert_eq!(save.water_enabled, schedule.reminders.water_enabled);
+        assert_eq!(save.water_interval_min, schedule.reminders.water_interval_min);
+        // 出厂默认间隔必须落在取值域内（否则设置页滑杆首帧即越界）。
+        assert!(
+            schedule.reminders.sedentary_interval_min >= schedule.reminders.interval_min_min
+                && schedule.reminders.sedentary_interval_min <= schedule.reminders.interval_max_min
+        );
+    }
+
+    /// 老档前向兼容：B 段新字段缺失时由 `default` 补齐（不阻断载档，R19）。
+    #[test]
+    fn settings_segment_tolerates_missing_new_fields() {
+        // 模拟 S5-M1 期的老存档：settings 只有三行。
+        let legacy = serde_json::json!({
+            "emotionSensitivity": 1.3,
+            "privacy": { "activitySensing": false },
+            "performance": { "renderer": "frame" }
+        });
+        let s: SettingsSave = serde_json::from_value(legacy).expect("老档应可解析");
+        assert_eq!(s.emotion_sensitivity, 1.3, "已有值必须保留");
+        assert!(!s.privacy.activity_sensing);
+        assert_eq!(s.appearance.scale_percent, 100, "新字段由默认补齐");
+        assert_eq!(s.behavior.always_on_top_policy, "Always");
+        assert_eq!(s.reminders.water_interval_min, 45);
     }
 
     /// L-03：存档里的口头禅档位必须是**枚举字符串**（作废 `"1:3"`），

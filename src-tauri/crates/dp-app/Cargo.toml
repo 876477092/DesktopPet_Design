@@ -42,6 +42,9 @@ dp-assets = { path = "../dp-assets" }
 # S4-M6：音效服务（rodio 播放 + 门控/队列总线；同 workspace crate，零新增第三方依赖——
 # rodio 由 dp-audio 声明，本 crate 只消费其公开 API）。
 dp-audio = { path = "../dp-audio" }
+# S5-M4：单实例锁（R17；二次启动唤醒已运行实例，不产生第二份存档写入）。
+# **C9 零网络口径**：本机命名互斥体 / 窗口消息实现，无网络面（登记见根 `Cargo.toml`）。
+tauri-plugin-single-instance = { workspace = true }
 
 [build-dependencies]
 tauri-build = { workspace = true }

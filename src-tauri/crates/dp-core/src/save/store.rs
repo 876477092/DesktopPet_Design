@@ -417,6 +417,58 @@ impl SaveStore {
         Ok(true)
     }
 
+    /// 重置为内置默认档并**立即**落盘（`01 FR-8-4`「重置全部数据 → 清档重建」）。
+    ///
+    /// 语义与边界（S5-M4）：
+    /// - 内存缓存整体替换为 [`SaveFileV2::default()`]（与 `default_save.json` 模板逐位一致，
+    ///   由 `save::schema` 单测锁定），**并**立即同步落盘——先落盘再返回，避免调用方
+    ///   在重启前丢掉重置结果；
+    /// - 标注为可写（`writable = true`）：用户显式重置即视为「接受以本档为准」，
+    ///   即便原档是 v1 待迁移档（重置是用户意志，不是后台定时覆盖）；
+    /// - **只替换存档**，不负责重建内存中的内核状态——调用方（core-loop）需自行决定
+    ///   是否重启进程；本卡（S5-M4）走 `app.restart()`，使 B/C/D 段全部回到出厂态；
+    /// - 返回是否真的写盘（禁写盘 / IO 失败时 `Ok(false)`，不报错，调用方记日志）。
+    pub fn reset_to_default(&mut self, now_mono_ms: u64) -> Result<bool, SaveError> {
+        self.cache = SaveFileV2::default();
+        self.writable = true;
+        self.dirty = true;
+        self.write_now(now_mono_ms)?;
+        Ok(true)
+    }
+
+    /// 用磁盘上的某个备份文件**覆盖**主档（`02 §5 K-7`：设置页「数据」Tab 导入存档）。
+    ///
+    /// 边界（S5-M4）：
+    /// - `source` 必须是调用方从**存档目录内**解析出的备份路径（导入命令只接受目录白名单
+    ///   中的文件名，不接受任意路径——防路径穿越）；
+    /// - 本方法只做「复制到主档 + 校验可解析」；**不重建内存状态**，调用方随后需重启
+    ///   （本卡走 `app.restart()`），保证导入的档成为唯一真源；
+    /// - 复制前先复制一份 `save.json.bak`（尽力而为），保证「导入错了还能退回来」。
+    pub fn import_from(&mut self, source: &Path, now_mono_ms: u64) -> Result<(), SaveError> {
+        let text = std::fs::read_to_string(source).map_err(|err| SaveError::io(source, err))?;
+        // 先校验可解析：导入一个解析不了的档只会把用户推进「损坏 → 重建默认档」分支。
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|err| SaveError::Serialize(format!("备份档不是合法 JSON：{err}")))?;
+        let backup: SaveFileV2 = serde_json::from_value(value).map_err(|err| {
+            SaveError::Serialize(format!("备份档结构不匹配（v{SAVE_VERSION}）:{err}"))
+        })?;
+        if backup.v != SAVE_VERSION {
+            return Err(SaveError::Serialize(format!(
+                "备份档版本为 v{}，仅支持 v{SAVE_VERSION}",
+                backup.v
+            )));
+        }
+        // 导入前把当前主档留一份（尽力而为，不阻断）。
+        if self.save_path.is_file() {
+            let _ = std::fs::copy(&self.save_path, self.save_path.with_extension(BAK_SUFFIX));
+        }
+        self.cache = backup;
+        self.writable = true;
+        self.dirty = true;
+        self.write_now(now_mono_ms)?;
+        Ok(())
+    }
+
     /// 用内核当前状态刷新存档「段 A」，返回是否发生**语义变化**。
     ///
     /// 返回值即 [`Self::is_dirty`] 的置位依据：`meta.lastSeenMs` 这类记账字段的
@@ -567,6 +619,8 @@ mod tests {
     use crate::emotion::lines::CatchphraseFrequency;
 
     const T0: i64 = 1_700_000_000_000;
+    /// 单调毫秒基准（`flush_*` / `reset_*` / `import_*` 的 `now_mono_ms`；与 `T0` 不同口径）。
+    const M0: u64 = 1_000;
 
     /// 每例独立临时目录（名字用测试名，C3：不依赖时钟）。
     fn temp_dir(name: &str) -> PathBuf {
@@ -996,6 +1050,69 @@ mod tests {
     fn v1_bak_path_matches_doc_contract() {
         let p = v1_bak_path(Path::new("save.json"));
         assert_eq!(p.file_name().unwrap().to_string_lossy(), "save.json.v1bak");
+    }
+
+    /// S5-M4 / FR-8-4：重置为默认档必须**立即落盘**（不等 30s 定时），且内容与内置默认一致。
+    #[test]
+    fn reset_to_default_replaces_cache_and_writes_immediately() {
+        let dir = temp_dir("reset-to-default");
+        let (mut store, _) = SaveStore::load(&dir, T0);
+        // 先制造一份非默认内容并落盘，确保「重置」真的覆盖了它。
+        store.cache_mut().values.mood = 3.0;
+        store.cache_mut().pet.name = "X".to_string();
+        store.flush_force(M0).expect("前置落盘失败");
+        assert_ne!(store.cache().values.mood, SaveFileV2::default().values.mood);
+
+        let wrote = store.reset_to_default(M0 + 1).expect("重置落盘失败");
+        assert!(wrote, "重置必须真的写盘");
+        assert_eq!(*store.cache(), SaveFileV2::default(), "缓存应回到内置默认档");
+        assert!(store.is_writable(), "显式重置后必须可写（用户意志高于 v1 保护）");
+
+        // 重载验证：磁盘上的档已被替换成默认档（不是内存幻觉）。
+        let (reloaded, outcome) = SaveStore::load(&dir, T0 + 2);
+        assert_eq!(reloaded.cache().values.mood, SaveFileV2::default().values.mood);
+        assert_eq!(outcome.status, LoadStatus::Loaded);
+        assert!(reloaded.cache().pet.name.is_empty(), "重置后不得残留用户名");
+    }
+
+    /// S5-M4：导入备份档必须先把当前主档留一份 `.bak`（导入错了还能退回来），
+    /// 且拒绝非法 JSON / 版本不符的备份。
+    #[test]
+    fn import_from_backs_up_current_and_rejects_bad_source() {
+        let dir = temp_dir("import-from");
+        let (mut store, _) = SaveStore::load(&dir, T0);
+        store.cache_mut().values.mood = 11.0;
+        store.flush_force(M0).expect("前置落盘失败");
+
+        if let Some(parent) = store.save_path().parent() {
+            let source = parent.join("save.corrupt.9.json");
+            // 非法 JSON → 拒绝，且不得改动主档。
+            fs::write(&source, "{ not json ").expect("写坏源失败");
+            assert!(store.import_from(&source, M0 + 1).is_err(), "非法 JSON 必须被拒绝");
+            assert_eq!(store.cache().values.mood, 11.0, "拒绝导入时不得动主档");
+
+            // 版本不符（v=1）→ 拒绝（v1 迁移归 S8-M7，导入不得绕过）。
+            let wrong = SaveFileV2 { v: 1, ..SaveFileV2::default() };
+            fs::write(&source, serde_json::to_string(&wrong).expect("可序列化"))
+                .expect("写源失败");
+            assert!(store.import_from(&source, M0 + 2).is_err(), "版本不符必须被拒绝");
+
+            // 合法 v2 备份 → 成功导入 + 落盘 + 原主档进 `.bak`。
+            let mut good = SaveFileV2::default();
+            good.values.mood = 42.0;
+            fs::write(&source, serde_json::to_string(&good).expect("可序列化"))
+                .expect("写源失败");
+            store.import_from(&source, M0 + 3).expect("合法备份应导入成功");
+            assert_eq!(store.cache().values.mood, 42.0);
+
+            let bak = store.save_path().with_extension(BAK_SUFFIX);
+            assert!(bak.is_file(), "导入前必须先留下 .bak");
+            let text = fs::read_to_string(&bak).expect("读 .bak 失败");
+            let prev: SaveFileV2 = serde_json::from_str(&text).expect("旧主档应可解析");
+            assert_eq!(prev.values.mood, 11.0, ".bak 保存的应是导入前的主档");
+        } else {
+            panic!("存档路径应有父目录");
+        }
     }
 
     #[test]

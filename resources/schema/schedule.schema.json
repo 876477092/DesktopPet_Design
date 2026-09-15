@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ScheduleConfig",
+  "description": "`schedule.json` 根：提醒默认间隔与勿扰默认行为（`03 §4.2` 已登记该契约行）。\n\n出处：`01 FR-10-2`（久坐/喝水提醒，默认 45min，间隔可配；勿扰静默；点击「知道了」 重新计时）与 `01 FR-10-4`（全局勿扰：暂停气泡与主动漫游，仅保留待机动画）。\n\n边界（S5-M5）：本文件只提供**默认值与时序参数**；提醒的**调度与触发**（计时器、 气泡、`ACT-P-03` 演出）归 **S7-M2**——其卡片「前置依赖」已显式列出本模块 （提醒偏好），故此处不是悬空归口。用户改过的间隔写入存档（`settings.reminders`）， 本文件退回为「出厂默认 + 取值域」。",
+  "type": "object",
+  "properties": {
+    "doNotDisturb": {
+      "description": "勿扰默认行为。",
+      "default": {
+        "defaultOn": false,
+        "keepIdleAnim": true,
+        "muteAudio": true,
+        "pauseBubbles": true,
+        "pauseRoam": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/DoNotDisturbCfg"
+        }
+      ]
+    },
+    "reminders": {
+      "description": "提醒默认间隔与开关。",
+      "default": {
+        "ackResetsTimer": true,
+        "intervalMaxMin": 180,
+        "intervalMinMin": 15,
+        "sedentaryEnabled": true,
+        "sedentaryIntervalMin": 45,
+        "waterEnabled": true,
+        "waterIntervalMin": 45
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/RemindersCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "DoNotDisturbCfg": {
+      "description": "勿扰默认行为（`01 FR-10-4`）。\n\n`mute_audio` 默认 `true` 与 **S4-M6 门控口径**一致：`resolve_play` 的优先级为 「静音 > 音量 0 > 勿扰 > 穿透」，即勿扰态**不播**主动音效（K-6）。",
+      "type": "object",
+      "properties": {
+        "defaultOn": {
+          "description": "出厂默认是否开启勿扰（`false`：首次安装不打扰用户）。",
+          "default": false,
+          "type": "boolean"
+        },
+        "keepIdleAnim": {
+          "description": "勿扰是否保留待机动画（`01 FR-10-4`：仅保留待机动画）。",
+          "default": true,
+          "type": "boolean"
+        },
+        "muteAudio": {
+          "description": "勿扰是否静音音效（与 S4-M6 门控同口径）。",
+          "default": true,
+          "type": "boolean"
+        },
+        "pauseBubbles": {
+          "description": "勿扰是否暂停气泡。",
+          "default": true,
+          "type": "boolean"
+        },
+        "pauseRoam": {
+          "description": "勿扰是否暂停主动漫游。",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "RemindersCfg": {
+      "description": "提醒默认间隔（`01 FR-10-2`）。\n\n`interval_min_min` / `interval_max_min` 是滑杆取值域（与 `settings.json` 的 `scaleMinPercent/scaleMaxPercent` 同范式：**范围随配置外置**，UI 不硬编码数值）。",
+      "type": "object",
+      "properties": {
+        "ackResetsTimer": {
+          "description": "点击「知道了」是否重新计时（`01 FR-10-2`）。",
+          "default": true,
+          "type": "boolean"
+        },
+        "intervalMaxMin": {
+          "description": "间隔可配上界（分钟）。",
+          "default": 180,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "intervalMinMin": {
+          "description": "间隔可配下界（分钟）。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "sedentaryEnabled": {
+          "description": "久坐提醒开关默认值。",
+          "default": true,
+          "type": "boolean"
+        },
+        "sedentaryIntervalMin": {
+          "description": "久坐提醒默认间隔（分钟；`01 FR-10-2` 默认 45）。",
+          "default": 45,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "waterEnabled": {
+          "description": "喝水提醒开关默认值。",
+          "default": true,
+          "type": "boolean"
+        },
+        "waterIntervalMin": {
+          "description": "喝水提醒默认间隔（分钟）。",
+          "default": 45,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}
