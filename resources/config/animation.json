@@ -27,5 +27,12 @@
   "blink": { "intervalMs": [2000, 6000], "peakMs": 3500, "durationMs": [120, 180], "speakingFactor": 0.3, "shyFactor": 1.5 },
   "gaze": { "intervalSec": [3, 8], "easeMs": 200 },
   "squash": { "anticipation": [0.85, 1.15], "stretch": [1.15, 0.9], "landing": [0.8, 1.2], "recoverMs": 200, "overshoot": [0.08, 0.15] },
-  "particles": { "maxPerBurst": 60, "lifeSec": 1.2 }
+  "particles": { "maxPerBurst": 60, "lifeSec": 1.2 },
+  "degrade": {
+    "memory": { "warnMb": 200, "hardMb": 225, "recoverMb": 170, "lruMb": 32 },
+    "cpu": { "highPercent": 60, "holdTicks": 2, "recoverPercent": 40, "recoverTicks": 4 },
+    "fps": { "fullscreen": 4, "battery": 15, "hidden": 4, "highLoad": 15 },
+    "slotUnload": true,
+    "physicsPrimaryOnly": true
+  }
 }

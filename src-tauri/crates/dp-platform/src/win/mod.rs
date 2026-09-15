@@ -20,6 +20,9 @@ pub mod hook;
 pub mod session;
 // S1-M3：托盘菜单契约与纯逻辑（`02 §5 K-9` / §5.23）。
 pub mod tray;
+// S6-M2（T-16 段 · 下 / 渲染自愈）：托盘气泡通知——`Shell_NotifyIconW` NIF_INFO 临时
+// 图标气泡（自愈失败提示）。复用已启用的 `Win32_UI_Shell`，零新增 feature、零新增依赖。
+pub mod tray_balloon;
 pub mod window;
 // S2-M7（T-07 / FR-6-3）：系统状态感知实装——电量 / CPU 负载差分 / 键鼠空闲采样。
 pub mod system;

@@ -36,11 +36,13 @@ import { WebGLStage } from './renderer/WebGLStage';
  *   5. S3-M6：装配 `DomParticleView`/`DomMenuView` + `ParticleLayer`/`MenuLayer`，
  *      注册 particle/menu 两层 + `pet://fx`/`pet://menu` 订阅（均已登记 `02 §7.6`）；
  *   6. S4-M3：订阅 `pet://coax`（**S4-M3 登记**）——和好进度环由上游 `CoaxFlow` 结算，
- *      本层只把 `ratio` 交给 `OverlayLayer.setCoaxProgress`（`active=false` 即隐藏）。
+ *      本层只把 `ratio` 交给 `OverlayLayer.setCoaxProgress`（`active=false` 即隐藏）；
+ *   7. S6-M2：帧绘制回执——每帧合成完成后节流（500ms）invoke `frame_receipt`，
+ *      供 Rust 侧渲染看门狗计数（K-8：连续 3 次 5s 无回执 → 自动重建渲染）。
  *
- * 约束：C3 前端不读系统时钟（本文件无时间逻辑）；C8 事件名取自 `PET_EVENT`；
- * C9 仅使用已登记的本地能力（`core:event:default` + 自定义命令 `atlas_png` /
- * `menu_command`）。
+ * 约束：C3 前端不读系统时钟（本文件无时间逻辑；节流用 `performance.now()` 单调钟）；
+ * C8 事件名取自 `PET_EVENT`；C9 仅使用已登记的本地能力（`core:event:default` +
+ * 自定义命令 `atlas_png` / `menu_command` / `frame_receipt`）。
  */
 const PET_CANVAS_ID = 'pet-canvas';
 const PET_OVERLAY_ROOT_ID = 'pet-overlay-root';
@@ -48,6 +50,32 @@ const PET_OVERLAY_ROOT_ID = 'pet-overlay-root';
 /** 宠物逻辑尺寸（`02 §4.4` 视觉契约：128×128 逻辑，导出 2x）。 */
 const LOGICAL_SIZE = 128;
 const LOGICAL_SCALE = 2;
+
+/** S6-M2 帧回执节流间隔（毫秒，单调钟）：2 次/秒，足够看门狗判定存活，不刷 IPC。 */
+const FRAME_RECEIPT_THROTTLE_MS = 500;
+
+/**
+ * S6-M2：帧绘制回执（K-8 看门狗计数源）。
+ *
+ * 在「合成完成」回调（`onFrameReady` → `host.render()` 之后）调用；500ms 节流
+ * （`performance.now()` 单调钟，C3 不读墙钟）。命令未注册（旧二进制 / 看门狗
+ * 装配缺失）→ invoke 失败静默跳过，不阻塞帧循环（`02 §7.4` 可读降级）。
+ */
+function createFrameReceipt(): { onFrameRendered(): void } {
+  let lastSentMs = -Infinity;
+  return {
+    onFrameRendered(): void {
+      const now = performance.now();
+      if (now - lastSentMs < FRAME_RECEIPT_THROTTLE_MS) {
+        return;
+      }
+      lastSentMs = now;
+      void invokeCommand<void>('frame_receipt').catch(() => {
+        // 看门狗未注册 / 调用失败：静默跳过（渲染不中断，看门狗自愈不触发）。
+      });
+    },
+  };
+}
 
 /** 图集 PNG 字节加载器：经最小自定义命令 `atlas_png`（不走 asset 协议网络面，C9）。 */
 async function loadAtlasBytes(name: string): Promise<ArrayBuffer | null> {
@@ -92,7 +120,12 @@ async function bootstrapPetWindow(): Promise<void> {
   const stage = WebGLStage.create(canvas);
   const cache = new AtlasCache(loadAtlasBytes);
   const host = new LayerHost();
-  const renderer = new FrameRenderer(stage, cache, () => host.render());
+  // S6-M2：合成完成后上报帧回执（节流见 createFrameReceipt；看门狗计数源）。
+  const receipt = createFrameReceipt();
+  const renderer = new FrameRenderer(stage, cache, () => {
+    host.render();
+    receipt.onFrameRendered();
+  });
   host.setLayer('character', () => renderer.paint());
 
   // S3-M5 装配：DOM 两视图（唯一 document 触点，DomLayers.ts）+ 两层状态机；

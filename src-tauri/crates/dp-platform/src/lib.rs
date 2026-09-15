@@ -37,3 +37,11 @@ pub use win::{
     TrayAction, TrayIconState, TrayMenuState, TrayMenuItem, WatchAction, WinPlatform,
     WinPlatformWindow, ZOrder, RESTORE_DELAY_MS,
 };
+
+// S6-M1（T-16 段 · 上 / 性能预算）：进程内存 / 进程 CPU 采样（GetProcessMemoryInfo /
+// GetProcessTimes 差分）——supervisor 每 5s 采样收敛（`02 §5 K-8`）。
+#[cfg(windows)]
+pub use win::system::{
+    battery_status, process_load_from_deltas, process_memory_bytes, BatteryState, CpuLoadSampler,
+    ProcCpuSampler,
+};

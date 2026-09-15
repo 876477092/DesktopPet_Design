@@ -92,6 +92,85 @@ pub fn last_input_idle_ms() -> Option<u64> {
     imp::last_input_idle_ms()
 }
 
+/// 当前进程内存占用（PrivateUsage，字节；`GetProcessMemoryInfo`）。
+///
+/// **S6-M1（T-16 段 · 上）**：`metrics` 的 `mem` 真源 + `check-mem.ps1` 同口径
+/// （AC-40 峰值 ≤209MB / 红线 250MB / 告警 200MB，`02 §10.2 R12`）。
+/// 失败（API 不可用）返回 `None`，由上层按「未知」跳过（`02 §7.4.2`）。
+pub fn process_memory_bytes() -> Option<u64> {
+    imp::process_memory_bytes()
+}
+
+/// 当前进程 CPU 占用采样器（`GetProcessTimes` 两次差分；**首次采样返回 `None`** 建基线）。
+///
+/// **S6-M1（T-16 段 · 上）**：输出为**单核归一百分比**（如任务管理器「CPU」列）——
+/// `proc_time_delta / (墙钟差分 × 逻辑核心数) × 100`，与 AC-01「空闲 ≤3%、动画 ≤8%」
+/// 同口径（0.0 为 0%，1.0 为占满 1 核）。差分以 100ns FILETIME 计数 `wrapping_sub` 处理回绕。
+#[derive(Clone, Copy, Debug)]
+pub struct ProcCpuSampler {
+    /// 上次采样进程（kernel + user）计数（100ns）。
+    prev_proc: u64,
+    /// 上次采样墙钟（Instant，单调）。
+    prev_wall: std::time::Instant,
+    /// 逻辑核心数（`available_parallelism` 兜底 1）。
+    cores: u32,
+    /// 是否已建立基线。
+    has_prev: bool,
+}
+
+impl ProcCpuSampler {
+    /// 构造空采样器（无基线；首次 `sample` 仅建立基线并返回 `None`）。
+    #[must_use]
+    pub fn new() -> Self {
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(1)
+            .max(1);
+        Self { prev_proc: 0, prev_wall: std::time::Instant::now(), cores, has_prev: false }
+    }
+
+    /// 采样进程 CPU 占用（%，单核归一）。
+    ///
+    /// 首次调用返回 `None`（建立基线）；进程时间未前进（本次采样与上次零间隔）
+    /// 返回 `None` 并重置基线；其余返回差分 CPU 或差分非法（防御）时的 `None`。
+    pub fn sample(&mut self) -> Option<f32> {
+        let proc = imp::process_times_100ns()?;
+        let wall = std::time::Instant::now();
+        if !self.has_prev {
+            self.prev_proc = proc;
+            self.prev_wall = wall;
+            self.has_prev = true;
+            return None;
+        }
+        let proc_d = proc.wrapping_sub(self.prev_proc);
+        let wall_d = wall.saturating_duration_since(self.prev_wall);
+        self.prev_proc = proc;
+        self.prev_wall = wall;
+        process_load_from_deltas(proc_d, wall_d, self.cores)
+    }
+}
+
+impl Default for ProcCpuSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 进程差分 → CPU 占用纯函数（单测入口）：
+/// `proc_100ns / (wall_ns / 100 × cores) × 100`。
+///
+/// 防御：`wall` 为零 / `proc_d == 0` 时返回 `None`（无有效差分）。
+#[must_use]
+pub fn process_load_from_deltas(proc_100ns: u64, wall: std::time::Duration, cores: u32) -> Option<f32> {
+    let wall_100ns = wall.as_nanos() as u64 / 100;
+    if wall_100ns == 0 || proc_100ns == 0 {
+        return None;
+    }
+    // 进程时间可能 > 墙钟×核数（多线程满载瞬时）→ 钳到 100%（单核口径上限）。
+    let raw = proc_100ns as f64 / (wall_100ns as f64 * cores.max(1) as f64) * 100.0;
+    Some(raw.min(100.0) as f32)
+}
+
 // ---------------------------------------------------------------------------
 // Windows 实装
 // ---------------------------------------------------------------------------
@@ -148,6 +227,50 @@ mod imp {
         ))
     }
 
+    /// 当前进程内存占用（PrivateUsage，字节）。
+    ///
+    /// **S6-M1**：`GetProcessMemoryInfo`（Psapi，`Win32_System_ProcessStatus` feature
+    /// 已在 workspace `Cargo.toml` 最小集中显式登记，见依赖理由注释）。
+    pub(super) fn process_memory_bytes() -> Option<u64> {
+        use windows::Win32::System::ProcessStatus::{
+            GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+        };
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        // `PROCESS_MEMORY_COUNTERS_EX`（扩展结构，基结构为其前缀）才含 `PrivateUsage`
+        // （进程私有提交内存，AC-40 口径）。SDK 层面 `GetProcessMemoryInfo` 以 cb
+        // 决定填充量，EX 变体可经指针转换传入（基结构前缀兼容，布局合法）。
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX::default();
+        let cb = core::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        // Safety：`counters` 为本函数持有的合法输出缓冲，cb 按 EX 尺寸填充；
+        // `GetCurrentProcess` 返回伪句柄，无需关闭。
+        let ptr = &mut counters as *mut PROCESS_MEMORY_COUNTERS_EX as *mut PROCESS_MEMORY_COUNTERS;
+        unsafe { GetProcessMemoryInfo(GetCurrentProcess(), ptr, cb) }.ok()?;
+        Some(counters.PrivateUsage as u64)
+    }
+
+    /// 当前进程 CPU 时间（kernel + user，100ns 计数；`GetProcessTimes`）。
+    pub(super) fn process_times_100ns() -> Option<u64> {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let (c_ptr, e_ptr, k_ptr, u_ptr) =
+            (&mut creation, &mut exit, &mut kernel, &mut user);
+        // Safety：四个 FILETIME 均为本函数持有的合法输出缓冲；失败（Err）按 `None` 跳过。
+        unsafe {
+            GetProcessTimes(
+                GetCurrentProcess(),
+                c_ptr,
+                e_ptr,
+                k_ptr,
+                u_ptr,
+            )
+        }
+        .ok()?;
+        Some(filetime_u64(&kernel).wrapping_add(filetime_u64(&user)))
+    }
+
     /// FILETIME 高低位拼合 → u64（100ns 计数）。
     fn filetime_u64(ft: &FILETIME) -> u64 {
         ((ft.dwHighDateTime as u64) << 32) | ft.dwLowDateTime as u64
@@ -186,6 +309,16 @@ mod imp {
 
     /// 非 Windows 目标不提供系统采样。
     pub(super) fn last_input_idle_ms() -> Option<u64> {
+        None
+    }
+
+    /// 非 Windows 目标不提供进程内存采样。
+    pub(super) fn process_memory_bytes() -> Option<u64> {
+        None
+    }
+
+    /// 非 Windows 目标不提供进程 CPU 采样。
+    pub(super) fn process_times_100ns() -> Option<u64> {
         None
     }
 }
@@ -233,5 +366,46 @@ mod tests {
         assert!(!sampler.has_prev, "构造后无基线（首次 sample 仅建立基线）");
         assert_eq!(sampler.prev_idle, 0);
         assert_eq!(sampler.prev_total, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // S6-M1：进程 CPU 差分纯函数（`process_load_from_deltas`）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn process_load_one_core_full_uses_one_core() {
+        // 1 核：100ms 墙钟内进程消耗 100ms → 100%。
+        let load = process_load_from_deltas(1_000_000, std::time::Duration::from_millis(100), 1)
+            .unwrap();
+        assert!((load - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn process_load_normalized_by_cores() {
+        // 4 核：100ms 墙钟内进程消耗 100ms → 25%。
+        let load = process_load_from_deltas(1_000_000, std::time::Duration::from_millis(100), 4)
+            .unwrap();
+        assert!((load - 25.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn process_load_clamped_at_100_percent() {
+        // 1 核：100ms 墙钟内进程消耗 200ms（多线程瞬时）→ 钳到 100%。
+        let load = process_load_from_deltas(2_000_000, std::time::Duration::from_millis(100), 1)
+            .unwrap();
+        assert!((load - 100.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn process_load_zero_wall_is_none() {
+        assert!(process_load_from_deltas(1_000_000, std::time::Duration::ZERO, 1).is_none());
+        assert!(process_load_from_deltas(0, std::time::Duration::from_millis(100), 1).is_none());
+    }
+
+    #[test]
+    fn proc_cpu_sampler_new_starts_without_baseline() {
+        let sampler = ProcCpuSampler::new();
+        assert!(!sampler.has_prev, "构造后无基线");
+        assert!(sampler.cores >= 1);
     }
 }

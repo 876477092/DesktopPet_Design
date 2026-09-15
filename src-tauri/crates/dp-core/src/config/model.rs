@@ -1161,7 +1161,7 @@ fn default_coupling_rules() -> Vec<CouplingRuleCfg> {
 // animation.json —— 缓动 / 物理 / 微动 / 呼吸 / 眨眼（`02 §5.22` / §5.20）
 // ---------------------------------------------------------------------------
 
-/// `animation.json` 根：缓动、物理、微动、呼吸、眨眼、视线、挤压、粒子。
+/// `animation.json` 根：缓动、物理、微动、呼吸、眨眼、视线、挤压、粒子、性能降级。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1186,6 +1186,8 @@ pub struct AnimationConfig {
     pub squash: SquashCfg,
     /// 粒子。
     pub particles: ParticlesCfg,
+    /// 性能降级策略（**S6-M1**；K-8 / R12，见 [`DegradeCfg`]）。
+    pub degrade: DegradeCfg,
 }
 
 impl Default for AnimationConfig {
@@ -1201,7 +1203,111 @@ impl Default for AnimationConfig {
             gaze: GazeCfg::default(),
             squash: SquashCfg::default(),
             particles: ParticlesCfg::default(),
+            degrade: DegradeCfg::default(),
         }
+    }
+}
+
+/// 性能降级策略（**S6-M1**，`02 §5 K-8` / §10.2 R12 / §5 K-4；`animation.json` `degrade` 段）。
+///
+/// 数值口径（与 K-8 / R12 逐项对应）：
+///   - `memory.warnMb` **200**：>200MB 卸载换装插槽纹理与粒子图集、`physics.level=primaryOnly`；
+///   - `memory.hardMb` **225**：>225MB 切 FrameRenderer + 图集 LRU 压到 `lruMb`（32）；
+///   - `memory.recoverMb` **170**：低于该值回退正常档（滞回防抖）；
+///   - `cpu.highPercent` / `holdTicks`：CPU 高负载（tick = 5s 采样窗）——**本期仅度量**，
+///     降帧触发由 K-4 场景表（全屏/电池/隐身）承担，CPU 不作为独立降帧源（`03 S6-M1` 卡片）；
+///   - `fps.fullscreen` **4**（K-4 省电档）、`fps.battery` **15**（K-8 电池放电上限）、
+///     `fps.hidden` **4**（隐身 / 非前台降帧）。
+///
+/// `slotUnload` / `physicsPrimaryOnly` 为动作开关（默认开）；执行层归 S9/S7。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DegradeCfg {
+    /// 内存分级阈值（K-8 / R12）。
+    pub memory: DegradeMemoryCfg,
+    /// CPU 高负载度量阈值（仅度量，见模块注释）。
+    pub cpu: DegradeCpuCfg,
+    /// 降帧档位（fps，须为 K-4 登记档位）。
+    pub fps: DegradeFpsCfg,
+    /// >200MB 时卸载换装插槽纹理与粒子图集（执行归 S9）。
+    pub slot_unload: bool,
+    /// >200MB 时 `physics.level=primaryOnly`（执行归 S7/S9）。
+    pub physics_primary_only: bool,
+}
+
+impl Default for DegradeCfg {
+    fn default() -> Self {
+        Self {
+            memory: DegradeMemoryCfg::default(),
+            cpu: DegradeCpuCfg::default(),
+            fps: DegradeFpsCfg::default(),
+            slot_unload: true,
+            physics_primary_only: true,
+        }
+    }
+}
+
+/// 内存分级（K-8 / R12：告警 200、硬阈值 225、恢复 170、LRU 32MB）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DegradeMemoryCfg {
+    /// 告警阈值（MB）：> 200 卸插槽纹理 + 物理主档。
+    pub warn_mb: u32,
+    /// 硬阈值（MB）：> 225 切 FrameRenderer + LRU 压到 `lru_mb`。
+    pub hard_mb: u32,
+    /// 恢复阈值（MB）：< 170 回退正常档。
+    pub recover_mb: u32,
+    /// 硬阈值档图集 LRU 上限（MB）。
+    pub lru_mb: u32,
+}
+
+impl Default for DegradeMemoryCfg {
+    fn default() -> Self {
+        Self { warn_mb: 200, hard_mb: 225, recover_mb: 170, lru_mb: 32 }
+    }
+}
+
+/// CPU 度量阈值（tick = 5s 采样窗；**本期仅度量**，`pet://perf.cpu` + 巡检断言）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DegradeCpuCfg {
+    /// 高负载判定线（%）：AC-01 动画 ≤8% 之上留余量，作日志/巡检参考。
+    pub high_percent: u32,
+    /// 高负载保持 tick 数（预留；本期不触发降帧）。
+    pub hold_ticks: u32,
+    /// 恢复判定线（%）。
+    pub recover_percent: u32,
+    /// 恢复保持 tick 数（预留）。
+    pub recover_ticks: u32,
+}
+
+impl Default for DegradeCpuCfg {
+    fn default() -> Self {
+        Self { high_percent: 60, hold_ticks: 2, recover_percent: 40, recover_ticks: 4 }
+    }
+}
+
+/// 降帧档位（fps；须为 [`crate::anim::FpsTier`] 登记档位：4 / 15）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct DegradeFpsCfg {
+    /// 前台全屏 → 省电档 4fps（K-4）。
+    pub fullscreen: u32,
+    /// 电池放电 → fps 上限 15（K-8）。
+    pub battery: u32,
+    /// 隐身 / 非前台 → 省电档 4fps。
+    pub hidden: u32,
+    /// 高 CPU 负载 → 15fps（预留；本期仅度量，见 `DegradeCpuCfg`）。
+    pub high_load: u32,
+}
+
+impl Default for DegradeFpsCfg {
+    fn default() -> Self {
+        Self { fullscreen: 4, battery: 15, hidden: 4, high_load: 15 }
     }
 }
 

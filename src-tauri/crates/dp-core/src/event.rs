@@ -66,6 +66,13 @@ pub const EVENT_BUBBLE: &str = "pet://bubble";
 /// C8 说明：与 `EVENT_BUBBLE` 同口径——**不新增事件名**，只补生产者 + 冻结载荷字段。
 pub const EVENT_CONFIG: &str = "pet://config";
 
+/// `pet://perf` 事件名（`02 §7.6`：core → 设置窗口，载荷 `metrics::PerfWire`
+/// `{fps,cpu,mem,level}`，5s 周期；**S6-M1 起启用**）。
+///
+/// C8 说明：事件名早已登记（骨架期 `02 §7.6`），本卡只补齐 Rust 侧生产者
+/// （`metrics::PerfWire`，见 `metrics.rs`），**不新增事件名**。
+pub const EVENT_PERF: &str = "pet://perf";
+
 /// `CoaxWire` 载荷版本（v1；与前端 `COAX_CMD_VERSION` 同源）。
 pub const COAX_CMD_VERSION: u32 = 1;
 

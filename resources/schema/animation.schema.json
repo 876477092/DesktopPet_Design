@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "AnimationConfig",
-  "description": "`animation.json` 根：缓动、物理、微动、呼吸、眨眼、视线、挤压、粒子。",
+  "description": "`animation.json` 根：缓动、物理、微动、呼吸、眨眼、视线、挤压、粒子、性能降级。",
   "type": "object",
   "properties": {
     "blink": {
@@ -40,6 +40,36 @@
       "allOf": [
         {
           "$ref": "#/definitions/BreathCfg"
+        }
+      ]
+    },
+    "degrade": {
+      "description": "性能降级策略（**S6-M1**；K-8 / R12，见 [`DegradeCfg`]）。",
+      "default": {
+        "cpu": {
+          "highPercent": 60,
+          "holdTicks": 2,
+          "recoverPercent": 40,
+          "recoverTicks": 4
+        },
+        "fps": {
+          "battery": 15,
+          "fullscreen": 4,
+          "hidden": 4,
+          "highLoad": 15
+        },
+        "memory": {
+          "hardMb": 225,
+          "lruMb": 32,
+          "recoverMb": 170,
+          "warnMb": 200
+        },
+        "physicsPrimaryOnly": true,
+        "slotUnload": true
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/DegradeCfg"
         }
       ]
     },
@@ -313,6 +343,166 @@
           "default": 5.0,
           "type": "number",
           "format": "float"
+        }
+      }
+    },
+    "DegradeCfg": {
+      "description": "性能降级策略（**S6-M1**，`02 §5 K-8` / §10.2 R12 / §5 K-4；`animation.json` `degrade` 段）。\n\n数值口径（与 K-8 / R12 逐项对应）： - `memory.warnMb` **200**：>200MB 卸载换装插槽纹理与粒子图集、`physics.level=primaryOnly`； - `memory.hardMb` **225**：>225MB 切 FrameRenderer + 图集 LRU 压到 `lruMb`（32）； - `memory.recoverMb` **170**：低于该值回退正常档（滞回防抖）； - `cpu.highPercent` / `holdTicks`：CPU 高负载（tick = 5s 采样窗）——**本期仅度量**， 降帧触发由 K-4 场景表（全屏/电池/隐身）承担，CPU 不作为独立降帧源（`03 S6-M1` 卡片）； - `fps.fullscreen` **4**（K-4 省电档）、`fps.battery` **15**（K-8 电池放电上限）、 `fps.hidden` **4**（隐身 / 非前台降帧）。\n\n`slotUnload` / `physicsPrimaryOnly` 为动作开关（默认开）；执行层归 S9/S7。",
+      "type": "object",
+      "properties": {
+        "cpu": {
+          "description": "CPU 高负载度量阈值（仅度量，见模块注释）。",
+          "default": {
+            "highPercent": 60,
+            "holdTicks": 2,
+            "recoverPercent": 40,
+            "recoverTicks": 4
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/DegradeCpuCfg"
+            }
+          ]
+        },
+        "fps": {
+          "description": "降帧档位（fps，须为 K-4 登记档位）。",
+          "default": {
+            "battery": 15,
+            "fullscreen": 4,
+            "hidden": 4,
+            "highLoad": 15
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/DegradeFpsCfg"
+            }
+          ]
+        },
+        "memory": {
+          "description": "内存分级阈值（K-8 / R12）。",
+          "default": {
+            "hardMb": 225,
+            "lruMb": 32,
+            "recoverMb": 170,
+            "warnMb": 200
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/DegradeMemoryCfg"
+            }
+          ]
+        },
+        "physicsPrimaryOnly": {
+          "description": ">200MB 时 `physics.level=primaryOnly`（执行归 S7/S9）。",
+          "default": true,
+          "type": "boolean"
+        },
+        "slotUnload": {
+          "description": ">200MB 时卸载换装插槽纹理与粒子图集（执行归 S9）。",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "DegradeCpuCfg": {
+      "description": "CPU 度量阈值（tick = 5s 采样窗；**本期仅度量**，`pet://perf.cpu` + 巡检断言）。",
+      "type": "object",
+      "properties": {
+        "highPercent": {
+          "description": "高负载判定线（%）：AC-01 动画 ≤8% 之上留余量，作日志/巡检参考。",
+          "default": 60,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "holdTicks": {
+          "description": "高负载保持 tick 数（预留；本期不触发降帧）。",
+          "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "recoverPercent": {
+          "description": "恢复判定线（%）。",
+          "default": 40,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "recoverTicks": {
+          "description": "恢复保持 tick 数（预留）。",
+          "default": 4,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DegradeFpsCfg": {
+      "description": "降帧档位（fps；须为 [`crate::anim::FpsTier`] 登记档位：4 / 15）。",
+      "type": "object",
+      "properties": {
+        "battery": {
+          "description": "电池放电 → fps 上限 15（K-8）。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "fullscreen": {
+          "description": "前台全屏 → 省电档 4fps（K-4）。",
+          "default": 4,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "hidden": {
+          "description": "隐身 / 非前台 → 省电档 4fps。",
+          "default": 4,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "highLoad": {
+          "description": "高 CPU 负载 → 15fps（预留；本期仅度量，见 `DegradeCpuCfg`）。",
+          "default": 15,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "DegradeMemoryCfg": {
+      "description": "内存分级（K-8 / R12：告警 200、硬阈值 225、恢复 170、LRU 32MB）。",
+      "type": "object",
+      "properties": {
+        "hardMb": {
+          "description": "硬阈值（MB）：> 225 切 FrameRenderer + LRU 压到 `lru_mb`。",
+          "default": 225,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "lruMb": {
+          "description": "硬阈值档图集 LRU 上限（MB）。",
+          "default": 32,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "recoverMb": {
+          "description": "恢复阈值（MB）：< 170 回退正常档。",
+          "default": 170,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "warnMb": {
+          "description": "告警阈值（MB）：> 200 卸插槽纹理 + 物理主档。",
+          "default": 200,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
         }
       }
     },

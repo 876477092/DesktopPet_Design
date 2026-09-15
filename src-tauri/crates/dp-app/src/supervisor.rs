@@ -1,6 +1,6 @@
-//! `dp-app` 窗口自检与显示变更监督线程（S1-M4，T-02 段 · 下）。
+//! `dp-app` 窗口自检与显示变更监督线程（S1-M4，T-02 段 · 下；**S6-M1/M2 扩充**）。
 //!
-//! 职责（**仅此三项**，其余一律不在此模块）：
+//! 职责（仅此五项，其余一律不在此模块）：
 //!   1. **30s 自检**（`02 §5 K-1`「30s 自检重设」，风险 R1）：每 30 tick（≈30s）调用
 //!      [`dp_platform::WinPlatformWindow::self_check`] 补回扩展样式位 / 置顶位，并把结果经
 //!      `pet://window/selfcheck` 广播；失败计数累加入日志。
@@ -9,9 +9,17 @@
 //!      保证拔屏后窗口 ≤2s 内迁到剩余屏。
 //!   3. **全屏轮询调度**：每 tick 调 [`dp_platform::WinPlatformWindow::poll_fullscreen`]，
 //!      驱动 `BelowFullscreen` 三态的隐藏 / 恢复（`02 §5 K-1`）。
-//!
-//! ⚠️ **范围边界**：渲染异常自愈（5s 帧回执看门狗）与优雅退出属**后续模块**，
-//! **不在本模块范围**。
+//!   4. **性能度量与降级**（S6-M1，T-16 段 · 上）：每 5 tick（≈5s）采样
+//!      内存（`GetProcessMemoryInfo`）/ CPU（`GetProcessTimes` 差分）/ 帧率
+//!      （`FrameWatchdog` 发布计数差分）→ [`dp_core::metrics::DegradeController`] 决策
+//!      （K-8：>200MB 卸插槽纹理、>225MB 切 FrameRenderer+LRU 32MB、全屏/隐身/电池降帧）
+//!      → 应用档位（`FrameTierHandle`）→ 发射 `pet://perf`（`02 §7.6`：`{fps,cpu,mem,level}`，5s）。
+//!   5. **渲染自愈与存档主动提示**（S6-M2，T-16 段 · 下）：每 5 tick 采样
+//!      「最近 5s 是否有帧回执」（`FrameWatchdog` 计数差分），连续 3 次无回执 →
+//!      ① 阻塞落盘（`CoreInput::FlushSave` + 3s 回执超时）；② 重建宠物 WebView 渲染器
+//!      （`reload()`，WebView2 渲染器重建，不重建进程、不丢状态）；③ 连续 3 次自愈失败 →
+//!      托盘气泡 + `app.restart()`。另：启动后按 `SaveStatusHandle.needs_notice`
+//!      托盘气泡提示存档异常（AC-14「损坏档并提示」收口）。
 //!
 //! ⚠️ **本文件自门禁 Windows 目标**：内部引用 `crate::PetPlatform`（`#[cfg(windows)]`），
 //! 故以 `#![cfg(windows)]` 自门禁；装配方（`lib.rs`，阶段 2）只需 `pub mod supervisor;`
@@ -22,17 +30,21 @@
 //! `now_ms = start.elapsed().as_millis()`。**严禁** `SystemTime` / `Utc::now()` 之类裸读墙钟——
 //! 墙钟会被 NTP 校时 / 用户改表 / DST 拨动，导致迟滞状态机的 `now_ms` 回跳或跳跃。
 //! `Instant` 单调不减，满足全屏迟滞（`RESTORE_DELAY_MS`）与 tick 计数的稳定推进。
+//! 降级策略的滞回同样**只用 tick 计数**（`dp_core::metrics` 纯逻辑，零时钟）。
 //!
 //! ## 跨模块硬约束
 //! 事件 `pet://window/selfcheck`（`{ok, missing_ex_style, tick}`）为 S1-M4 新增，已登记于
 //! `02 §7.6`。载荷用元组 `(bool, u32, u64)` 直出，**不新增 `serde` 直接依赖**
-//! （避免改动 `Cargo.toml`）。
+//! （避免改动 `Cargo.toml`）。`pet://perf`（S6-M1）事件名早已登记 `02 §7.6`，
+//! 载荷为 `dp_core::metrics::PerfWire`（序列化后 emit），同样零新增依赖。
 
 #![cfg(windows)]
 
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use dp_core::config::DegradeCfg;
+use dp_core::metrics::{DegradeController, DegradeEnv};
 use dp_platform::{MonitorInfo, WatchAction};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -50,6 +62,20 @@ pub const SELF_CHECK_EVERY_TICKS: u64 = 30;
 
 /// 自检事件名（`02 §7.6`）。
 pub const SELFCHECK_EVENT: &str = "pet://window/selfcheck";
+
+/// S6-M1/M2：性能采样与看门狗采样间隔（tick 数）——每 5 tick ≈ 5s
+/// （`02 §7.6` `pet://perf` 频率；K-8 看门狗采样窗同为 5s）。
+pub const PERF_EVERY_TICKS: u64 = 5;
+
+/// S6-M2：渲染看门狗判定阈值——连续 3 次（每次 5s）有帧发但无回执 → 自愈（K-8）。
+pub const WATCHDOG_MISS_LIMIT: u32 = 3;
+
+/// S6-M2：自愈失败阈值——连续 3 次自愈失败 → 重启进程 + 托盘提示（K-8）。
+pub const HEAL_FAIL_LIMIT: u32 = 3;
+
+/// S6-M2：阻塞落盘等待超时（core-loop 收到 `FlushSave` 后立即落盘，3s 极宽裕；
+/// 超时仅防死等，不阻断自愈）。
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// 显示器拓扑是否发生变化（纯函数，单测覆盖）。
 ///
@@ -104,6 +130,17 @@ fn run_loop(app: AppHandle) {
     let mut tick: u64 = 0;
     let mut ticks_since_self_check: u64 = 0;
     let mut fail_count: u64 = 0;
+
+    // S6-M1：性能采样与降级状态（每 5 tick 收敛一次；CPU 采样器持上次差分点）。
+    let mut perf_tick: u64 = 0;
+    let mut cpu_sampler = dp_platform::ProcCpuSampler::new();
+    let mut controller = DegradeController::new();
+    let degrade_cfg = degrade_cfg(&app);
+
+    // S6-M2：渲染看门狗状态（prev 计数 + 连续未回执次数 + 自愈失败次数）。
+    let mut watchdog = WatchdogState::default();
+    // AC-14 收口：存档异常「托盘气泡主动提示」只提示一次（启动后首次就绪时）。
+    let mut save_notice_shown = false;
 
     loop {
         tick = tick.wrapping_add(1);
@@ -179,11 +216,284 @@ fn run_loop(app: AppHandle) {
                 ticks_since_self_check = 0;
                 periodic_self_check(pet, &app, tick, &mut fail_count);
             }
+
+            // ④' S6-M2（AC-14 收口）：存档异常主动提示——core-loop 载档后写
+            // `SaveStatusHandle`，`needs_notice=true`（损坏隔离 / 备份恢复 / 未来档）
+            // 时托盘气泡提示一次（日志版已在 coreloop::log_save_outcome，S6-M2 补
+            // 用户可见面）。状态就绪后置 `save_notice_shown`，不重复弹。
+            if !save_notice_shown {
+                if let Some(status) = app.try_state::<crate::bridge::SaveStatusHandle>() {
+                    let info = status.get();
+                    if info.state != "unknown" {
+                        save_notice_shown = true;
+                        if info.needs_notice {
+                            show_save_notice(&app, &info.state);
+                        }
+                    }
+                }
+            }
+
+            // ⑤ S6-M1/M2：性能度量 + 降级 + 发射 `pet://perf` + 渲染看门狗自愈
+            // （每 5 tick ≈ 5s；K-8 采样窗）。
+            perf_tick = perf_tick.wrapping_add(1);
+            if perf_tick >= PERF_EVERY_TICKS {
+                perf_tick = 0;
+                perf_and_watchdog_tick(
+                    pet, &app, &mut cpu_sampler, &mut controller, &degrade_cfg, &mut watchdog,
+                );
+            }
         }
 
         // 绝对锚定：睡到本 tick 的 deadline（消除过冲累加漂移）；越过 deadline 则直接进入下一轮。
         sleep_until_tick(start, tick);
     }
+}
+
+/// S6-M2：渲染看门狗状态机（计数差分采样，纯内存无时钟）。
+#[derive(Debug, Default)]
+struct WatchdogState {
+    /// 上次采样的「已发布帧」计数（`FrameWatchdog` 全局计数差分用）。
+    prev_sent: u64,
+    /// 上次采样的「已回执帧」计数。
+    prev_acked: u64,
+    /// 连续「有帧发但无回执」的采样窗数。
+    miss: u32,
+    /// 连续自愈失败次数（回执恢复后清零）。
+    heal_fail: u32,
+}
+
+/// 读取降级策略配置：`animation.json.degrade`（经与 bridge 同源的配置目录候选链），
+/// 读取 / 解析失败降级为 `DegradeCfg::default()`（与 animation.json 同源，`02 §5 K-8`）。
+fn degrade_cfg(app: &AppHandle) -> DegradeCfg {
+    use std::path::Path;
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(root) = app.path().resource_dir() {
+        candidates.push(root.join("resources").join("config"));
+        candidates.push(root.join("config"));
+    }
+    candidates.push(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .join("resources")
+            .join("config"),
+    );
+    for dir in candidates {
+        if !dir.join("actions.json").is_file() {
+            continue;
+        }
+        return match dp_core::config::ConfigService::load_all(&dir) {
+            Ok((bundle, _warnings)) => bundle.animation.degrade,
+            Err(err) => {
+                eprintln!("[dp-app] supervisor 读取 animation.json.degrade 降级为默认：{err}");
+                DegradeCfg::default()
+            }
+        };
+    }
+    DegradeCfg::default()
+}
+
+/// S6-M1/M2：单个采样窗（≈5s）的度量 → 降级 → 发射 + 渲染看门狗判定。
+fn perf_and_watchdog_tick(
+    pet: &crate::PetPlatform,
+    app: &AppHandle,
+    cpu_sampler: &mut dp_platform::ProcCpuSampler,
+    controller: &mut DegradeController,
+    cfg: &DegradeCfg,
+    watchdog: &mut WatchdogState,
+) {
+    // —— 度量（S6-M1；进程内存/CPU 采样失败降级为 0，不阻断）——
+    let mem_mb = dp_platform::process_memory_bytes()
+        .map(|b| b as f32 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+    let cpu = cpu_sampler.sample().unwrap_or(0.0);
+    let (sent, acked) = app
+        .try_state::<crate::bridge::FrameWatchdog>()
+        .map(|w| w.sample())
+        .unwrap_or((0, 0));
+    let sent_delta = sent.saturating_sub(watchdog.prev_sent);
+    let acked_delta = acked.saturating_sub(watchdog.prev_acked);
+    watchdog.prev_sent = sent;
+    watchdog.prev_acked = acked;
+    // 帧率 = 本窗发布帧数 / 窗长 5s（发射口径，`02 §7.6`：fps）。
+    let fps = sent_delta as f32 / PERF_EVERY_TICKS as f32;
+
+    // —— 降级（S6-M1；优先级 全屏/隐身 > 电池 > 内存，K-8）——
+    let fullscreen = pet.window.is_hidden_for_fullscreen();
+    let hidden = fullscreen || !pet_window_visible(app);
+    let battery = dp_platform::battery_status()
+        .map(|b| !b.charging)
+        .unwrap_or(false);
+    let env = DegradeEnv {
+        mem_mb,
+        fullscreen,
+        hidden,
+        battery,
+    };
+    let decision = controller.decide(&env, cfg);
+    if let Some(tier) = decision.tier_override {
+        if let Some(tier_handle) = app.try_state::<crate::bridge::FrameTierHandle>() {
+            let current = tier_handle.get();
+            if current != tier {
+                eprintln!(
+                    "[dp-app] supervisor 降帧切档：{:?} → {:?}（level={:?}）",
+                    current, tier, decision.level
+                );
+                tier_handle.set(tier);
+            }
+        }
+    }
+    // 动作只记决策（`UnloadSlotTextures`/`PhysicsPrimaryOnly`/`FrameRendererLru` 的
+    // **执行**归 S9 渲染后端；S6-M1 卡边界：不改渲染后端）。
+    if !decision.actions.is_empty() {
+        eprintln!(
+            "[dp-app] supervisor 降级动作决策（执行归 S9）：{:?}",
+            decision.actions
+        );
+    }
+
+    // —— 发射 `pet://perf`（`02 §7.6`：{fps,cpu,mem,level}，5s）——
+    let sample = dp_core::metrics::PerfSample { fps, cpu, mem_mb };
+    let wire = dp_core::metrics::PerfWire::from_sample(&sample, decision.level);
+    if let Err(err) = app.emit(dp_core::event::EVENT_PERF, &wire) {
+        eprintln!(
+            "[dp-app] supervisor 广播 {} 降级：{err}",
+            dp_core::event::EVENT_PERF
+        );
+    }
+
+    // —— 渲染看门狗（S6-M2，K-8：连续 3 次 5s 窗「有帧发无回执」→ 自愈）——
+    match watchdog_step(sent_delta, acked_delta, watchdog) {
+        WatchdogStep::None => {}
+        WatchdogStep::Heal => self_heal_renderer(app),
+        WatchdogStep::Restart => {
+            eprintln!(
+                "[dp-app] supervisor 连续 {HEAL_FAIL_LIMIT} 次自愈失败：重启进程 + 托盘提示"
+            );
+            show_tray_balloon(
+                app,
+                "桌面宠物渲染异常",
+                "连续多次自动恢复失败，正在重启桌面宠物…",
+            );
+            app.restart();
+        }
+    }
+}
+
+/// S6-M2：渲染看门狗状态机（纯函数，单测覆盖）。
+///
+/// 输入本采样窗（≈5s）的帧发布 / 回执差分与旧状态，输出新状态与动作：
+/// - 本窗无帧发（`sent_delta == 0`）→ 播放器未推帧（无图集/暂停），**不是渲染异常**，
+///   清空连续 miss 并观察；
+/// - 本窗有回执 → 渲染健康；若此前在自愈则计一次成功（`heal_fail` 清零）；
+/// - 本窗有帧发但无回执 → `miss + 1`；连续 [`WATCHDOG_MISS_LIMIT`] 次 →
+///   触发自愈（`Heal`，`heal_fail + 1`）；连续 [`HEAL_FAIL_LIMIT`] 次自愈失败 →
+///   `Restart`（重启进程 + 托盘提示）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchdogStep {
+    /// 观察 / 正常（不动作）。
+    None,
+    /// 触发一次渲染自愈（K-8 步骤①+②）。
+    Heal,
+    /// 连续自愈失败达阈值：重启进程 + 托盘提示。
+    Restart,
+}
+
+#[must_use]
+fn watchdog_step(sent_delta: u64, acked_delta: u64, state: &mut WatchdogState) -> WatchdogStep {
+    if sent_delta == 0 {
+        // 播放器未推帧（无图集 / 暂停中）→ 不是渲染异常，重置 miss 不触发。
+        state.miss = 0;
+        return WatchdogStep::None;
+    }
+    if acked_delta > 0 {
+        // 回执恢复：若此前在自愈，记一次成功并清零失败计数。
+        if state.heal_fail > 0 {
+            eprintln!("[dp-app] supervisor 渲染回执恢复（自愈成功）");
+        }
+        state.miss = 0;
+        state.heal_fail = 0;
+        return WatchdogStep::None;
+    }
+    state.miss = state.miss.saturating_add(1);
+    if state.miss < WATCHDOG_MISS_LIMIT {
+        return WatchdogStep::None;
+    }
+    state.miss = 0;
+    state.heal_fail = state.heal_fail.saturating_add(1);
+    eprintln!(
+        "[dp-app] supervisor 渲染看门狗：连续 {WATCHDOG_MISS_LIMIT} 窗无帧回执 \
+         （sent_delta={sent_delta} acked_delta={acked_delta}），执行自愈 #{}",
+        state.heal_fail
+    );
+    if state.heal_fail >= HEAL_FAIL_LIMIT {
+        WatchdogStep::Restart
+    } else {
+        WatchdogStep::Heal
+    }
+}
+
+/// 宠物窗口当前是否可见（Tauri 查询；失败降级为「可见」，不误触隐身降帧）。
+fn pet_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(crate::PET_WINDOW_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(true)
+}
+
+/// S6-M2：渲染自愈（K-8 步骤①+②）。
+///
+/// ① 阻塞落盘：`CoreInputChannel` 投递 `FlushSave`，等回执 ≤3s——保证「重建渲染前
+/// 存档已落盘」，渲染异常期间**不丢档**（`02 §5 K-8`）。
+/// ② 重建宠物 WebView：以 `webview.reload()` 重建 WebView2 渲染器（官方机制：导航即
+/// 重建渲染器进程，渲染进程已死时自动拉起）。**不重建应用进程、不丢状态**（存档在
+/// Rust 侧，前端纯展示）——稳定 Tauri 2.11 无 `add_child` / `WebviewBuilder::build`
+/// （unstable / crate 私有），全窗口重建需 ExitRequested 守卫 + unsafe 状态置换，
+/// 风险/收益失衡，故采用渲染器级重建（满足 AC「渲染线程已死 → 自动重启渲染且存档不丢」）。
+fn self_heal_renderer(app: &AppHandle) {
+    // ① 阻塞落盘。
+    if let Some(channel) = app.try_state::<crate::bridge::CoreInputChannel>() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        channel.push(crate::bridge::CoreInput::FlushSave { ack: tx });
+        match rx.recv_timeout(FLUSH_TIMEOUT) {
+            Ok(()) => eprintln!("[dp-app] supervisor 自愈前存档已落盘（回执）"),
+            Err(_) => eprintln!(
+                "[dp-app] supervisor 自愈前落盘回执超时（{FLUSH_TIMEOUT:?}），继续自愈"
+            ),
+        }
+    } else {
+        eprintln!("[dp-app] supervisor 自愈：CoreInputChannel 未注册，跳过落盘");
+    }
+
+    // ② 重建渲染器。
+    match app.get_webview_window(crate::PET_WINDOW_LABEL) {
+        Some(webview_window) => match webview_window.reload() {
+            Ok(()) => eprintln!("[dp-app] supervisor 已重建宠物 WebView 渲染器（reload）"),
+            Err(err) => eprintln!("[dp-app] supervisor 重建宠物 WebView 失败：{err}"),
+        },
+        None => eprintln!("[dp-app] supervisor 自愈：宠物窗口不存在，跳过重建"),
+    }
+}
+
+/// 托盘气泡（S6-M2）：宿主窗口取 pet HWND；气泡不可用时降级为日志（`02 §7.4.2`）。
+fn show_tray_balloon(app: &AppHandle, title: &str, body: &str) {
+    let hwnd = app
+        .try_state::<crate::PetPlatform>()
+        .map(|pet| pet.window.hwnd())
+        .unwrap_or(0);
+    if hwnd == 0 || !dp_platform::win::tray_balloon::show_balloon(hwnd, title, body) {
+        eprintln!("[dp-app] supervisor 托盘气泡不可用（降级为日志）：{title} {body}");
+    }
+}
+
+/// S6-M2（AC-14 收口）：存档异常主动提示——`needs_notice` 状态经托盘气泡告知用户
+/// （损坏档已隔离重建 / 备份恢复 / 未来版本档），随后可到设置页「数据」Tab 回捞原档。
+fn show_save_notice(app: &AppHandle, state: &str) {
+    let body = match state {
+        "isolatedCorrupt" => "检测到存档损坏，已隔离并重建默认档；原档可在设置「数据」页回捞",
+        "recoveredFromBak" => "存档主档异常，已从备份自动恢复",
+        "isolatedFuture" => "检测到更高版本存档，已隔离并重建默认档；原档可在设置「数据」页查看",
+        _ => "存档状态异常，请到设置「数据」页查看详情",
+    };
+    show_tray_balloon(app, "桌面宠物存档提示", body);
 }
 
 /// 第 `tick` 个 tick 相对 `start` 的 deadline 偏移（纯函数，单测覆盖）。
@@ -383,5 +693,91 @@ mod tests {
 
         // 极大 tick 不 panic（saturating_mul 防溢出）。
         assert!(tick_offset(u64::MAX) == Duration::from_millis(u64::MAX));
+    }
+
+    // -----------------------------------------------------------------------
+    // S6-M1/M2：常量与看门狗状态机（纯逻辑）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn s6_constants_match_k8_spec() {
+        // K-8：5s 采样窗 / 连续 3 次无回执自愈 / 连续 3 次自愈失败重启。
+        assert_eq!(PERF_EVERY_TICKS, 5);
+        assert_eq!(WATCHDOG_MISS_LIMIT, 3);
+        assert_eq!(HEAL_FAIL_LIMIT, 3);
+    }
+
+    #[test]
+    fn watchdog_healthy_flow_never_heals() {
+        let mut s = WatchdogState::default();
+        // 有帧发且有回执 → 连续观察，无动作。
+        for _ in 0..10 {
+            assert_eq!(watchdog_step(5, 5, &mut s), WatchdogStep::None);
+        }
+        assert_eq!(s.miss, 0);
+        assert_eq!(s.heal_fail, 0);
+    }
+
+    #[test]
+    fn watchdog_no_publish_is_not_anomaly() {
+        let mut s = WatchdogState::default();
+        // 播放器未推帧（无图集/暂停）：sent_delta == 0 → 永远不触发，且清空累积 miss。
+        s.miss = 2;
+        for _ in 0..10 {
+            assert_eq!(watchdog_step(0, 0, &mut s), WatchdogStep::None);
+        }
+        assert_eq!(s.miss, 0, "无推帧应重置 miss，不判渲染异常");
+        assert_eq!(s.heal_fail, 0);
+    }
+
+    #[test]
+    fn watchdog_three_miss_windows_trigger_heal() {
+        let mut s = WatchdogState::default();
+        // 连续 2 窗「有帧发无回执」→ 观察；第 3 窗 → Heal。
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(s.miss, 1);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(s.miss, 2);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::Heal);
+        assert_eq!(s.miss, 0, "触发自愈后 miss 重置");
+        assert_eq!(s.heal_fail, 1);
+    }
+
+    #[test]
+    fn watchdog_receipt_resume_clears_fail_counter() {
+        let mut s = WatchdogState::default();
+        s.miss = 2;
+        s.heal_fail = 1; // 此前已自愈过一次
+        // 回执恢复 → miss 与 heal_fail 全部清零（自愈成功）。
+        assert_eq!(watchdog_step(5, 5, &mut s), WatchdogStep::None);
+        assert_eq!(s.miss, 0);
+        assert_eq!(s.heal_fail, 0);
+    }
+
+    #[test]
+    fn watchdog_three_heal_failures_restart() {
+        let mut s = WatchdogState::default();
+        // 每次自愈 = 连续 3 个无回执窗；3 次自愈失败 → Restart（第 9 个无回执窗）。
+        for heal_idx in 1..=2u32 {
+            assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+            assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+            assert_eq!(
+                watchdog_step(5, 0, &mut s),
+                WatchdogStep::Heal,
+                "第 {heal_idx} 次自愈应在第 3 个无回执窗触发"
+            );
+            assert_eq!(s.heal_fail, heal_idx);
+            assert_eq!(s.miss, 0);
+        }
+        assert_eq!(s.heal_fail, 2);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(
+            watchdog_step(5, 0, &mut s),
+            WatchdogStep::Restart,
+            "连续 3 次自愈失败应触发重启"
+        );
+        assert_eq!(s.heal_fail, 3);
+        assert_eq!(s.miss, 0);
     }
 }

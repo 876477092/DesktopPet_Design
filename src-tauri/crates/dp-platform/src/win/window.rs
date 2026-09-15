@@ -458,6 +458,12 @@ impl WinPlatformWindow {
         self.user_scale.store(safe.to_bits(), Ordering::Relaxed);
     }
 
+    /// 原生窗口句柄值（Win32 `HWND` 指针值；S6-M2 托盘气泡宿主窗口用）。
+    #[must_use]
+    pub fn hwnd(&self) -> isize {
+        self.hwnd.0 as isize
+    }
+
     /// 注册「光标事件开关」回调（Tauri `set_ignore_cursor_events` 侧，穿透双写口径）。
     pub fn set_cursor_events_hook(&self, hook: CursorEventsHook) {
         *self.cursor_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);

@@ -211,6 +211,83 @@ impl FrameTierHandle {
     }
 }
 
+/// S6-M2：帧绘制回执看门狗（`02 §5 K-8` 渲染自愈的计数源）。
+///
+/// 职责：
+///   - `sent`：播放器**每发布一帧** +1（[`publish_frame`] 出口计数）；
+///   - `acked`：前端 `frame_receipt` 命令**每收到一次回执** +1（前端按 ~1s 节流上报，
+///     见 `src/main.ts` S6-M2 段）；
+///   - [`Self::sample`]：supervisor 每 5s 取两计数差分，据此判定「有帧发但无回执」
+///     （渲染线程已死 / 卡死），连续 3 次无回执 → 自愈（见 `supervisor.rs`）。
+///
+/// 进程内状态（非 C8 事件面）；`app.manage` 注册，装配点 `lib.rs`。
+#[derive(Debug, Clone)]
+pub struct FrameWatchdog {
+    /// 累计发布帧数。
+    sent: Arc<AtomicU64>,
+    /// 累计收到回执数。
+    acked: Arc<AtomicU64>,
+}
+
+impl FrameWatchdog {
+    /// 新建看门狗（计数均为 0）。
+    #[must_use]
+    pub fn new() -> Self {
+        Self { sent: Arc::new(AtomicU64::new(0)), acked: Arc::new(AtomicU64::new(0)) }
+    }
+
+    /// 帧发布计数（播放器 publish 出口调用）。
+    pub fn note_sent(&self) {
+        self.sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 前端回执计数（`frame_receipt` 命令调用）。
+    pub fn note_acked(&self) {
+        self.acked.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// 返回自上次采样以来的 `(sent_delta, acked_delta)`（supervisor 每 5s 调用）。
+    #[must_use]
+    pub fn sample(&self) -> (u64, u64) {
+        let sent = self.sent.load(Ordering::Relaxed);
+        let acked = self.acked.load(Ordering::Relaxed);
+        (sent, acked)
+    }
+
+    /// 累计发布帧数（巡检 / 日志）。
+    #[must_use]
+    pub fn sent_total(&self) -> u64 {
+        self.sent.load(Ordering::Relaxed)
+    }
+
+    /// 累计回执数（巡检 / 日志）。
+    #[must_use]
+    pub fn acked_total(&self) -> u64 {
+        self.acked.load(Ordering::Relaxed)
+    }
+}
+
+impl Default for FrameWatchdog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// S6-M2：前端帧绘制回执（`src/main.ts` 每帧渲染成功后节流调用）。
+///
+/// 看门狗计数源（见 [`FrameWatchdog`]）；看门狗未注册时返回 `Err`（前端降级为
+/// 静默跳过，不阻塞帧循环）。
+#[tauri::command]
+pub fn frame_receipt(app: tauri::AppHandle) -> Result<(), String> {
+    match app.try_state::<FrameWatchdog>() {
+        Some(watchdog) => {
+            watchdog.note_acked();
+            Ok(())
+        }
+        None => Err("帧看门狗未注册（S6-M2 装配缺失）".to_string()),
+    }
+}
+
 /// 解析图集目录（`<resource_dir>/resources/atlas`，兼容个别打包形态去掉外层目录；
 /// dev 兜底：工程根 `resources/atlas`（经 `CARGO_MANIFEST_DIR` 相对上溯，C1 无盘符字面量））。
 ///
@@ -352,9 +429,13 @@ pub fn spawn_frame_player(app: AppHandle) -> JoinHandle<()> {
     // → None，播放器维持纯目录序轮播，与既有行为完全一致）。
     let playback = app.try_state::<PlaybackChannel>().map(|c| (*c).clone());
 
+    // S6-M2：帧绘制回执看门狗（装配点 lib.rs 需先 manage 再 spawn；未注册 → None，
+    // 播放器照常发布，仅看门狗无 sent 计数——自愈降级为「不触发」）。
+    let watchdog = app.try_state::<FrameWatchdog>().map(|s| (*s).clone());
+
     match std::thread::Builder::new()
         .name("dp-frame-player".to_string())
-        .spawn(move || run_player_loop(app, items, metas, tier_handle, feed, playback))
+        .spawn(move || run_player_loop(app, items, metas, tier_handle, feed, playback, watchdog))
     {
         Ok(handle) => handle,
         Err(err) => {
@@ -390,6 +471,7 @@ fn run_player_loop(
     tier_handle: FrameTierHandle,
     feed: Option<HitFeed>,
     playback: Option<PlaybackChannel>,
+    watchdog: Option<FrameWatchdog>,
 ) {
     let mut player = ActionPlayer::new(items);
     let mut tier = tier_handle.get();
@@ -469,14 +551,14 @@ fn run_player_loop(
                 mirror: cmd_mirror(item, player.facing()),
                 action_fps: item.fps,
             };
-            publish_frame(&app, &feed, &metas, &frame, tier.fps());
+            publish_frame(&app, &feed, &metas, &frame, tier.fps(), &watchdog);
             continue;
         }
 
         let Some(frame) = player.frame_at(start.elapsed()) else {
             continue;
         };
-        publish_frame(&app, &feed, &metas, &frame, tier.fps());
+        publish_frame(&app, &feed, &metas, &frame, tier.fps(), &watchdog);
     }
 }
 
@@ -488,6 +570,7 @@ fn publish_frame(
     metas: &HashMap<String, dp_assets::atlas::AtlasMeta>,
     frame: &PlayerFrame,
     tier_fps: u32,
+    watchdog: &Option<FrameWatchdog>,
 ) {
     let Some(meta) = metas.get(&frame.action_id) else {
         return;
@@ -500,6 +583,10 @@ fn publish_frame(
     }
     // S5-M4：整体不透明度（`01 FR-7-6`）在**每帧**从原子句柄读取后写入载荷——
     // 这样设置页改透明度后**下一帧**即生效（无需等业务档、无需重建播放器）。
+    // S6-M2：帧发布计数（看门狗 sent 源；未注册 → 静默跳过，自愈不触发）。
+    if let Some(watchdog) = watchdog {
+        watchdog.note_sent();
+    }
     let cmd = RenderFrameCmd {
         alpha: app
             .try_state::<FrameAlpha>()
@@ -806,7 +893,9 @@ pub const CORE_INPUT_CAP: usize = 8;
 ///
 /// 注：`ResetAllData` / `ImportSave` / `Shutdown` **不再 `Copy`**（携带存档文件名 / 补丁）；
 /// 队列本身 clone 语义不变（`VecDeque` 里按值存）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// S6-M2 起 `FlushSave` 携带 `mpsc::Sender`（回执通道）→ 枚举**不再 `Clone` /
+/// `PartialEq` / `Eq`**（`mpsc::Sender` 无相等语义），消费方按值匹配即可。
+#[derive(Debug)]
 pub enum CoreInput {
     /// 设置页「重置情绪」→ `EmotionEngine::force_lower`（`02 §5.23` R18 兜底）。
     ResetEmotion,
@@ -828,6 +917,29 @@ pub enum CoreInput {
     ///
     /// 顺序由 core-loop 保证：`flush_force` 成功（或降级）后才 `app.exit(0)`。
     Shutdown,
+    /// S6-M2 自愈：**阻塞落盘请求**（supervisor 渲染看门狗触发）。
+    ///
+    /// core-loop 收到后立即 `flush_force`（跳过 30s 定时与 2s 合并窗口），随后经
+    /// `ack` 回执；supervisor 等待回执超时 3s（防渲染异常时存档丢失，`02 §5 K-8`）。
+    FlushSave {
+        /// 落盘完成回执（`()` 即成功投递；supervisor 端 `recv_timeout` 等待）。
+        ack: std::sync::mpsc::Sender<()>,
+    },
+}
+
+impl CoreInput {
+    /// 指令判别名（测试 / 日志用；S6-M2 起枚举无 PartialEq，比较一律走 `kind`）。
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            CoreInput::ResetEmotion => "ResetEmotion",
+            CoreInput::RecallRunaway => "RecallRunaway",
+            CoreInput::ResetAllData => "ResetAllData",
+            CoreInput::ImportSave { .. } => "ImportSave",
+            CoreInput::Shutdown => "Shutdown",
+            CoreInput::FlushSave { .. } => "FlushSave",
+        }
+    }
 }
 
 /// 入站指令通道（dp-app 持发送侧视图、core-loop 持消费侧视图，同一 [`Clone`]
@@ -2173,13 +2285,18 @@ mod tests {
         assert_eq!(channel.drain().len(), CORE_INPUT_CAP, "容量恒有界");
         assert!(channel.drain().is_empty(), "排空即清空（幂等）");
 
+        // S6-M2 起 CoreInput 不再 PartialEq（FlushSave 含 mpsc::Sender），
+        // 序断言改用 `kind()` 判别（投递序 = 排空序仍成立）。
         channel.push(CoreInput::RecallRunaway);
         channel.push(CoreInput::ResetEmotion);
-        assert_eq!(
-            channel.drain(),
-            vec![CoreInput::RecallRunaway, CoreInput::ResetEmotion],
-            "投递序 = 排空序"
-        );
+        let kinds: Vec<&str> = channel.drain().iter().map(|i| i.kind()).collect();
+        assert_eq!(kinds, vec!["RecallRunaway", "ResetEmotion"], "投递序 = 排空序");
+
+        // FlushSave 载荷为回执通道：排空后回执仍可发（消费侧按值匹配，不比较相等性）。
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        channel.push(CoreInput::FlushSave { ack: tx });
+        assert_eq!(channel.drain().len(), 1);
+        let _ = rx; // 回执由 core-loop 侧 send；此处仅验证可承载。
     }
 
     #[test]

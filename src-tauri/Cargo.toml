@@ -64,6 +64,12 @@ license = "MIT OR Apache-2.0"
 #   - `tauri-plugin-single-instance`：单实例锁（R17；二次启动唤醒已运行实例）。
 #     **C9 零网络口径**：插件仅用本机命名互斥体 / 窗口消息实现进程互斥与唤醒，
 #     无任何网络面（`cargo tree` 无 reqwest/hyper/tokio-tungstenite 新增分支）。
+# S6-M1（T-16 段 · 上 / K-8 性能度量）新增：
+#   - `Win32_System_ProcessStatus`：`GetProcessMemoryInfo`（进程 PrivateUsage，
+#     `metrics` 的 mem 真源 + AC-40「峰值 ≤209MB / 红线 250MB / 告警 200MB」）。
+#     **C9 零网络口径**：仅调用本机 psapi/kernel32，不触网，capabilities / CSP 不变。
+#   - 进程 CPU（`GetProcessTimes`）走既有 `Win32_System_Threading`，零新增 feature；
+#     托盘气泡（`Shell_NotifyIconW` NIF_INFO）走既有 `Win32_UI_Shell`，零新增 feature。
 # ---------------------------------------------------------------------------
 [workspace.dependencies]
 tauri = { version = "2" }
@@ -102,4 +108,5 @@ windows = { version = "0.61", features = [
     "Win32_System_RemoteDesktop",
     "Win32_System_Registry",
     "Win32_Security",
+    "Win32_System_ProcessStatus",
 ] }

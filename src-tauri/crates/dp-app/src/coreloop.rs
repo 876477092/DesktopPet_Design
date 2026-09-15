@@ -876,6 +876,23 @@ impl CoreLoopState {
                 eprintln!("[dp-app] core-loop 收到特权指令但未走 handle_admin_input 出口，已忽略");
                 Vec::new()
             }
+            // S6-M2 自愈：阻塞落盘请求（supervisor 渲染看门狗触发）。
+            // 立即 `flush_force`（跳过 30s 定时与 2s 合并窗口），完成后回执——
+            // 保证「重建渲染前存档已落盘」，渲染异常时**不丢档**（`02 §5 K-8`）。
+            CoreInput::FlushSave { ack } => {
+                let result = match self.save.as_mut() {
+                    Some(save) => match save.flush_force(now_ms) {
+                        Ok(true) => "已强制落盘".to_string(),
+                        Ok(false) => "落盘被跳过（禁写盘态）".to_string(),
+                        Err(err) => format!("落盘失败（降级继续自愈）：{err}"),
+                    },
+                    None => "存档未装配（无档可落）".to_string(),
+                };
+                eprintln!("[dp-app] core-loop 收到「阻塞落盘」（S6-M2 自愈）：{result}");
+                // 无论落盘结果如何都回执（supervisor 的 3s 超时只防死等，不阻断自愈）。
+                let _ = ack.send(());
+                Vec::new()
+            }
         }
     }
 
@@ -901,7 +918,9 @@ impl CoreLoopState {
         now_mono_ms: u64,
     ) -> bool {
         match input {
-            CoreInput::ResetEmotion | CoreInput::RecallRunaway => false,
+            CoreInput::ResetEmotion | CoreInput::RecallRunaway | CoreInput::FlushSave { .. } => {
+                false
+            }
             CoreInput::ResetAllData => {
                 match self.save.as_mut() {
                     Some(save) => match save.reset_to_default(now_mono_ms) {

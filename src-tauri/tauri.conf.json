@@ -65,9 +65,17 @@
     "category": "Utility",
     "shortDescription": "桌面宠物",
     "longDescription": "桌面宠物（Tauri 2 + WebView2，完全离线的单机桌面宠物）",
+    "licenseFile": "./license.txt",
     "windows": {
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "compression": "lzma",
+        "startMenuFolder": "DesktopPet",
+        "installerHooks": "./installer.nsh"
       }
     }
   }

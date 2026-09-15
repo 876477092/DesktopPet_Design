@@ -18,8 +18,8 @@
 pub mod model;
 
 pub use model::{
-    ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, EmotionConfig, NeedsConfig,
-    ScheduleConfig, SettingsConfig,
+    ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, DegradeCfg, DegradeCpuCfg,
+    DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig, ScheduleConfig, SettingsConfig,
 };
 
 use std::path::Path;
@@ -174,7 +174,7 @@ pub const NEEDS_TOP_FIELDS: &[&str] =
 /// animation.json 顶层字段。
 pub const ANIMATION_TOP_FIELDS: &[&str] = &[
     "version", "easing", "fadeMs", "physics", "micro", "breath", "blink", "gaze", "squash",
-    "particles",
+    "particles", "degrade",
 ];
 /// schedule.json 顶层字段（S5-M5：`01 FR-10` 提醒默认间隔 + 勿扰默认行为）。
 pub const SCHEDULE_TOP_FIELDS: &[&str] = &["version", "reminders", "doNotDisturb"];

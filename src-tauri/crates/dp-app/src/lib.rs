@@ -86,7 +86,9 @@ pub fn run() {
             commands::settings_apply,
             commands::settings_reset_all,
             commands::save_status,
-            commands::save_command
+            commands::save_command,
+            // S6-M2：前端帧绘制回执（渲染看门狗计数源，`02 §5 K-8`）。
+            bridge::frame_receipt
         ]);
 
     // 仅 Windows 落平台窗口层（本项目仅 Windows 目标）。
@@ -116,6 +118,9 @@ pub struct PetPlatform {
 /// 常量放在装配层（`lib.rs`）：它是「窗口尺寸」这一平台概念的单一真源，`dp-core` 的
 /// 运动引擎只处理 VDC 坐标、不关心窗口像素尺寸（`02 §7.2` 坐标系约定）。
 pub const BRIDGE_BASE_LOGICAL_SIZE: u32 = 128;
+
+/// 宠物窗口标签（`tauri.conf.json` `app.windows[0].label`；S6-M2 自愈重建查询用）。
+pub(crate) const PET_WINDOW_LABEL: &str = "pet";
 
 /// 解析音效资源目录（`<resource_dir>/resources/assets/audio` 优先，dev 兜底工程根
 /// 相对路径；**C1：无盘符字面量**，与 [`bridge::resolve_atlas_dir`] 同候选链范式）。
@@ -207,6 +212,11 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
     // S5-M4：渲染帧不透明度句柄（`01 FR-7-6`）——帧播放器每帧读、设置热更新每改即写。
     // 必须在 `bridge::spawn_frame_player` 之前 manage（播放器启动时取用）。
     app.manage(bridge::FrameAlpha::default());
+
+    // S6-M2：帧绘制回执看门狗（`02 §5 K-8`）——播放器每帧 sent、前端 `frame_receipt`
+    // 每回执 acked；supervisor 每 5s 采样判渲染自愈。**必须先 manage 再 spawn 播放器**
+    // （播放器启动时取用句柄；未注册 → 播放器照常发布，仅自愈不触发）。
+    app.manage(bridge::FrameWatchdog::default());
 
     // S5-M4：存档健康状态句柄——由 `coreloop::build_state` 载档时写入，
     // 设置页「数据」Tab 经 `save_status` 命令读取（不新增 `pet://` 事件，见 bridge 文档）。
