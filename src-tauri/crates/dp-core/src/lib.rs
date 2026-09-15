@@ -29,7 +29,13 @@
 //!   - S2-M4（T-05）：`motion/` 运动决策引擎——漫游决策（间隔绝对锚定 + pace
 //!     缩放、12 次采样）、光标热区避让（150px + tangent 绕行纯函数）、跨屏
 //!     边缘插值（AC-13 不瞬移）、拔屏 2s 迁移（FR-1-4）、站立面端口
-//!     （`StandSurface`，S2-M6 PlatformGraph 复用）。
+//!     （`StandSurface`，S2-M6 PlatformGraph 复用）；
+//!   - S5-M1（T-14 段 · 上）：`save/` 存档——v2 Schema（段归属划分）、原子写
+//!     （tmp + fsync + rename，AC-14 机理）、30s 定时 + 2s 合并窗口、三级降级链
+//!     （`bak` 恢复 / `corrupt`·`future` 隔离 / `v1` 待迁移禁写盘）；
+//!   - S5-M2（T-14 段 · 下）：离线补偿接入——`store::SaveStore::away_ms` 推导离线
+//!     真实时长（墙钟回拨钳 0）+ `EmotionEngine::restore`（供 `offline_compensate`
+//!     使用，RV-16 封顶 L4、3h/4h/5h 边界见 AC-37）。
 pub mod anim;
 pub mod config;
 // S4-M1（T-11 段 · 上）：情绪数值与六维状态机内核——`emotion/`（P 累积 + L0~L5 阶段
@@ -46,4 +52,12 @@ pub mod interaction;
 pub mod motion;
 // S2-M7（T-07）：感知服务内核侧类型与端口（骨架接线，实现随 S2-M7 填充）。
 pub mod perception;
+// S5-M1（T-14 段 · 上）：存档——v2 Schema（`SaveFileV2`，`02 §5 K-7` 全表）、
+// 原子写（tmp + fsync + rename）、30s 定时与 2s 合并窗口、损坏/未来版本/待迁移
+// 三级降级链（隔离 `save.{corrupt,future}.<ts>.json`）。
+// S5-M2（T-14 段 · 下）：离线段（`away_ms` 推导）+ 启动补偿接入（`EmotionEngine::restore`
+// → `offline_compensate`，RV-16 `min(4)` 封顶）。
+// 边界：v1→v2 迁移归 S8-M7（本模块只报 `MigrationPending` 并禁写盘保护原档）；
+// 各段归属见 `save::schema::SaveFileV2` 文档；单实例与文件锁归 S5-M4。
+pub mod save;
 pub mod state;

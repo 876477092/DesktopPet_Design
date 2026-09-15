@@ -464,19 +464,33 @@ impl<'c> EmotionEngine<'c> {
         }
     }
 
-    /// 由存档 / 恢复状态构造（S5 存档接入前供测试与离线补偿复用）。
-    pub fn with_state(
+    /// 由存档恢复（**S5-M2「补偿接入」**，`02 §5 K-7` 段 A + §6.1 启动时序）。
+    ///
+    /// 与 [`Self::new`] 的差别：整体接管 `state` / `neglect` / `sensitivity` / `last_tick_ms`。
+    ///
+    /// **调用时机是硬约束**：必须在**首个 [`Self::tick_1s`] 之前**调用（`dp-app` 在
+    /// `build_state` 内、core-loop 线程启动前完成）。原因：`tick_1s` 在
+    /// `last_tick_ms == None` 时会「以当下为起点并直接返回」（首拍不计 dt），若先跑首拍，
+    /// 离线时长会被压缩成 1 秒，[`Self::offline_compensate`] 随后只补 0 步 —— 补偿静默失效。
+    ///
+    /// `sensitivity` 由存档单独传入（FR-11-11 用户档位），`longing` 展示态按
+    /// `state.emotion == Longing` 回填，使「关机 >4h 后重启」直接呈现想念而不必等下一拍。
+    pub fn restore(
         cfg: &'c crate::config::model::EmotionConfig,
         needs_cfg: &'c crate::config::model::NeedsConfig,
         state: PetState,
         neglect: NeglectPressure,
+        sensitivity: Sensitivity,
         last_tick_ms: i64,
     ) -> Self {
-        let mut e = Self::new(cfg, needs_cfg);
-        e.state = state;
-        e.neglect = neglect;
-        e.last_tick_ms = Some(last_tick_ms);
-        e
+        let mut engine = Self::new(cfg, needs_cfg);
+        engine.state = state;
+        engine.state.last_tick_ms = last_tick_ms;
+        engine.neglect = neglect;
+        engine.sensitivity = sensitivity;
+        engine.last_tick_ms = Some(last_tick_ms);
+        engine.longing = engine.state.emotion == EmotionState::Longing;
+        engine
     }
 
     /// 只读：配置引用。
@@ -1120,8 +1134,19 @@ impl<'c> EmotionEngine<'c> {
             // 直接推进内部状态（跳过 pause 观察：离线不算会话暂停）
             self.tick_offline_step(t, e);
         }
-        self.last_tick_ms = Some(t);
-        self.state.last_tick_ms = t;
+        // ★ S5-M2 收口（RV-16 的**第三道保险**）：把时钟锚点推到**真实当下** `start + away_ms`。
+        //
+        // 为什么必须做：`steps` 被 `maxSimSteps`（1440 = 24h）截断，若只把锚点留在
+        // `start + steps × stepSec`，则 >24h 的残留间隙会在**首个 `tick_1s`** 被当成
+        // 一次 Δt 全额计入（`tick_1s` 不钳 dt）——ΔP = 残留分钟 × 0.05 远超 cap，
+        // P 直冲 120 = L5 阈值，于是「离线永不离家出走」被绕开。此处一次吞掉全部残留，
+        // 使首个 tick 的 Δt 归零（`dt_ms == 0` 早退，零累积）。
+        //
+        // 对 ≤24h 的离线，模拟终点与 `start + away_ms` 最多差一个步长余数（<60s，忽略不计），
+        // 故此改动不改变 `02 §5.5` 的 P 算例（3h / 4h / 5h / 24h 逐项不变）。
+        let anchor = start.saturating_add(away_ms.max(0));
+        self.last_tick_ms = Some(anchor);
+        self.state.last_tick_ms = anchor;
 
         // RV-16 双保险：任何离线时长一律封顶 L4，绝不触发离家出走
         self.neglect.level = self.neglect.level.min(4);
@@ -2220,6 +2245,35 @@ mod tests {
         assert!(matches!(out, OfflineOutcome::Longing(_)));
         assert!(e.neglect.level <= 4);
         assert!(e.neglect.p < cfg.thresholds.l5 as f32, "步数截断后 P 不得越过 L5");
+    }
+
+    /// S5-M2 收口：步数被 `maxSimSteps`（24h）截断后，**残留间隙不得**被首个 `tick_1s` 全额计入。
+    ///
+    /// 反例（修复前）：100h 离线 → 只模拟 24h、锚点停在 `start + 24h`；首个 tick 的
+    /// Δt = 76h → ΔP 远超 cap → P 冲 120 = L5 阈值 → **离家出走**，RV-16 被绕开。
+    #[test]
+    fn offline_truncated_gap_is_not_charged_to_next_tick() {
+        let cfg = EmotionConfig::default();
+        let needs = NeedsConfig::default();
+        let mut e = EmotionEngine::new(&cfg, &needs);
+        e.tick_1s(0, env(day()));
+
+        let away = 100 * 60 * MIN;
+        e.offline_compensate(away, env(day()));
+        let p_after = e.neglect.p;
+        let level_after = e.neglect.level;
+        assert!(level_after <= 4, "补偿后已封顶 L4，实际 L{level_after}");
+
+        // 真实当下 = 起点 0 + away；首个业务 tick 的 Δt 必须归零（锚点已被推到当下）。
+        e.tick_1s(away, env(day()));
+        assert_eq!(e.neglect.p, p_after, "残留间隙必须被吞掉（首个 tick Δt 归零）");
+        assert_eq!(e.neglect.level, level_after, "首个 tick 不得跳级");
+        assert!(e.neglect.level <= 4, "RV-16：离线 + 首个 tick 全程不越 L4");
+        assert_ne!(e.state.emotion, EmotionState::Runaway, "绝不离家出走");
+
+        // 后续正常 tick 仍能累积（证明不是把时钟锚到未来把 P 永久冻住）。
+        e.tick_1s(away + 60 * 60_000, env(day()));
+        assert!(e.neglect.p >= p_after, "锚点不得超前于当下（否则 P 永久冻结）");
     }
 
     #[test]

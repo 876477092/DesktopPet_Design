@@ -1,0 +1,102 @@
+{
+  "_comment": "S5-M1 测试夹具：一份**合法且非默认**的 v2 存档（`save::store::tests::fixture_save_v2_loads_as_current_version`）。",
+  "_why_non_default": "若夹具值与 SaveFileV2::default() 相同，「加载成功」可能只是撞上了默认值而非真解析；故段 A 取非默认值（L3 / mood=41 / today 已日切），段 B/C/D 亦各留一处非默认痕迹。",
+  "v": 2,
+  "values": {
+    "mood": 41.0,
+    "energy": 73.5,
+    "affinityLevel": 3,
+    "affinityExp": 42.0,
+    "satiety": 55.0,
+    "cleanliness": 62.5
+  },
+  "emotion": {
+    "neglect": {
+      "p": 35.5,
+      "cap": 120.0,
+      "level": 3,
+      "pendingLevel": 3,
+      "pendingSinceMs": null,
+      "ratePerMin": 1.0
+    },
+    "sensitivity": {
+      "value": 1.0,
+      "rateClamp": { "min": 0.5, "max": 1.6 }
+    },
+    "personality": {
+      "clingy": 0.5,
+      "curiosity": 0.7,
+      "temper": 0.55,
+      "courage": 0.5,
+      "diligence": 0.6
+    },
+    "personalityRolled": false,
+    "adapt": {
+      "samples": [
+        { "date": "2026-09-13", "intervalSumMin": 21.5, "intervalSamples": 4, "interactCount": 6 },
+        { "date": "2026-09-14", "intervalSumMin": 18.0, "intervalSamples": 3, "interactCount": 5 }
+      ],
+      "tExp": 24.3,
+      "coolDays": 0,
+      "zeroDays": 0
+    },
+    "rough": {
+      "value": 1.0,
+      "lastNegativeMs": 0
+    },
+    "state": "Sulking"
+  },
+  "pet": {
+    "name": "心月狐",
+    "catchphrase": {
+      "enabled": true,
+      "frequency": "low"
+    }
+  },
+  "needs": {
+    "bathFreeCdUntilMs": 0,
+    "scentBuffUntilMs": 0,
+    "cleanSlowUntilMs": 0
+  },
+  "settings": {
+    "emotionSensitivity": 1.0,
+    "privacy": {
+      "activitySensing": true
+    },
+    "performance": {
+      "renderer": "auto"
+    }
+  },
+  "counters": {
+    "dailyTasks": []
+  },
+  "meta": {
+    "lastSeenMs": 1789000000000,
+    "lastTickMs": 1788998200000,
+    "today": "2026-09-14"
+  },
+  "economy": {
+    "coin": 260,
+    "ledger": [
+      { "seq": 1, "tsMs": 1788900000000, "delta": 60, "balanceAfter": 60, "refId": "work:1", "tag": "work" },
+      { "seq": 2, "tsMs": 1788990000000, "delta": 200, "balanceAfter": 260, "refId": "daily:1", "tag": "dailyTask" }
+    ],
+    "earnedToday": 60,
+    "dayKey": "2026-09-14",
+    "quotas": { "bath:free": 1 },
+    "loginStreak": { "days": 3, "dayKey": "2026-09-14" }
+  },
+  "inventory": [{ "itemId": "food_basic", "qty": 2 }],
+  "album": [],
+  "decor": [null, null, null, null, null],
+  "photoWidget": null,
+  "skills": {
+    "etiquette": { "level": 1, "points": 0 },
+    "cooking": { "level": 2, "points": 30 },
+    "talent": { "level": 1, "points": 0 },
+    "knowledge": { "level": 1, "points": 0 },
+    "physique": { "level": 1, "points": 0 }
+  },
+  "activity": null,
+  "activityCounter": { "todayJobCount": 1, "dayKey": "2026-09-14" }
+}

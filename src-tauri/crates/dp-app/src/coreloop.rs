@@ -60,7 +60,7 @@ use dp_core::emotion::coax::CoaxStep;
 use dp_core::emotion::lines::{
     BubblePlanner, LinesLibrary, PlaceholderVars, PlannedBubble, render_placeholders,
 };
-use dp_core::emotion::{EmotionEngine, EmotionEvent};
+use dp_core::emotion::{EmotionEngine, EmotionEvent, OfflineOutcome};
 use dp_core::event::{project_snapshot, wire_for_bubble, wire_for_events};
 #[cfg(test)]
 use dp_core::event::PetSnapshotV2;
@@ -72,6 +72,7 @@ use dp_core::motion::{
 use dp_core::perception::{
     PerceptionBus, PerceptionEvent, SystemSample, SystemWallClock, WallClock,
 };
+use dp_core::save::{LoadOutcome, SaveStore};
 
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -102,6 +103,18 @@ const RUNAWAY_POOL: &str = "runaway";
 
 /// 进入比心窗时取词的台词池（S4-M5：比心撒娇属正向亲昵场景）。
 const HAPPY_POOL: &str = "happy";
+
+/// 回归问候动作（S5-M2：`02 §6.1` 启动时序末行「触发 ACT-T-01 挥手 + 时段问候」）。
+///
+/// 该动作在 `actions.json` 的触发类型为 `lifecycle.value = "launchOrLongAbsence"`
+/// ——「启动或长时间离开后返回」，与本处的调用时机（离线补偿之后）逐字对应。
+const STARTUP_GREETING_ACTION: &str = "ACT-T-01";
+
+/// 存档目录名（`01 FR-8-1` / `02 §6.1`：`%APPDATA%\DesktopPet\`）。
+///
+/// **与 `tauri.conf.json.productName` 必须一致**（C1：不写盘符字面量，但目录名是产品
+/// 标识而非绝对路径）；由 `tests::save_dir_name_matches_tauri_product_name` 机械锁定。
+const SAVE_DIR_NAME: &str = "DesktopPet";
 
 // ---------------------------------------------------------------------------
 // 周期常量（三档 + 感知三档；C3 绝对锚定网格的步长）
@@ -293,6 +306,12 @@ pub struct CoreCfg {
     pub lines: LinesLibrary,
     /// 音效总线（S4-M6；`None` = 纯逻辑模式 / 音频未装配：全部播放入口退化为 no-op）。
     pub audio: Option<AudioBus>,
+    /// 存档（S5-M1；`None` = 纯逻辑模式 / 未装配：不载档、不落盘，行为与 S4 完全一致）。
+    ///
+    /// 装配期由 [`build_state`] 经 `SaveStore::load` 建立（含降级链）；`Some` 时
+    /// [`CoreLoopState::new`] 会用它**恢复内核状态**（`EmotionEngine::restore`），
+    /// 使重启后数值 / P / 敏感度 / 展示态连续。
+    pub save: Option<SaveStore>,
 }
 
 /// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
@@ -362,6 +381,27 @@ pub struct CoreLoopState {
     vars: PlaceholderVars,
     /// 音效总线（S4-M6；`None` = 未装配，全部请求退化为 no-op）。
     audio: Option<AudioBus>,
+    /// 存档门面（S5-M1；`None` = 未装配，不载档不落盘）。
+    save: Option<SaveStore>,
+    /// 「有变更待落盘」标记（S5-M1：`PersistNow` 事件置位，业务档 [`Self::save_tick`] 消费）。
+    ///
+    /// 通过 `PersistNow` 走**强制落盘**（跳过 30s 定时与 2s 合并窗口）——该事件由内核在
+    /// 「阶段迁移 / 自然消气 / 三部曲结算」等**用户可感知的严重节点**产出
+    /// （`02 §6.2` 时序末行），丢一次即丢钱/丢阶段。
+    save_requested: bool,
+    /// 回归问候（S5-M2）：离线补偿产出，在**首个业务档**投递（届时 `app` 与播放通道均已就绪）。
+    ///
+    /// `build_state` 阶段 core-loop 线程尚未启动、播放通道尚未接入，故不能就地发播。
+    startup_greeting: Option<StartupGreeting>,
+}
+
+/// 回归问候（S5-M2：`02 §6.1` 启动时序「ACT-T-01 挥手 + 时段问候」）。
+#[derive(Clone, Debug)]
+struct StartupGreeting {
+    /// 回归动作（恒 [`STARTUP_GREETING_ACTION`]；目录缺该动作时降级跳过）。
+    action_id: &'static str,
+    /// 时段问候气泡（取自冷落档位台词池；`None` = 无台词库 / 冷却未过）。
+    bubble: Option<PlannedBubble>,
 }
 
 impl CoreLoopState {
@@ -400,6 +440,7 @@ impl CoreLoopState {
             character_default_name,
             lines,
             audio,
+            save,
         } = cfg;
         let motion = MotionEngine::new(pos, monitors.clone(), roam_cfg.clone(), seed_k, now_ms);
         let platform_graph = PlatformGraph::new(monitors.clone(), now_ms);
@@ -407,7 +448,25 @@ impl CoreLoopState {
         // 固化堆地址为 `'static`（装配期一次；见本方法文档的泄漏口径说明）。
         let cfg_ref: &'static EmotionConfig = Box::leak(Box::new(emotion));
         let needs_ref: &'static NeedsConfig = Box::leak(Box::new(needs));
-        let emotion = EmotionEngine::new(cfg_ref, needs_ref);
+        // S5-M2：有**可用锚点**的存档 → 以存档恢复内核（数值 / P / 敏感度 / 展示态 /
+        // 上次 tick 时刻），**在首个 tick 之前**完成，否则离线补偿的起点会被首拍压缩
+        // （见 `EmotionEngine::restore` 文档）。
+        // 无锚点（`lastTickMs == 0`：全新安装，或上次运行在首个业务档落盘前就退出）→
+        // 走 `new`（默认值 + 首拍建立基线），不恢复：此时「距 1970 纪元」不是离线时长。
+        let emotion = match save.as_ref().filter(|store| store.has_session_anchor()) {
+            Some(store) => {
+                let cached = store.cache();
+                EmotionEngine::restore(
+                    cfg_ref,
+                    needs_ref,
+                    cached.to_pet_state(),
+                    cached.emotion.neglect,
+                    cached.emotion.sensitivity,
+                    cached.meta.last_tick_ms,
+                )
+            }
+            None => EmotionEngine::new(cfg_ref, needs_ref),
+        };
         // S4-M5：气泡计划器的冷却 / 间隔参数全部取自 `lines.json.selector`（C7）。
         let bubble = BubblePlanner::from_library(&lines);
         // S4-M5：`{name}` 变量取配置默认名（C2：代码内零角色名字面量）。
@@ -440,12 +499,148 @@ impl CoreLoopState {
             bubble,
             vars,
             audio,
+            save,
+            save_requested: false,
+            startup_greeting: None,
         }
     }
 
     /// 接入播放指令通道（S4 前清障 B15-④；装配点 `spawn` 在起线程前调用一次）。
     pub fn attach_playback(&mut self, channel: PlaybackChannel) {
         self.playback = Some(channel);
+    }
+
+    // -----------------------------------------------------------------------
+    // S5-M2：离线补偿接入 + 回归问候（T-14 段 · 下）
+    // -----------------------------------------------------------------------
+
+    /// 只读：存档门面（诊断 / 单测）。
+    #[inline]
+    #[must_use]
+    pub fn save(&self) -> Option<&SaveStore> {
+        self.save.as_ref()
+    }
+
+    /// 离线补偿（**S5-M2 要点 2**：`02 §5.5` / §6.1 启动时序）。
+    ///
+    /// 调用时机（硬约束）：`build_state` 内、core-loop 线程启动**之前**——因为
+    /// [`EmotionEngine::restore`] 已把 `last_tick_ms` 恢复到上次落盘时刻，若先跑首拍
+    /// 再补偿，离线时长会被压缩（见 `restore` 文档）。
+    ///
+    /// 语义：
+    ///   - 离线时长取 [`SaveStore::away_ms`]（墙钟回拨钳 0）；
+    ///   - **无存档 / 无锚点（`lastTickMs == 0`）/ 无离线（`away_ms == 0`）→ `None`**：
+    ///     全新安装不做任何补偿与演出（否则「距 1970 纪元」会被当成 5 万小时离线）；
+    ///   - 离线环境：不在场（`preset_idle_ms` 置饱和值）、不暂停、不演出、无交互增益——
+    ///     与 `02 §5.5` 的分块推进口径一致，速度上界可复算成 `P = 0.05 × 分钟数`；
+    ///   - 产出[回归问候](StartupGreeting)：`ACT-T-01` + 档位台词池文案，
+    ///     在首个业务档投递（`02 §6.1`「时段问候」）。
+    pub fn compensate_offline(&mut self, wall: &dyn WallClock) -> Option<OfflineOutcome> {
+        let now_ms = wall.now_ms();
+        let store = self.save.as_ref()?;
+        if !store.has_session_anchor() {
+            return None;
+        }
+        let away_ms = store.away_ms(now_ms);
+        if away_ms <= 0 {
+            return None;
+        }
+        // 离线环境快照（字段**全量显式**给出：不落 `..TickEnv::default()`，
+        // 避免 `default()` 内部多读一次墙钟；C3）。
+        let env = TickEnv {
+            now_local: wall.now_local(),
+            session_paused: false,
+            performing: false,
+            activity_running: false,
+            event_delta: 0.0,
+            preset_idle_ms: u64::MAX,
+            interaction_available: true,
+            satiety: self.emotion.state.values.satiety,
+            cleanliness: self.emotion.state.values.cleanliness,
+            _marker: core::marker::PhantomData,
+        };
+        let outcome = self.emotion.offline_compensate(away_ms, env);
+        let level = self.emotion.neglect.level;
+        eprintln!(
+            "[dp-app] core-loop 离线补偿：away={away_ms}ms（{:.1}h）→ {outcome:?}（L{level}，P={:.2}）",
+            away_ms as f64 / 3_600_000.0,
+            self.emotion.neglect.p
+        );
+        // 回归问候：`ACT-T-01` 挥手 + 档位台词池文案（无台词库 / 冷却未过 → 只有动作）。
+        // 取词口径与 S4-M5 的阶段迁移一致（池键来自 `emotion.json.levels[level].linePool`）。
+        let bubble = self.bubble.bubble_for_level(
+            &self.lines,
+            self.emotion.cfg().levels.as_slice(),
+            level,
+            &self.vars,
+            now_ms,
+        );
+        self.startup_greeting = Some(StartupGreeting { action_id: STARTUP_GREETING_ACTION, bubble });
+        Some(outcome)
+    }
+
+    /// 投递回归问候（首个业务档；`app` 为 `None` 时保留待投，不消费）。
+    fn flush_startup_greeting(&mut self, app: Option<&AppHandle>, now_ms: u64) {
+        let Some(handle) = app else { return };
+        let Some(greeting) = self.startup_greeting.take() else {
+            return;
+        };
+        match self.catalog.find(greeting.action_id) {
+            Some(cfg) => match ActionRequest::from_cfg(cfg, ActionSource::Emotion) {
+                Some(request) => {
+                    let verdict = self.arbiter.submit(request, now_ms);
+                    self.settle_play(verdict.clone(), greeting.action_id);
+                    eprintln!(
+                        "[dp-app] core-loop 回归问候动作 {} 仲裁={verdict:?}",
+                        greeting.action_id
+                    );
+                }
+                None => eprintln!(
+                    "[dp-app] core-loop 回归问候动作 {} 不可用（disabled），降级不提交",
+                    greeting.action_id
+                ),
+            },
+            None => eprintln!(
+                "[dp-app] core-loop 回归问候动作 {} 不在目录，降级不提交",
+                greeting.action_id
+            ),
+        }
+        if let Some(plan) = greeting.bubble {
+            let wire = wire_for_bubble(&plan);
+            if let Err(err) = handle.emit(wire.event, &wire.payload) {
+                eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+            }
+        }
+    }
+
+    /// 存档落盘档（**S5-M2 要点 1 / S5-M1 要点 1**；业务档 1Hz 调用）。
+    ///
+    /// 流程：① 把内核当前状态刷进存档「段 A」（返回是否语义变化）；
+    /// ② 若本 tick 收到过 `PersistNow` → **强制落盘**（跳过定时与合并窗口）；
+    /// ③ 否则按 [`SaveStore::due`] 落盘（30s 定时 或 变更后 2s 合并窗口）。
+    ///
+    /// `now_mono_ms` 为单调毫秒（间隔语义，C3 允许）；`now_ms` 为墙钟毫秒（时刻语义）。
+    pub fn save_tick(&mut self, now_mono_ms: u64, now_ms: i64) {
+        let Self { save, emotion, save_requested, .. } = self;
+        let Some(store) = save.as_mut() else {
+            return;
+        };
+        store.capture_from(emotion, now_ms);
+        let force = core::mem::take(save_requested);
+        // 无论成功失败都清位：失败靠下一拍重试，绝不让一个坏盘位把后续落盘全堵死。
+        let result = if force { store.flush_force(now_mono_ms) } else { store.flush(now_mono_ms) };
+        if let Err(err) = result {
+            eprintln!("[dp-app] core-loop 存档落盘降级（force={force}）：{err}");
+        }
+    }
+
+    /// 回归问候探针（`#[cfg(test)]`：验证「离线补偿 → 档位台词池 → 渲染后文案」链路，
+    /// 不必构造 `AppHandle` 触发 emit）。
+    #[cfg(test)]
+    pub(crate) fn startup_greeting_for_test(&self) -> Option<(&'static str, Option<String>)> {
+        self.startup_greeting
+            .as_ref()
+            .map(|g| (g.action_id, g.bubble.as_ref().map(|b| b.text.clone())))
     }
 
     /// 记一次交互的情绪净增益（S4-M2：`Mood` 加项通路，跨档暂存）。
@@ -816,6 +1011,10 @@ impl CoreLoopState {
         session_changed: bool,
         app: Option<&AppHandle>,
     ) {
+        // ① S5-M2：回归问候投递（离线补偿在装配期产出，首个业务档才具备发播条件：
+        //    此时 core-loop 线程已起、播放通道已接入、`app` 句柄可用）。
+        self.flush_startup_greeting(app, wall_now_ms.max(0) as u64);
+
         // ② 环境组装（本地时间同经端口取；需求快照取自内核当前状态）。
         let env = TickEnv {
             now_local: wall.now_local(),
@@ -862,13 +1061,21 @@ impl CoreLoopState {
     ///     经 `ActionRequest::from_cfg(cfg, ActionSource::Emotion)` 构造；目录缺
     ///     该动作 / `disabled` / 优先级域外 → 降级不提交（不 panic）；
     ///   - 其余 → 经 [`wire_for_events`] 映射为 `pet://emotion`（阶段迁移）；
-    ///     `ValuesChanged` / `PersistNow` 不产线上事件（快照走 ⑤ / 存盘归 S5）。
+    ///     `ValuesChanged` 不产线上事件（快照走 ⑤）；
+    ///     `PersistNow` 不产线上事件，转 [`Self::save_requested`]（存盘触发，S5-M1/M2）。
     fn dispatch_emotion_events(
         &mut self,
         events: &[EmotionEvent],
         wall_now_ms: i64,
         app: Option<&AppHandle>,
     ) {
+        // S5-M1/M2：`PersistNow`（内核在阶段迁移 / 自然消气 / 三部曲结算等严重节点产出）
+        // → 置「请强制落盘」标记，由本 tick 之后的 [`Self::save_tick`] 消费。
+        // 该事件**不产线上广播**（`dp-core::event` 映射为 `None`），只是存盘触发信号。
+        if events.iter().any(|ev| matches!(ev, EmotionEvent::PersistNow)) {
+            self.save_requested = true;
+        }
+
         // 强制动作（优先级 `02 §6.2` 要求 ≥7，由 `emotion.json.levels[].priorityFloor`
         // 保证；此处不再二次钳制，避免与配置真源双写）。
         for ev in events {
@@ -1501,6 +1708,13 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         bus.set_settings(audio_settings_from(&bundle));
         bus.inner().clone()
     });
+    // S5-M1：存档装载（含损坏 / 未来版本 / 待迁移三级降级链）。失败 / 不可解析目录 →
+    // `None`（不载档不落盘），行为退回 S4 基线（`02 §7.4.2`：降级不崩）。
+    let save = resolve_save_dir(app).map(|dir| {
+        let (store, outcome) = SaveStore::load(&dir, SystemWallClock.now_ms());
+        log_save_outcome(&outcome);
+        store
+    });
     let cfg = CoreCfg {
         roam_cfg: bundle.settings.roam.clone(),
         interaction_cfg: bundle.settings.interaction.clone(),
@@ -1510,8 +1724,43 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         character_default_name: bundle.character.default_name.clone(),
         lines,
         audio,
+        save,
     };
-    Some(CoreLoopState::new(pos, monitors, cfg, seed, 0))
+    let mut state = CoreLoopState::new(pos, monitors, cfg, seed, 0);
+    // S5-M2：离线补偿（**必须在首个业务 tick 之前**——`restore` 已把起点置为存档里的
+    // `lastTickMs`，若先跑首拍则离线时长被压缩成 1 秒；见 `compensate_offline` 文档）。
+    // 无存档 / 无离线 → `None`，不做任何演出（全新安装路径）。
+    let _ = state.compensate_offline(&SystemWallClock);
+    Some(state)
+}
+
+/// 记录存档装载结果（S5-M1：降级链的可观测面）。
+///
+/// ⚠️ **已知覆盖缺口（登记待下游）**：`02 §5 K-7` 要求损坏档「重建默认档**并提示**」，
+/// 本卡只做到「隔离 + 重建 + 日志」。用户可见提示需要一处 UI 承载，而 `pet://` 事件面
+/// （C8）**没有**「存档状态」事件、托盘也无通知 API，故归 **S5-M3**（设置页「数据」Tab
+/// 展示存档健康状态 + 导入 `save.corrupt.*`）与 **S6-M2**（自愈守护巡检）。此处日志
+/// 保留隔离路径，用户可据此手工回捞原档。
+fn log_save_outcome(outcome: &LoadOutcome) {
+    for warning in &outcome.warnings {
+        eprintln!("[dp-app] core-loop 存档告警：{warning}");
+    }
+    let line = outcome.describe();
+    if outcome.needs_notice() {
+        eprintln!("[dp-app] core-loop 存档需要提示（可见提示归 S5-M3/S6-M2）：{line}");
+    } else {
+        eprintln!("[dp-app] core-loop 存档正常：{line}");
+    }
+}
+
+/// 解析存档目录（`01 FR-8-1` / `02 §6.1`：`%APPDATA%\DesktopPet`；C1：无盘符字面量）。
+///
+/// `PathResolver::data_dir()` = `%APPDATA%`（Roaming），再拼产品目录名 [`SAVE_DIR_NAME`]。
+/// 目录**允许不存在**（首次运行由原子写的 `create_dir_all` 建立），故此处不预建、不校验。
+/// 解析失败（平台 API 不可用）→ `None`：退化为「不载档不落盘」，不阻断启动（`02 §7.4.2`）。
+fn resolve_save_dir(app: &AppHandle) -> Option<PathBuf> {
+    let base = app.path().data_dir().ok()?;
+    Some(base.join(SAVE_DIR_NAME))
 }
 
 /// 由配置束投影音频设置快照（S4-M6：`settings.json.audio` + `behavior` 的静音相关位）。
@@ -1800,6 +2049,9 @@ fn run_loop(
             // S4-M2：传入 `app` 作为传输层句柄（`pet://state` 1Hz / `pet://emotion`
             // 变更时）；事件名与载荷生产在 `dp-core::event`（C8 单一真源）。
             state.business_tick(wall.as_ref(), Some(&app));
+            // S5-M1/M2：存档落盘档（30s 定时 / 变更 2s 合并窗口 / `PersistNow` 强制）。
+            // `now` 为单调毫秒（间隔语义，C3）；`wall.now_ms()` 为墙钟（时刻语义）。
+            state.save_tick(now, wall.now_ms());
         }
     }
 }
@@ -1890,6 +2142,10 @@ mod tests {
     use dp_core::config::ActionCfg;
     use dp_core::motion::{MonitorGeom, SplitMix64};
     use dp_core::perception::FakeWallClock;
+    // S5-M2：展示态枚举仅在测试内断言「离线不得进入离家出走」（生产代码不参考它）。
+    use dp_core::emotion::EmotionState;
+    // S5-M1：降级链落点判定（断言「全新安装走 Fresh」等装配期语义）。
+    use dp_core::save::LoadStatus;
 
     /// 主屏：VDC (0,0) 1920×1080，工作区底边 1040。
     fn mon_a() -> MonitorGeom {
@@ -1913,6 +2169,23 @@ mod tests {
             work_size_vdc: Vec2::new(1920.0, 2000.0),
             primary: true,
         }
+    }
+
+    /// ACT-T-01 启用目录（S5-M2 回归问候；priority 6 / `lifecycle.launchOrLongAbsence`，
+    /// 元数据对齐 `resources/config/actions.json`）。
+    fn greeting_catalog() -> ActionCatalog {
+        ActionCatalog::from_actions(vec![ActionCfg {
+            id: STARTUP_GREETING_ACTION.to_string(),
+            name: "挥手打招呼".to_string(),
+            category: "interact".to_string(),
+            priority: 6,
+            interruptible: false,
+            looping: false,
+            fps: 12,
+            fade_ms: 200,
+            disabled: false,
+            ..ActionCfg::default()
+        }])
     }
 
     /// ACT-M-06 启用目录（落地缓冲；priority 6，`resources/config/actions.json` 口径）。
@@ -2026,6 +2299,8 @@ mod tests {
             character_default_name: name_cp(),
             lines: test_lines(),
             audio: None,
+            // S5-M1 起 `CoreCfg` 追加存档门面；测试取 `None` = 不载档不落盘（纯逻辑模式）。
+            save: None,
         }
     }
 
@@ -3483,5 +3758,249 @@ mod tests {
         // 中性事件不产音效。
         assert!(audio_cue_for_emotion(&EmotionEvent::PersistNow).is_none());
         assert!(audio_cue_for_emotion(&level_event(0)).is_none());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // S5-M1 / S5-M2：存档落盘 + 离线补偿接入（T-14 段）
+    // ══════════════════════════════════════════════════════════════════
+
+    /// S5 测试用临时存档目录（目录名用测试名区分；C3：不依赖时钟）。
+    fn save_temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join("dp-app-s5m2-tests").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("创建临时目录失败（测试前置）");
+        dir
+    }
+
+    /// 造一个「上次 tick 在 `away_ms` 之前」的存档并**重新载入**（模拟真实重启路径）。
+    fn save_store_away(name: &str, now_ms: i64, away_ms: i64) -> SaveStore {
+        let dir = save_temp_dir(name);
+        let (mut store, outcome) = SaveStore::load(&dir, now_ms);
+        assert!(outcome.is_healthy(), "新建临时存档不应降级：{:?}", outcome.warnings);
+        store.cache_mut().meta.last_tick_ms = now_ms - away_ms;
+        store.flush_force(0).expect("写入测试存档");
+        let (store, outcome) = SaveStore::load(&dir, now_ms);
+        assert!(outcome.is_healthy(), "重载测试存档不应降级：{:?}", outcome.warnings);
+        store
+    }
+
+    /// 装一个「带存档」的纯逻辑状态（`save: Some` → 内核经 `restore` 恢复）。
+    fn state_with_save(catalog: ActionCatalog, save: SaveStore) -> CoreLoopState {
+        CoreLoopState::new(
+            Vec2::new(960.0, 500.0),
+            Vec::new(),
+            CoreCfg { save: Some(save), ..core_cfg(catalog) },
+            7,
+            0,
+        )
+    }
+
+    /// 存档目录名必须与 `tauri.conf.json.productName` 一致（`01 FR-8-1`：`%APPDATA%\DesktopPet`）。
+    #[test]
+    fn save_dir_name_matches_tauri_product_name() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tauri.conf.json");
+        let text = std::fs::read_to_string(&path).expect("应能读取 tauri.conf.json");
+        let value: serde_json::Value =
+            serde_json::from_str(&text).expect("tauri.conf.json 应为合法 JSON");
+        assert_eq!(
+            value["productName"].as_str(),
+            Some(SAVE_DIR_NAME),
+            "存档目录名与 productName 漂移会导致存档路径与 `02 §6.1` 不符"
+        );
+    }
+
+    /// AC-37 边界（3h/4h/5h/24h）+ AC-18（3h 不生气）+ RV-16 双保险（永不 L5）。
+    ///
+    /// 与 `dp-core` 的引擎级用例同口径，但走**完整装配路径**：
+    /// `SaveStore::load` → `CoreLoopState::new`（`EmotionEngine::restore`）→ `compensate_offline`。
+    #[test]
+    fn offline_compensation_matches_ac37_boundaries_and_never_l5() {
+        const MIN: i64 = 60_000;
+        const HOUR: i64 = 3_600_000;
+        let now = 1_800_000_000_000i64;
+        let wall = FakeWallClock::new(now);
+
+        // ① 30min → JustLeft（不衰减，L0）
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-30min", now, 30 * MIN));
+        assert_eq!(s.compensate_offline(&wall), Some(OfflineOutcome::JustLeft));
+        assert_eq!(s.emotion.neglect.level, 0, "≤graceMin 不衰减");
+
+        // ② 3h → L1 无聊（AC-18：不生气）
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-3h", now, 3 * HOUR));
+        assert_eq!(s.compensate_offline(&wall), Some(OfflineOutcome::ColdApplied(1)));
+        assert_eq!(s.emotion.neglect.level, 1, "3h → P≈9 → L1（实际 P={}）", s.emotion.neglect.p);
+        assert_ne!(s.emotion.neglect.level, 5, "关机 3h 绝不离家出走");
+
+        // ③ 4h → L1~L2 临界（RV-16 原 Bug 验证点：绝不 L5）
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-4h", now, 4 * HOUR));
+        match s.compensate_offline(&wall) {
+            Some(OfflineOutcome::ColdApplied(lv)) => {
+                assert!(lv <= 2, "4h 应为 L1~L2 临界：L{lv}");
+            }
+            other => panic!("4h 应 ColdApplied，实际 {other:?}"),
+        }
+        assert!(s.emotion.neglect.p < 30.0, "4h 的 P 应低于 L3 阈值：{}", s.emotion.neglect.p);
+
+        // ④ 5h → Longing（>4h，L2 委屈）
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-5h", now, 5 * HOUR));
+        assert_eq!(s.compensate_offline(&wall), Some(OfflineOutcome::Longing(2)));
+        assert!(s.emotion.is_longing(), ">4h 应进入想念展示");
+
+        // ⑤ 24h → P=72 < 120，封顶 L4（`min(4)` 双保险）
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-24h", now, 24 * HOUR));
+        assert_eq!(s.compensate_offline(&wall), Some(OfflineOutcome::Longing(4)));
+        assert!(s.emotion.neglect.p < 120.0, "24h 上界 P=72 < 120：{}", s.emotion.neglect.p);
+
+        // ⑥ 100h → 步数截断，仍 ≤ L4
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-100h", now, 100 * HOUR));
+        assert!(matches!(s.compensate_offline(&wall), Some(OfflineOutcome::Longing(_))));
+        assert!(s.emotion.neglect.level <= 4, "任何离线时长一律封顶 L4");
+        assert_ne!(s.emotion.state.emotion, EmotionState::Runaway, "离线不得进入离家出走");
+    }
+
+    /// 无离线（`awayMs == 0`，含全新安装）→ 不补偿、不产问候，行为与 S4 基线一致。
+    #[test]
+    fn zero_away_ms_is_a_noop_and_produces_no_greeting() {
+        let now = 1_800_000_000_000i64;
+        let wall = FakeWallClock::new(now);
+        let mut s = state_with_save(greeting_catalog(), save_store_away("ac37-zero", now, 0));
+        assert_eq!(s.compensate_offline(&wall), None);
+        assert!(s.startup_greeting_for_test().is_none());
+        assert_eq!(s.emotion.neglect.level, 0);
+    }
+
+    /// 全新安装 / 无 tick 锚点 → 既不恢复也不补偿。
+    ///
+    /// 防的是一条真实路径：存档曾被写出但**从未 tick**（`lastTickMs == 0`）。若不加锚点判定，
+    /// `away_ms(now)` = 「距 1970 纪元」≈ 5 万小时 → 首次启动即补偿到封顶 L4，宠物
+    /// 「一装上就很生气」。
+    #[test]
+    fn fresh_save_without_anchor_does_not_restore_or_compensate() {
+        let now = 1_800_000_000_000i64;
+        let wall = FakeWallClock::new(now);
+        let dir = save_temp_dir("fresh-no-anchor");
+        let (mut store, outcome) = SaveStore::load(&dir, now);
+        assert_eq!(outcome.status, LoadStatus::Fresh);
+        // 模拟「写出过但从未 tick」的历史档：数值非默认，锚点仍为 0。
+        store.cache_mut().values.mood = 7.0;
+        store.flush_force(0).expect("写入测试档");
+
+        let mut s = state_with_save(greeting_catalog(), store);
+        assert!(!s.save().unwrap().has_session_anchor());
+        assert_eq!(s.compensate_offline(&wall), None, "无锚点 → 不补偿");
+        assert!(s.startup_greeting_for_test().is_none());
+        assert_eq!(s.emotion.neglect.level, 0, "全新档不得直接落到封顶档");
+        assert_eq!(
+            s.emotion.state.values.mood,
+            EmotionConfig::default().dimensions.mood.default,
+            "无锚点 → 不做 restore（走 new 的配置默认值）"
+        );
+    }
+
+    /// 档位越界 / 无存档 → 不 panic（防御口径）。
+    #[test]
+    fn compensate_offline_without_save_is_none() {
+        let wall = FakeWallClock::new(1_800_000_000_000);
+        let mut s = CoreLoopState::new(
+            Vec2::new(960.0, 500.0),
+            Vec::new(),
+            core_cfg(greeting_catalog()),
+            7,
+            0,
+        );
+        assert!(s.save().is_none());
+        assert_eq!(s.compensate_offline(&wall), None, "无存档 → 不补偿");
+        assert!(s.startup_greeting_for_test().is_none());
+    }
+
+    /// 回归问候 = `ACT-T-01` 挥手 + 档位台词池文案（`02 §6.1`）；占位符已渲染（C2）。
+    #[test]
+    fn startup_greeting_carries_act_t01_and_level_pool_line() {
+        let now = 1_800_000_000_000i64;
+        let wall = FakeWallClock::new(now);
+        let mut s = state_with_save(greeting_catalog(), save_store_away("greeting-3h", now, 3 * 3_600_000));
+        assert!(s.compensate_offline(&wall).is_some());
+        let (action, bubble) = s.startup_greeting_for_test().expect("离线后应有回归问候");
+        assert_eq!(action, STARTUP_GREETING_ACTION);
+        assert_eq!(action, "ACT-T-01", "`02 §5.5` 口径表：JustLeft/回归统一播 ACT-T-01 挥手");
+        let text = bubble.expect("随包 lines.json 应能取到 L1 档位台词");
+        assert!(!text.is_empty());
+        assert!(!text.contains('{'), "占位符应已渲染（C2）：{text}");
+    }
+
+    /// 落盘链路：内核推进 → `capture_from` 置脏 → 过合并窗口落盘 → 重载内容一致。
+    #[test]
+    fn save_tick_persists_kernel_state_and_reloads() {
+        let now = 1_800_000_000_000i64;
+        let mut s = state_with_save(greeting_catalog(), save_store_away("save-tick", now, 0));
+        let path = s.save().unwrap().save_path().to_path_buf();
+
+        // 推进 60s（1Hz 业务档一次；`business_tick_present` 绕开无头环境的会话查询）。
+        let wall = FakeWallClock::new(now + 60_000);
+        s.business_tick_present(&wall);
+        let expected_mood = s.emotion.state.values.mood;
+        let expected_p = s.emotion.neglect.p;
+
+        // `now_mono=10_000`：距上次落盘（0）已过 2s 合并窗口且有变更 → 落盘。
+        s.save_tick(10_000, wall.now_ms());
+        assert!(!s.save().unwrap().is_dirty(), "落盘后脏位应清零");
+
+        let dir = path.parent().expect("存档路径必有父目录").to_path_buf();
+        let (reloaded, outcome) = SaveStore::load(&dir, wall.now_ms());
+        assert!(outcome.is_healthy(), "{:?}", outcome.warnings);
+        assert_eq!(reloaded.cache().values.mood, expected_mood);
+        assert_eq!(reloaded.cache().emotion.neglect.p, expected_p);
+        assert_eq!(reloaded.last_seen_ms(), wall.now_ms(), "lastSeenMs = 本次落盘墙钟");
+        assert_eq!(reloaded.away_ms(wall.now_ms()), 0, "刚落盘 → 无离线");
+    }
+
+    /// `PersistNow` → **强制落盘**（跳过 30s 定时与 2s 合并窗口）；对照组证明「非强制不写」。
+    ///
+    /// 判别口径：先各落一次盘建立锚点，再**删掉主档**；随后在「距上次落盘仅 1ms」的时刻
+    /// 再跑一拍 —— 对照组不应重建主档，实验组（注入 `PersistNow`）必须重建。
+    #[test]
+    fn persist_now_forces_flush_within_merge_window() {
+        let now = 1_800_000_000_000i64;
+        let save_path = |state: &CoreLoopState| {
+            state.save().expect("测试态应装配存档").save_path().to_path_buf()
+        };
+
+        // 对照组：无 `PersistNow` → 未到点 → 不重建。
+        let mut control =
+            state_with_save(greeting_catalog(), save_store_away("persist-control", now, 0));
+        let control_path = save_path(&control);
+        control.save_tick(0, now);
+        assert!(control_path.exists(), "首拍必落（建立 30s 锚点）");
+        std::fs::remove_file(&control_path).expect("删主档失败（测试前置）");
+        control.save_tick(1, now);
+        assert!(!control_path.exists(), "距上次落盘仅 1ms 且无 PersistNow → 不得写入");
+
+        // 实验组：注入 `PersistNow` → 同一时刻强制落盘。
+        let mut forced =
+            state_with_save(greeting_catalog(), save_store_away("persist-forced", now, 0));
+        let forced_path = save_path(&forced);
+        forced.save_tick(0, now);
+        std::fs::remove_file(&forced_path).expect("删主档失败（测试前置）");
+        forced.dispatch_emotion_events(&[EmotionEvent::PersistNow], now, None);
+        forced.save_tick(1, now);
+        assert!(forced_path.exists(), "PersistNow 必须跳过定时与合并窗口立即落盘");
+        let (disk, outcome) = SaveStore::load(forced_path.parent().unwrap(), now);
+        assert!(outcome.is_healthy());
+        assert_eq!(disk.last_seen_ms(), now);
+        assert!(!forced.save().unwrap().is_dirty());
+    }
+
+    /// `save_tick` 在未装配存档时是 no-op（纯逻辑模式零副作用）。
+    #[test]
+    fn save_tick_without_store_is_noop() {
+        let mut s = CoreLoopState::new(
+            Vec2::new(960.0, 500.0),
+            Vec::new(),
+            core_cfg(greeting_catalog()),
+            7,
+            0,
+        );
+        s.save_tick(999_999, 1_800_000_000_000);
+        assert!(s.save().is_none());
     }
 }

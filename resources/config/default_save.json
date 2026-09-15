@@ -1,0 +1,100 @@
+{
+  "_comment": "全新存档模板（v=2）—— `02 §5 K-7`「存档 Schema v2 新增字段全表」的落地副本。",
+  "_note": "本文件与 `dp-core::save::schema::SaveFileV2::default()` 必须逐位一致，由 `save::schema::tests::default_save_template_matches_builtin` 机械校验；改任一侧都会让单测失败（防双真源漂移）。",
+  "_ownership": "段 A（本卡读写）= v/values/emotion.{neglect,sensitivity,state}/meta；段 B（S5-M3/M4/M5）= pet/settings；段 C（S7-M2/M4）= emotion.{personality,personalityRolled,adapt,rough}/needs；段 D（S8）= economy/inventory/album/decor/photoWidget/skills/activity/activityCounter/counters。",
+  "v": 2,
+  "values": {
+    "mood": 60.0,
+    "energy": 100.0,
+    "affinityLevel": 1,
+    "affinityExp": 0.0,
+    "satiety": 70.0,
+    "cleanliness": 85.0
+  },
+  "emotion": {
+    "neglect": {
+      "p": 0.0,
+      "cap": 120.0,
+      "level": 0,
+      "pendingLevel": 0,
+      "pendingSinceMs": null,
+      "ratePerMin": 0.0
+    },
+    "sensitivity": {
+      "value": 1.0,
+      "rateClamp": { "min": 0.5, "max": 1.6 }
+    },
+    "personality": {
+      "clingy": 0.5,
+      "curiosity": 0.7,
+      "temper": 0.55,
+      "courage": 0.5,
+      "diligence": 0.6
+    },
+    "personalityRolled": false,
+    "adapt": {
+      "samples": [],
+      "tExp": 25.0,
+      "coolDays": 0,
+      "zeroDays": 0
+    },
+    "rough": {
+      "value": 1.0,
+      "lastNegativeMs": 0
+    },
+    "state": "Idle"
+  },
+  "pet": {
+    "name": "",
+    "catchphrase": {
+      "enabled": true,
+      "frequency": "standard"
+    }
+  },
+  "needs": {
+    "bathFreeCdUntilMs": 0,
+    "scentBuffUntilMs": 0,
+    "cleanSlowUntilMs": 0
+  },
+  "settings": {
+    "emotionSensitivity": 1.0,
+    "privacy": {
+      "activitySensing": true
+    },
+    "performance": {
+      "renderer": "auto"
+    }
+  },
+  "counters": {
+    "dailyTasks": []
+  },
+  "meta": {
+    "lastSeenMs": 0,
+    "lastTickMs": 0,
+    "today": ""
+  },
+  "economy": {
+    "coin": 0,
+    "ledger": [],
+    "earnedToday": 0,
+    "dayKey": "",
+    "quotas": {},
+    "loginStreak": { "days": 0, "dayKey": "" }
+  },
+  "inventory": [],
+  "album": [],
+  "decor": [null, null, null, null, null],
+  "photoWidget": null,
+  "skills": {
+    "etiquette": { "level": 1, "points": 0 },
+    "cooking": { "level": 1, "points": 0 },
+    "talent": { "level": 1, "points": 0 },
+    "knowledge": { "level": 1, "points": 0 },
+    "physique": { "level": 1, "points": 0 }
+  },
+  "activity": null,
+  "activityCounter": {
+    "todayJobCount": 0,
+    "dayKey": ""
+  }
+}

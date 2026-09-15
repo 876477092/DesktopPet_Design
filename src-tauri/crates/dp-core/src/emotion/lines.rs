@@ -604,7 +604,14 @@ fn hash_index(pool: &str, now_ms: i64, n: usize) -> usize {
 ///
 /// **作废**存档里的 `"1:3"` 字符串比例写法（L-03 修正）：档位是真源，
 /// 数值取自 [`CatchphraseFrequencyCfg`]（`CharacterConfig.catchphrase.frequency`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// serde 口径（S5-M1 补）：`rename_all = "lowercase"`，**线上 / 存档均为档位字符串**
+/// （`"off"` / `"low"` / `"standard"` / `"high"`），与 [`Self::as_cfg_name`] 逐字一致，
+/// 保证存档 ↔ 配置 ↔ 前端三处同名同值（单一真源，避免出现第二个字符串映射表）。
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
 pub enum CatchphraseFrequency {
     /// 关闭（永不带口头禅）。
     Off,
