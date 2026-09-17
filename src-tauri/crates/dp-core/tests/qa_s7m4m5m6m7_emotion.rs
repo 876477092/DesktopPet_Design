@@ -218,26 +218,48 @@ fn ac18_offline_three_hours_is_mild_not_angry() {
     assert_eq!(e.neglect.level, 1, "AC-18：3h 离线应为 L1 无聊（不生气）");
 }
 
+/// **AC-37 离线补偿边界（`01 §11.3` 2026-09-17 订正后口径）**。
+///
+/// 离线期间 `presenceFactor = 0.05`、其余六因子恒 1.0（`02 §5.5`），故
+/// `P = 0.05 × 离线分钟数`，档位按 §6.5.2 阈值 5/15/30/60/120 判定：
+///
+/// | 离线 | P | 期望档位 |
+/// |---|---|---|
+/// | 3h | 9 | L1 无聊 |
+/// | 4h | 12 | L1（临界 L2，未越阈） |
+/// | 5h | 15 | L2 委屈 |
+/// | 24h | 72 | L4 上限 |
+/// | 100h | 72（`maxSimSteps` 截断） | L4 |
+///
+/// 断言**逐档精确值**而非仅 `level <= 4` —— 原实现只锁「不离家」，锁不住 AC-37 的档位口径；
+/// 同时保留 RV-16「任意时长 `level <= 4`」的红线断言。
 #[test]
-fn ac37_offline_never_reaches_runaway() {
+fn ac37_offline_boundaries_p_and_levels() {
     let cfg = EmotionConfig::default();
     let needs = NeedsConfig::default();
-    for hours in [4i64, 5, 24, 100] {
+    // (离线小时数, 期望 P, 期望档位)
+    let cases = [(3i64, 9.0f32, 1u8), (4, 12.0, 1), (5, 15.0, 2), (24, 72.0, 4), (100, 72.0, 4)];
+    for (hours, want_p, want_level) in cases {
         let mut e = engine_typical(&cfg, &needs);
         let _ = e.tick_1s(0, env_day(0, 0));
         let _ = e.offline_compensate(hours * 3_600_000, env_day(0, u64::MAX));
         assert!(
+            (e.neglect.p - want_p).abs() < 0.6,
+            "AC-37：{hours}h 离线 P 应 ≈{want_p}，实际 {}",
+            e.neglect.p
+        );
+        assert_eq!(
+            e.neglect.level, want_level,
+            "AC-37：{hours}h 离线应为 L{want_level}（实际 L{}，P={}）",
+            e.neglect.level, e.neglect.p
+        );
+        // RV-16 第一 / 二道保险：任意时长绝不到 L5（不触发离家出走）
+        assert!(
             e.neglect.level <= 4,
-            "AC-37 / RV-16：{hours}h 离线封顶 L4，实际 L{}",
+            "AC-37 / RV-16：{hours}h 离线绝不离家，实际 L{}",
             e.neglect.level
         );
-        assert!(e.neglect.p <= cfg.thresholds.l5 as f32 - 1e-3 || e.neglect.level < 5);
     }
-    // 24h 上界：P = 0.05 × 1440 = 72
-    let mut e = engine_typical(&cfg, &needs);
-    let _ = e.tick_1s(0, env_day(0, 0));
-    let _ = e.offline_compensate(24 * 3_600_000, env_day(0, u64::MAX));
-    assert!((e.neglect.p - 72.0).abs() < 1.0, "24h 离线 P 应 ≈72，实际 {}", e.neglect.p);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
