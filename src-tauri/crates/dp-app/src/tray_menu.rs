@@ -202,6 +202,41 @@ pub fn set_state(app: &AppHandle, state: TrayIconState) -> Result<(), String> {
     Ok(())
 }
 
+/// 同步托盘图标 / tooltip / 菜单（**S7-M6**：FR-11-12 层 ② 的可见性保障）。
+///
+/// 与 [`set_state`] 的差别：本函数**同时重建菜单**——L5 离家时需追加「把{name}找回来」，
+/// 该菜单项的有无由 `left_home` 决定（`dp-platform::win::tray::menu_spec`），
+/// 而 `install` 只在启动时建一次菜单，故运行期翻转必须重建。
+///
+/// 调用方（core-loop 业务档）**只在状态变化时**调用，避免每拍重建菜单造成闪烁。
+///
+/// # Errors
+/// 托盘未安装 / 图标或菜单设置失败时返回中文可读错误串（调用方降级日志）。
+pub fn sync_state(app: &AppHandle, state: TrayIconState, left_home: bool) -> Result<(), String> {
+    let tray = app
+        .tray_by_id(TRAY_ID)
+        .ok_or_else(|| "托盘图标尚未安装（请先调用 install）".to_string())?;
+    let icon = load_icon(state)?;
+    tray.set_icon(Some(icon))
+        .map_err(|e| format!("切换托盘图标失败：{e}"))?;
+    let pet_name = current_pet_name();
+    let tooltip = tooltip_for(state, &pet_name);
+    tray.set_tooltip(Some(tooltip.as_str()))
+        .map_err(|e| format!("切换托盘提示失败：{e}"))?;
+    let items = menu_spec(
+        TrayMenuState {
+            click_through: app.state::<PetPlatform>().window.is_click_through(),
+            left_home,
+            topmost_on: TOPMOST_ON.load(Ordering::Relaxed),
+        },
+        &pet_name,
+    );
+    let menu = build_menu(app, &items)?;
+    tray.set_menu(Some(menu))
+        .map_err(|e| format!("重建托盘菜单失败：{e}"))?;
+    Ok(())
+}
+
 /// 显示 / 隐藏 pet 窗口的**统一写点**（S3-M6 托盘协同收口）。
 ///
 /// 托盘 `ShowHide` 与右键菜单 `menu_command{hide}` 均经此函数落窗口可见态，
@@ -352,11 +387,20 @@ fn apply_action(app: &AppHandle, action: TrayAction) {
         // S4-M4：L5 离家 → 「把心月狐找回来」走回。经入站通道交给 core-loop 逻辑档
         // 落地（单线程 Actor 口径，避免跨线程直改内核状态）。
         TrayAction::Recall => {
-            if let Some(channel) = app.try_state::<crate::bridge::CoreInputChannel>() {
-                channel.push(crate::bridge::CoreInput::RecallRunaway);
-            } else {
-                eprintln!("[dp-app] 托盘找回：core-loop 入站通道尚未装配，降级忽略");
-            }
+            push_core_input(app, crate::bridge::CoreInput::RecallRunaway, "找回");
+        }
+        // S7-M6（FR-11-12 层 ②）：托盘替代交互入口 —— 不可达期间 L4/L5 的**唯一出路**。
+        // 三项都只**投递**指令，由 core-loop 落地：
+        //   摸摸 = 按 `CoaxFlow` 阶段分派（呼唤 / 抚摸 / 比心；离家时为走回）；
+        //   喂食 / 洗澡 = 等效一次喂食 / 洗澡（`02 §5.23` M-05：避免穿透时长期挨饿变脏）。
+        TrayAction::Coax => {
+            push_core_input(app, crate::bridge::CoreInput::TrayCoax, "摸摸");
+        }
+        TrayAction::Feed => {
+            push_core_input(app, crate::bridge::CoreInput::TrayFeed, "喂食");
+        }
+        TrayAction::Bath => {
+            push_core_input(app, crate::bridge::CoreInput::TrayBath, "洗澡");
         }
         // S5-M4：托盘「设置」→ 显示设置窗口（`tauri.conf.json` 的 `settings` 窗口，
         // 默认 `visible:false`）。前端是 S5-M3 交付的 480×640 面板。
@@ -369,12 +413,19 @@ fn apply_action(app: &AppHandle, action: TrayAction) {
             }
             None => eprintln!("[dp-app] 未找到 settings 窗口（请检查 tauri.conf.json）"),
         },
-        // 关于对话框在 S5 之后的版本页；摸摸 / 喂食 / 洗澡的完整闭环在 S7-M6。
-        // 本模块只负责把事件送达（见文件头「职责边界」）。
-        TrayAction::About
-        | TrayAction::Coax
-        | TrayAction::Feed
-        | TrayAction::Bath => {}
+        // 关于对话框在 S5 之后的版本页；本模块只负责把事件送达（见文件头「职责边界」）。
+        TrayAction::About => {}
+    }
+}
+
+/// 把指令投给 core-loop 入站通道（`None` = 通道未装配 → 降级日志，不 panic）。
+///
+/// S7-M6 抽出：四个托盘替代入口（找回 / 摸摸 / 喂食 / 洗澡）共用同一投递与降级口径。
+fn push_core_input(app: &AppHandle, input: crate::bridge::CoreInput, what: &str) {
+    if let Some(channel) = app.try_state::<crate::bridge::CoreInputChannel>() {
+        channel.push(input);
+    } else {
+        eprintln!("[dp-app] 托盘「{what}」：core-loop 入站通道尚未装配，降级忽略");
     }
 }
 

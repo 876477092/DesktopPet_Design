@@ -26,19 +26,43 @@
 //!
 //! ## 与 S7 的切割（禁止顺手改动）
 //!
-//!   - **七因子求解归 S7-M4**：本卡不引入 `FactorSolver`。
-//!   - **自然消气通道（L3→L2）与阶段阈值内核归 S7-M5**：本卡只在 `settle_level` 中
-//!     锁死 **L4/L5 强制地板**（必须走 CoaxFlow），L3 的完整自然消气口径仍归 S7-M5。
-//!   - **敏感度滑杆 / 交互死锁三层防护（托盘入口闭环）归 S7-M6**：本卡只让 `CoaxFlow`
-//!     **接受**托盘输入并交付 `force_lower`，托盘菜单接线与 `interaction_available` 归 S7-M6。
-//!   - **口头禅改写 / 台词库重写 / 命名接入设置页归 S7-M8**：S4-M5 只交付闸门接口与
-//!     骨架内容；`positionBias` 位置偏置与「无口头禅变体改写」不在本卡。
+//!   - **七因子求解**（`presence` / `busyness` / `personality` / `rhythm` / `needs` /
+//!     `rough` / `adapt`）在 **S7-M4** 落地，实现见 [`solver`] 与六个因子子模块；
+//!   - **Mood 惯性 / 阶段状态机 / 自然消气 / 深夜重定向** 在 **S7-M5** 落地
+//!     （[`neglect`] 承载计量器，[`engine`] 承载编排）；
+//!   - **敏感度滑杆与交互死锁三层防护（托盘入口闭环）** 在 **S7-M6** 落地；
+//!   - **口头禅改写 / 台词库重写 / 命名接入设置页** 归 S7-M8：S4-M5 只交付闸门接口与
+//!     骨架内容；`positionBias` 位置偏置与「无口头禅变体改写」不在 S4 卡。
+//!
+//! ## S7-M4 交付拼接（子模块与 `02 §5.1` 文件清单的对应）
+//!
+//!   - [`presence`] → `neglect`/`presence` 中的在场因子（`02 §5.1` 的 `emotion/presence.rs`）；
+//!   - [`busyness`] → `emotion/busyness.rs`；
+//!   - [`rhythm`] → `emotion/rhythm.rs`（时段因子由 S7-M1 的 `perception::time::TimeRhythm` 提供）；
+//!   - [`personality`] → `emotion/personality.rs`；
+//!   - [`rough`] → `emotion/rough.rs`；
+//!   - [`adapt`] → `emotion/adapt.rs`（**`03 §2 S7-M4` 交付物清单漏列该文件**，
+//!     但七因子含 `adapt` 且 `02 §5.1` 明确列出 `emotion/adapt.rs` ⇒ 按 `02` 交付并登记）；
+//!   - [`neglect`] → `emotion/neglect.rs`（P 累积 / 封顶 / 阈值 / 两条保持窗口计时器）；
+//!   - [`solver`] → `emotion/solver.rs`（固定顺序快照求解）。
 
+pub mod adapt;
+pub mod busyness;
 pub mod coax;
 pub mod engine;
 pub mod lines;
+pub mod neglect;
+pub mod personality;
+pub mod presence;
+pub mod rhythm;
+pub mod rough;
+pub mod solver;
 pub mod sys_env;
 
+pub use adapt::{AdaptEvent, AdaptationState, DailySample};
+pub use busyness::{
+    BUSYNESS_LEVEL_COUNT, BusynessLevel, BusynessOutput, BusynessSolver, BusynessSmoother,
+};
 pub use coax::{
     COAX_MIN_LEVEL, COAX_REQUIRED_MIN_LEVEL, CoaxEffect, CoaxFailReason, CoaxFlow, CoaxInput,
     CoaxStep, RUNAWAY_PERFORMANCE_MS, TRAY_COAX_STROKE_TAPS, coax_target_level, stroke_target_ms,
@@ -46,6 +70,14 @@ pub use coax::{
 pub use engine::{
     ColdReason, EmotionEngine, EmotionEvent, EmotionState, NeglectPressure, OfflineOutcome,
     RateClamp, ReliefKind, Sensitivity, TickEnv, TickOutcome,
+};
+pub use neglect::{NaturalCoolMeter, UnreachableMeter};
+pub use personality::Personality;
+pub use presence::{PresenceLatch, PresenceOutput};
+pub use rhythm::{RhythmOutput, RhythmSolver};
+pub use rough::RoughTracker;
+pub use solver::{
+    FACTOR_ORDER, FactorInputs, FactorSet, FactorSolver, InteractionPolicy, SolverCtx, needs_factor,
 };
 pub use lines::{
     BUBBLE_DWELL_DEFAULT_MS, BUBBLE_DWELL_MAX_MS, BUBBLE_DWELL_MIN_MS, BubbleAction, BubbleKind,

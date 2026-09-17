@@ -82,6 +82,8 @@ pub fn run() {
             bridge::atlas_png,
             commands::menu_command,
             commands::pet_emotion_command,
+            // S7-M6：托盘替代交互入口（`02 §5.23` `pet_tray_coax(step)`）。
+            commands::pet_tray_coax,
             commands::settings_get,
             commands::settings_apply,
             commands::settings_reset_all,

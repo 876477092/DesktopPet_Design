@@ -815,7 +815,14 @@ pub fn wire_for_event(ev: &EmotionEvent, engine: &EmotionEngine<'_>) -> Option<W
         }
         EmotionEvent::ValuesChanged { .. }
         | EmotionEvent::ForceAction { .. }
-        | EmotionEvent::PersistNow => None,
+        | EmotionEvent::PersistNow
+        // S7-M4~M6 新增事件均**不上事件面**（`02 §7.6` 零新增）：三者都是
+        // 「内核 → 应用层」的**即时演出指令**（降温提示 / 摸鱼专属台词 / 可达性引导），
+        // 由 `dp-app` 直接把 `tick_1s` 返回的事件列表翻译为气泡 / 动作，
+        // 不需要跨窗口广播，也无对应线上载荷契约。
+        | EmotionEvent::RelationCooling { .. }
+        | EmotionEvent::SlackLinger { .. }
+        | EmotionEvent::InteractionReachability { .. } => None,
     }
 }
 

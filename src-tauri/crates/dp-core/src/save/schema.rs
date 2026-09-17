@@ -163,11 +163,17 @@ impl SaveFileV2 {
         value.get("v").and_then(serde_json::Value::as_u64).map(|v| v as u32)
     }
 
-    /// 用当前内核状态刷新**本卡承接段 A**（`02 §5 K-7`）。
+    /// 用当前内核状态刷新存档（`02 §5 K-7`）。
     ///
-    /// 只覆写 A 段四个位置：`values` / `emotion.{neglect,sensitivity,state}` / `meta`。
-    /// B / C / D 段**原样保留**——它们由各自的归口模块写入（配置 / S7-M2/M4 / S8），
-    /// 「谁拥有谁写」是本结构的核心不变量，本函数不越界。
+    /// 覆写范围：
+    ///   - **段 A**：`values` / `emotion.{neglect,sensitivity,state}` / `meta`
+    ///     —— ② 由 `to_pet_state` + `EmotionEngine::restore` 消费；
+    ///   - **段 C 因子侧**（**S7-M4 增量**）：`emotion.{personality,personalityRolled,adapt,rough}`
+    ///     —— ① 与 `EmotionEngine::restore_factors` 严格成对；S7-M4 前这些字段由
+    ///     S5-M1 取配置默认占位，自 S7-M4 起**由内核写**（「谁拥有谁写」不变量不变，
+    ///     只是归属方从 S5-M1 转交 S7-M4）。
+    ///
+    /// 段 B / D 段**原样保留**——它们由各自的归口模块写入（配置 / S8）。
     ///
     /// `now_ms` 为墙钟毫秒（由调用方经 `WallClock` 注入，C3）。
     pub fn capture_from(&mut self, engine: &crate::emotion::EmotionEngine<'_>, now_ms: i64) {
@@ -176,6 +182,18 @@ impl SaveFileV2 {
         self.emotion.neglect = engine.neglect;
         self.emotion.sensitivity = engine.sensitivity;
         self.emotion.state = engine.state.emotion;
+        // S7-M4：C 段因子侧（性格五维 / 首建标记 / 自适应基线 / 粗暴计量）。
+        let p = engine.personality();
+        self.emotion.personality = PersonalitySave {
+            clingy: p.clingy,
+            curiosity: p.curiosity,
+            temper: p.temper,
+            courage: p.courage,
+            diligence: p.diligence,
+        };
+        self.emotion.personality_rolled = engine.personality_rolled();
+        self.emotion.adapt = engine.adapt().to_save();
+        self.emotion.rough = engine.rough().to_save();
         // 段 A 的元信息：`last_tick_ms` 同时镜像在 `state` 与引擎内部，取快照侧即可
         // （`tick_1s` / `offline_compensate` 都同步写了 `state.last_tick_ms`）。
         self.meta.last_tick_ms = engine.state.last_tick_ms;
@@ -849,9 +867,13 @@ mod tests {
         assert_eq!(SaveFileV2::peek_version(&serde_json::json!("x")), None);
     }
 
-    /// 承接段 A 的写入必须**不越界**改动 B/C/D 段（归属不变量）。
+    /// 承接写入必须**不越界**改动非归属段（归属不变量）。
+    ///
+    /// S7-M4 归属变更：段 C 的**因子侧**（`personality` / `personalityRolled` / `adapt` /
+    /// `rough`）自 S7-M4 起由内核写（S5-M1 时只是配置默认占位），故本用例的「越界」
+    /// 边界相应收缩为：B 段全部 + C 段的 `needs` + D 段。
     #[test]
-    fn capture_from_only_touches_section_a() {
+    fn capture_from_covers_section_a_and_factor_state() {
         let cfg: &'static EmotionConfig = Box::leak(Box::new(EmotionConfig::default()));
         let needs: &'static NeedsConfig = Box::leak(Box::new(NeedsConfig::default()));
         let mut engine = crate::emotion::EmotionEngine::new(cfg, needs);
@@ -881,11 +903,15 @@ mod tests {
         assert_eq!(save.meta.today, "2026-09-15");
         assert_eq!(save.meta.last_seen_ms, 1_700_000_001_000);
         assert_eq!(save.v, SAVE_VERSION);
-        // 段 B/C/D 原样
+        // 段 C 因子侧：由内核写（S7-M4 起），会覆盖预置值
+        let want_temper = crate::config::model::PersonalityDefaultsCfg::default().temper;
+        assert_eq!(save.emotion.personality.temper, want_temper, "性格五维归内核写");
+        assert!(!save.emotion.personality_rolled, "未随过：标记保持 false");
+        assert_eq!(save.emotion.rough.value, 1.0, "粗暴计量归内核写（默认中性）");
+        assert_eq!(save.emotion.adapt.samples.len(), 0, "自适应样本归内核写");
+        // 段 B 全部 + C 段 needs + D 段：原样
         assert_eq!(save.pet.name, "X");
         assert!(!save.pet.catchphrase.enabled);
-        assert_eq!(save.emotion.personality.temper, 0.9);
-        assert_eq!(save.emotion.rough.value, 1.5);
         assert_eq!(save.needs.scent_buff_until_ms, 777);
         assert_eq!(save.settings.performance.renderer, "frame");
         assert_eq!(save.economy["coin"], 1234);

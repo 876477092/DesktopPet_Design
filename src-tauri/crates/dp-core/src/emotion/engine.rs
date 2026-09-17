@@ -1,4 +1,4 @@
-//! `emotion::engine`：情绪 tick 内核（`02 §5 K-5`；S4-M1 骨架）。
+//! `emotion::engine`：情绪 tick 编排内核（`02 §5 K-5` / §5.1~5.5；S4-M1 骨架 + S7-M4~M7 合入）。
 //!
 //! ## 时间纪律（C3）
 //!
@@ -6,38 +6,59 @@
 //! `dp-app` 的 `WallClock::now_ms()` 一致）。`now_local` 仅用于时段判定
 //! （深夜重定向 / 日切），也由调用方经 [`TickEnv`] 注入。
 //!
-//! ## 本卡（S4-M1）口径
+//! ## tick 六步结构（`02 §5.2`）
 //!
-//! 台账 P2-1 裁定：「结构占位 + `emotion.json` v2 冻结阈值简化判定，S7-M5 只换判定内核」。
-//! 因此 [`EmotionEngine::tick_1s`] 保留 `02 §5.2` 的**六步结构**（暂停 → 速率 → ΔP →
-//! 自然消气计量 → 阶段结算 → Mood 惯性），但**第 1 步的七因子求解是简化版**：
-//! 速率 = 在场因子 × 敏感度钳制（见 [`FactorProduct::from_env`]），真实七因子归 S7-M4。
-//! 第 3~6 步已按 `02` 冻结口径完整实装，S7-M5 只需替换第 1~2 步的速率来源，其余零改动。
+//! ```text
+//! 0.   暂停判定（锁屏 / 远程桌面 / 全屏前台 / 演出中）→ 冻结 P 且不跳变
+//! 0.5  需求推进（S7-M2）+ 耦合求解（S7-M3）
+//! 1.   七因子固定顺序求解（S7-M4；emotion::solver::FactorSolver）
+//! 2.   ΔP 累积 + 忙碌档位封顶（12 / 28 / 120；外出期间冻结）
+//! 3.   自然消气计量（仅 L3 维护；S7-M5）+ 摸鱼档期计量（AC-19）
+//! 4.   阶段结算（60s 升级 / 30s 回退 / 不跳级 / 自然消气 / 深夜重定向）
+//! 5.   Mood 一阶低通惯性（τ 变坏 20s、变好 90s）
+//! 6.   日切（自适应基线滚动 + 自然消气复位）
+//! ```
+//!
+//! ## 敏感度（FR-11-11）与 P2-2 裁定
+//!
+//! `effectiveRate = 七因子乘积 × sensitivityFactor`，按 `rateClamp` 钳制（默认 0.5~1.6）。
+//! **P2-2 裁定（2026-09-15）**：离线补偿（§5.5 / RV-16）与 P 封顶判定一律使用
+//! **unclamped raw 速率**（[`Sensitivity::effective_rate_raw`]）；clamped 的
+//! [`Sensitivity::effective_rate`] 仅用于实时 tick 累积速率缩放。
+//! 单一裁决点在 [`rate_from`]（`raw < clamp.min` 时走 raw 通道）。
 //!
 //! ## 禁止顺手改动
 //!
-//! 不引入七因子求解器（S7-M4）；不接台词 / 气泡（S4-M5）。`EmotionEvent` 是
-//! **内核算法的返回值**，不是 Tauri 事件。
+//! 不改七因子**顺序**（破坏确定性，`02 §9.2`）；不改 P 阶段阈值（单一真源 `emotion.json`）；
+//! 不为过测而调阈值。`EmotionEvent` 是**内核算法的返回值**，不是 Tauri 事件。
 //!
-//! ## S4-M3 / S4-M4 增量
+//! ## S7-M6 增量（敏感度 + 交互死锁三层防护）
 //!
-//!   - 交互缓解表 `relief.*` + `cooldownSec` + `strokeMaxPerWindow`（FR-11-7）；
-//!   - 道歉三部曲接线（[`EmotionEngine::coax_input`] / [`EmotionEngine::coax_stroke_tick`]）
-//!     + 进度环事件（`CoaxProgress/Succeeded/Failed`）；
-//!   - **L4/L5 强制地板**：不开放自然回退，只能走 CoaxFlow（`01 §6.5.2`）；
-//!   - [`EmotionEngine::force_lower`] 兜底（`02 §5.23` R18）。
+//!   - FR-11-11 敏感度：`set_sensitivity_value` 钳 `[rateClamp.min, rateClamp.max]`；
+//!   - FR-11-12 层 ①：不可达 → `presenceFactor = unavailablePresenceFactor`（**不归零**）；
+//!   - FR-11-12 层 ②：托盘替代入口（`coax_tray_stroke` / `coax_tray_heart` / `recall` /
+//!     喂食 / 洗澡），**仍须走完整三部曲**（产品底线不动）；
+//!   - FR-11-12 层 ③：不可达时 `P<10` 持续 180s + 近 2h 无负向 → **仅 L4→L3**（L5 永不）。
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{Datelike, Local};
 
 use crate::config::model::{EmotionLevelCfg, MoodDimCfg};
 use crate::needs::coupling::{CouplingOutput, CouplingSolver, CouplingSnapshot};
 use crate::needs::{NeedsEnv, NeedsOutcome, NeedsSystem};
 use crate::perception::time::{minute_of_day, TimeRhythm};
+use crate::perception::ActivitySample;
+use crate::emotion::adapt::AdaptationState;
+use crate::emotion::busyness::BusynessLevel;
 use crate::emotion::coax::{
-    CoaxEffect, CoaxFailReason, CoaxFlow, CoaxInput, CoaxStep, COAX_REQUIRED_MIN_LEVEL,
+    CoaxEffect, CoaxFailReason, CoaxFlow, CoaxInput, CoaxStep, COAX_MIN_LEVEL,
     COAX_SUCCESS_ACTION, COAX_SUCCESS_PRIORITY,
 };
+use crate::emotion::neglect::{self, NaturalCoolMeter, UnreachableMeter};
+use crate::emotion::personality::Personality;
+use crate::emotion::rough::RoughTracker;
+use crate::emotion::solver::{FactorInputs, FactorSet, FactorSolver, InteractionPolicy, SolverCtx};
 use crate::interaction::router::InteractionKind;
+use crate::save::schema::EmotionSave;
 use crate::state::PetState;
 
 /// 情绪状态机展示态（`02 §4.3`，14 值冻结词表）。
@@ -207,6 +228,36 @@ pub enum EmotionEvent {
         /// 失败原因。
         reason: CoaxFailReason,
     },
+    /// 关系降温事件（S7-M4；`02 §5.4` `AdaptEvent`）。
+    ///
+    /// 等级 1 = 连续 `coolDays` 天日均有效互动不足（关闭自然消气 + `P × coolMultiplier`）；
+    /// 等级 2 = 连续 `zeroDays` 天几乎零互动（回归冷淡台词 / 停主动求助归 S7-M8）。
+    RelationCooling {
+        /// 降温等级（1 / 2）。
+        level: u8,
+    },
+    /// 摸鱼专属提示（S7-M5 / **AC-19**）：前台播放视频等摸鱼应用持续 `slackLingerSec`
+    /// （默认 40min）且已进入 L3+ → 触发「你明明在看屏幕…却不看我」专属台词面。
+    ///
+    /// **台词内容归 S7-M8**：`lines.json` 现无「摸鱼专属」池，本事件只承载**触发时机 +
+    /// 建议池键**（复用 L3 `sulking` 池），由 `dp-app` 走常规气泡通道。
+    SlackLinger {
+        /// 已持续摸鱼的分钟数。
+        minutes: u32,
+        /// 建议台词池键（`levels[level].linePool`，配置驱动，代码内不写字面量）。
+        pool: String,
+    },
+    /// 交互可达性迁移（S7-M6 / FR-11-12 可解释性）：进入 / 退出「不可达」。
+    ///
+    /// `available == false` = 进入不可达（穿透 / 钩子卸载 / 勿扰）；`true` = 恢复。
+    /// 引导文案（「心心知道你现在点不到我，不闹你啦~」等）由 `dp-app` 依 `level` 生成，
+    /// 台词内容归 S7-M8。
+    InteractionReachability {
+        /// 迁移后的可达性。
+        available: bool,
+        /// 迁移时的档位（文案分级用：`P ≥ 30` 时提示托盘入口）。
+        level: u8,
+    },
     /// 需要落盘（阶段变化 / 数值跨界）。
     PersistNow,
 }
@@ -297,11 +348,11 @@ impl Default for Sensitivity {
     }
 }
 
-/// 每 tick 由调用方组装的不可变环境快照（`02 §4.2` 精简版 · S4-M1 骨架）。
+/// 每 tick 由调用方组装的不可变环境快照（`02 §4.2`）。
 ///
-/// 与 `02 §4.2` 完整版相比，本卡只保留骨架必需字段（暂停 / 在场 / 交互净增益 /
-/// 目的地时段 / 外出冻结）；七因子原始输入（击键强度、前台哈希、全屏等）归 S7-M4，
-/// 此处以 `preset_idle_ms` 统一承载「在场判定」这一 S4 必需信息。
+/// 七因子的全部原始输入都在此承载：在场（`preset_idle_ms`）、忙碌（`activity`）、
+/// 需求（`satiety` / `cleanliness`）、时段（`now_local`）、粗暴 / 自适应 / 性格
+/// （内核内部计量器），以及 FR-11-12 的 `interaction_available`。
 #[derive(Clone, Copy, Debug)]
 pub struct TickEnv<'a> {
     /// 本地时间（时段判定 / 日切；由调用方经 `WallClock::now_local()` 取，C3）。
@@ -314,7 +365,7 @@ pub struct TickEnv<'a> {
     pub activity_running: bool,
     /// 本 tick 交互净增益（Mood 加项；S4-M1 为 0，S4-M2 起由事件总线喂入）。
     pub event_delta: f32,
-    /// 用户空闲毫秒（在场判定：≥ `presence.awayThresholdSec` 判离场 /  hysteresis 迟滞）。
+    /// 用户空闲毫秒（在场判定：≥ `presence.awayThresholdSec` 判离场 / hysteresis 迟滞）。
     pub preset_idle_ms: u64,
     /// 交互可达（穿透 / 钩子卸载 / 勿扰时为 false，FR-11-12 三层防护 ①）。
     pub interaction_available: bool,
@@ -322,7 +373,14 @@ pub struct TickEnv<'a> {
     pub satiety: f32,
     /// 需求快照：清洁度。
     pub cleanliness: f32,
-    /// 生命周期占位（保持 `TickEnv<'a>` 与 `02` 签名同构，S7-M4 填入 `&InputIntensity`）。
+    /// 活动感知采样（S7-M1 载荷；`None` = 感知关闭 / 不可用 ⇒ 忙碌档退化轻度）。
+    ///
+    /// **隐私**：载荷只含计数类强度与进程类别哈希，本内核不接触任何内容型数据。
+    pub activity: Option<ActivitySample>,
+    /// 本拍是否发生负向事件（甩出 / 戳痒 / 打断）——自然消气与兜底窗口的中断输入。
+    pub negative_happened: bool,
+    /// 生命周期占位（保持 `TickEnv<'a>` 与 `02` 签名同构；`busyness` 原始量已由
+    /// `activity` 承载，本字段仅为**签名兼容**而保留，不参与任何判定）。
     pub _marker: core::marker::PhantomData<&'a ()>,
 }
 
@@ -338,39 +396,10 @@ impl<'a> Default for TickEnv<'a> {
             interaction_available: true,
             satiety: 70.0,
             cleanliness: 85.0,
+            activity: None,
+            negative_happened: false,
             _marker: core::marker::PhantomData,
         }
-    }
-}
-
-/// S4-M1 简化因子乘积来源（**替换点**：S7-M4 换成真实七因子求解器）。
-///
-/// S4-M1 口径 = `presence`（在场 / 离场）× 交互可达性（FR-11-12 层 ①）；
-/// `busyness` / `personality` / `rhythm` / `needs` / `rough` / `adapt` 恒 `1.0`
-/// （即「因子未引入」的显式表达，避免隐式默认值散落）。
-#[derive(Clone, Copy, Debug)]
-struct FactorProduct {
-    presence: f32,
-    interaction: f32,
-}
-
-impl FactorProduct {
-    /// 计算原始乘积（未加敏感度）。
-    #[inline]
-    fn raw(&self) -> f32 {
-        self.presence * self.interaction
-    }
-
-    /// 从环境快照求解（S4-M1 简化版）。
-    fn from_env(env: &TickEnv<'_>, engine: &mut EmotionEngine, now_ms: i64) -> (Self, bool) {
-        let presence = engine.presence_factor(env, now_ms);
-        // FR-11-12 层 ①：交互不可达时同档「不在场」（不归零，避免"开穿透=永不生气"作弊）。
-        let interaction = if env.interaction_available {
-            1.0
-        } else {
-            engine.cfg.presence.factor_away.max(0.0)
-        };
-        (Self { presence, interaction }, presence > engine.cfg.presence.factor_away)
     }
 }
 
@@ -387,25 +416,11 @@ fn rate_from(sensitivity: &Sensitivity, raw: f32) -> f32 {
     }
 }
 
-/// 在场判定迟滞状态（`presence.hysteresisSec`）。
-#[derive(Clone, Copy, Debug, Default)]
-struct PresenceLatch {
-    /// 当前判定为在场。
-    here: bool,
-    /// 判定翻转的候选起始时刻。
-    since_ms: Option<i64>,
-}
-
-impl PresenceLatch {
-    fn new() -> Self {
-        Self { here: true, since_ms: None }
-    }
-}
-
-/// 情绪内核（`02 §4.1` `EmotionEngine`，S4-M1 骨架范围）。
+/// 情绪内核（`02 §4.1` `EmotionEngine`）。
 ///
-/// 持有：配置（借用）、数值状态、P 与阶段、因子、自适应基线、简化因子来源。
-/// **不持有**：台词 / 气泡 / 道歉三部曲 / 事件总线（分别归 S4-M5 / S4-M3 / S4-M2）。
+/// 持有：配置（借用）、六维数值、P 与阶段、七因子求解器与四组计量器（性格 / 粗暴 /
+/// 自适应 / 两条保持窗口）、需求系统、耦合求解器、道歉三部曲。
+/// **不持有**：台词 / 气泡（归 S4-M5 + S7-M8）与事件总线（归 S4-M2）。
 pub struct EmotionEngine<'c> {
     cfg: &'c crate::config::model::EmotionConfig,
     needs_cfg: &'c crate::config::model::NeedsConfig,
@@ -415,23 +430,41 @@ pub struct EmotionEngine<'c> {
     pub neglect: NeglectPressure,
     /// 敏感度。
     pub sensitivity: Sensitivity,
-    /// 当前因子乘积（简化版；供快照 / 原因卡）。
-    factors: FactorProduct,
-    /// 在场迟滞。
-    presence_latch: PresenceLatch,
-    /// 日常基线（S7-M4 自适应基线的占位：恒 1.0 = 不缩放）。
-    adapt_factor: f32,
-    /// 性格「脾气」维（影响阈值比较值与 Mood 扣减幅度；完整五维归 S7-M4）。
-    temper: f32,
+    /// 本拍七因子快照（S7-M4；供快照投影 / 原因卡）。
+    factors: FactorSet,
+    /// 七因子求解器（S7-M4：在场迟滞 + 忙碌平滑 + 节律预热）。
+    solver: FactorSolver,
+    /// 五维隐藏性格（S7-M4；首建随机 + 存档持久化）。
+    personality: Personality,
+    /// 性格是否已随过（首次创建随机完成标记；存档段 C `personalityRolled`）。
+    personality_rolled: bool,
+    /// 粗暴对待计量（S7-M4；存档段 C `emotion.rough`）。
+    rough: RoughTracker,
+    /// 自适应基线（S7-M4；存档段 C `emotion.adapt`）。
+    adapt: AdaptationState,
+    /// 自然消气计量（S7-M5；仅 L3→L2）。
+    natural_cool: NaturalCoolMeter,
+    /// 交互不可达时的 L4→L3 兜底计量（S7-M6；L5 永不开放）。
+    unreachable: UnreachableMeter,
+    /// 交互可达性策略（S7-M6；`settings.json.interaction` 的配置投影）。
+    interaction: InteractionPolicy,
+    /// 上一拍交互可达性（迁移检测 → `InteractionReachability` 事件；`None` = 尚未判定）。
+    last_interaction_available: Option<bool>,
+    /// 摸鱼档起始时刻（AC-19；绝对锚定，`None` = 未在摸鱼）。
+    slack_since_ms: Option<i64>,
+    /// 摸鱼专属台词本**档期内**是否已触发（避免每拍重复播报）。
+    slack_hint_fired: bool,
     /// 上次 tick 的墙钟毫秒（`None` = 尚未 tick）。
     last_tick_ms: Option<i64>,
     /// 上次 tick 注入的本地时间（**不读时钟**，仅缓存上游经 `WallClock` 取到的值；
-    /// 供 `settle_level` 的深夜重定向判定使用，C3）。
+    /// 供深夜重定向判定使用，C3）。
     last_now_local: chrono::DateTime<Local>,
     /// 离线补偿期间是否处于「想念」展示（供快照）。
     longing: bool,
-    /// 今日净正向交互数（自然消气条件②的计量，S4-M1 只维护不消费）。
+    /// 今日净正向交互数（自然消气条件②的计量）。
     positive_interactions: u32,
+    /// 最近一次正向交互时刻（自适应基线间隔采样用；`None` = 尚无前驱）。
+    last_interaction_ms: Option<i64>,
     /// 道歉三部曲状态机（S4-M3 / S4-M4）。
     coax: CoaxFlow,
     /// 交互缓解冷却与抚摸窗口（S4-M3）。
@@ -489,14 +522,23 @@ impl<'c> EmotionEngine<'c> {
                 value: cfg.sensitivity.value,
                 rate_clamp: RateClamp { min: cfg.sensitivity.rate_clamp.min, max: cfg.sensitivity.rate_clamp.max },
             },
-            factors: FactorProduct { presence: cfg.presence.factor_here, interaction: 1.0 },
-            presence_latch: PresenceLatch::new(),
-            adapt_factor: 1.0,
-            temper: cfg.personality.defaults.temper,
+            factors: FactorSet::default(),
+            solver: FactorSolver::new(&cfg.busyness),
+            personality: Personality::from_cfg(&cfg.personality),
+            personality_rolled: false,
+            rough: RoughTracker::default(),
+            adapt: AdaptationState::default(),
+            natural_cool: NaturalCoolMeter::new(),
+            unreachable: UnreachableMeter::new(),
+            interaction: InteractionPolicy::default(),
+            last_interaction_available: None,
+            slack_since_ms: None,
+            slack_hint_fired: false,
             last_tick_ms: None,
             last_now_local: chrono::Local::now(),
             longing: false,
             positive_interactions: 0,
+            last_interaction_ms: None,
             coax: CoaxFlow::new(),
             relief: ReliefTracker::default(),
             needs: NeedsSystem::new(),
@@ -509,7 +551,8 @@ impl<'c> EmotionEngine<'c> {
 
     /// 由存档恢复（**S5-M2「补偿接入」**，`02 §5 K-7` 段 A + §6.1 启动时序）。
     ///
-    /// 与 [`Self::new`] 的差别：整体接管 `state` / `neglect` / `sensitivity` / `last_tick_ms`。
+    /// 与 [`Self::new`] 的差别：整体接管 `state` / `neglect` / `sensitivity` / `last_tick_ms`，
+    /// 并按 `emotion.*` 段整体恢复 S7-M4 的四组计量器（性格 / 粗暴 / 自适应 / 展示态）。
     ///
     /// **调用时机是硬约束**：必须在**首个 [`Self::tick_1s`] 之前**调用（`dp-app` 在
     /// `build_state` 内、core-loop 线程启动前完成）。原因：`tick_1s` 在
@@ -534,6 +577,28 @@ impl<'c> EmotionEngine<'c> {
         engine.last_tick_ms = Some(last_tick_ms);
         engine.longing = engine.state.emotion == EmotionState::Longing;
         engine
+    }
+
+    /// 由存档 `emotion.*` 段恢复 S7-M4 的四组计量器（**追加式 API**，不破坏既有 `restore`）。
+    ///
+    /// 与 [`Self::restore`] 的分工：本方法只管**后加的因子侧状态**（性格 / 粗暴 / 自适应 /
+    /// 展示态），六维数值与 P / 敏感度仍由 `restore` 接管。调用时机同样是**首个 tick 之前**。
+    ///
+    /// `personalityRolled == false`（全新档 / 老档升级）时**不**立即随机：留给首个
+    /// [`Self::tick_1s`] 用注入的 `now_ms` 作种子，保证「首建随机只发生一次」且可复现。
+    pub fn restore_factors(&mut self, save: &EmotionSave) {
+        let mut p = Personality {
+            clingy: save.personality.clingy,
+            curiosity: save.personality.curiosity,
+            temper: save.personality.temper,
+            courage: save.personality.courage,
+            diligence: save.personality.diligence,
+        };
+        p.clamp();
+        self.personality = p;
+        self.personality_rolled = save.personality_rolled;
+        self.rough = RoughTracker::from_save(&save.rough, &self.cfg.rough);
+        self.adapt = AdaptationState::from_save(&save.adapt);
     }
 
     /// 只读：配置引用。
@@ -611,6 +676,20 @@ impl<'c> EmotionEngine<'c> {
         self.positive_interactions
     }
 
+    /// 只读：自然消气保持窗口已持续毫秒（`None` = 未在计时；诊断 / 单测）。
+    #[inline]
+    #[must_use]
+    pub fn natural_cool_hold_ms(&self, now_ms: i64) -> Option<i64> {
+        self.natural_cool.hold_elapsed_ms(now_ms)
+    }
+
+    /// 只读：自然消气窗口内正向交互数（诊断 / 单测）。
+    #[inline]
+    #[must_use]
+    pub fn natural_cool_positives(&self) -> usize {
+        self.natural_cool.positive_count()
+    }
+
     /// 只读：阶段定义（按 [`NeglectPressure::level`] 取，越界回退 L0）。
     pub fn current_level_cfg(&self) -> &EmotionLevelCfg {
         let idx = (self.neglect.level as usize).min(self.cfg.levels.len().saturating_sub(1));
@@ -623,6 +702,79 @@ impl<'c> EmotionEngine<'c> {
         crate::state::PetValues::boredom_display(self.neglect.p, self.cfg.thresholds.l5 as f32)
     }
 
+    /// 只读：本拍七因子快照（S7-M4）。
+    #[inline]
+    pub const fn factors(&self) -> FactorSet {
+        self.factors
+    }
+
+    /// 只读：五维隐藏性格（S7-M4）。
+    #[inline]
+    pub const fn personality(&self) -> Personality {
+        self.personality
+    }
+
+    /// 只读：性格是否已随机（首建随机完成标记）。
+    #[inline]
+    pub const fn personality_rolled(&self) -> bool {
+        self.personality_rolled
+    }
+
+    /// 设置五维性格（S7-M4：首建随机的显式覆盖口；S10 设置页重掷入口）。
+    ///
+    /// 调用即视为「已随过」（`personality_rolled = true`），避免紧随其后的首个 tick
+    /// 再把值覆盖掉；非有限维按 `0.5` 兜底并整体钳 `[0,1]`（见 `Personality::clamp`）。
+    pub fn set_personality(&mut self, personality: Personality) {
+        let mut p = personality;
+        p.clamp();
+        self.personality = p;
+        self.personality_rolled = true;
+    }
+
+    /// 只读：粗暴对待计量（S7-M4）。
+    #[inline]
+    pub const fn rough(&self) -> RoughTracker {
+        self.rough
+    }
+
+    /// 只读：自适应基线（S7-M4）。
+    #[inline]
+    pub const fn adapt(&self) -> &AdaptationState {
+        &self.adapt
+    }
+
+    /// 只读：交互可达性策略（S7-M6）。
+    #[inline]
+    pub const fn interaction_policy(&self) -> InteractionPolicy {
+        self.interaction
+    }
+
+    /// 热更新交互可达性策略（S7-M6；`dp-app` 从 `settings.json.interaction` 注入）。
+    ///
+    /// 仅接管**数值口径**（不可达在场因子 / 层 ③ 阈值与兜底等级）；`available` 由每拍
+    /// [`TickEnv::interaction_available`] 如实喂入，避免两处真源。
+    pub fn set_interaction_policy(&mut self, policy: InteractionPolicy) {
+        self.interaction = InteractionPolicy { available: self.interaction.available, ..policy };
+    }
+
+    /// 只读：关系降温乘子（`01 §6.11.7`；非降温期 1.0）。
+    #[inline]
+    pub const fn cool_multiplier(&self) -> f32 {
+        self.factors.cool_mul
+    }
+
+    /// 只读：错过 / 未错过——本拍是否处于「开机宽限」窗口（诊断用）。
+    #[inline]
+    pub const fn in_warmup(&self) -> bool {
+        self.factors.warmup
+    }
+
+    /// 只读：忙碌档位（S7-M4；诊断日志只记档位，`02 §5.6` ⑥）。
+    #[inline]
+    pub const fn busyness_level(&self) -> BusynessLevel {
+        self.factors.busyness_level
+    }
+
     /// 只读：展示态（`02 §4.3`；`pet://state` 投影用）。
     #[inline]
     pub fn emotion_state(&self) -> EmotionState {
@@ -631,27 +783,25 @@ impl<'c> EmotionEngine<'c> {
 
     /// 七因子投影（`02 §4.3` `neglect.factors`，S4-M2 起供 `pet://state`）。
     ///
-    /// **S4-M1 口径说明**：内核当前只引入 `presence`（含 FR-11-12 层① 的「交互可达性」
-    /// 折扣——`02 §5.23` 把不可达折进 `presenceFactor=0.05`，**不是**独立因子）
-    /// 与 `adapt`（S4-M1 恒 1.0）；其余五项（`busyness` / `personality` / `rhythm` /
-    /// `needs` / `rough`）恒 `1.0` —— 这是「因子未引入」的**显式表达**
-    /// （`02 §4.2` 完整七因子归 S7-M4）。
+    /// **S7-M4 口径**：七槽全部为**真实因子**（固定顺序见
+    /// [`crate::emotion::solver::FACTOR_ORDER`]），`product` 与七槽乘积**严格自洽**
+    /// ——前端由 `product == presence × busyness × … × adapt` 反算时无需特殊分支。
     ///
-    /// `presence` 槽 = 内核 `presence × interaction` 的**有效覆盖因子**（即把不可达
-    /// 折扣合入在场因子），`product` 与之一致——保证前端由
-    /// `product == presence × busyness × … × adapt` 反算时自洽。
+    /// 两点刻意的不一致（均为既有契约，不是缺陷）：
+    ///   - **敏感度不进七槽**（FR-11-11：它是独立乘子 `effectiveRate = 乘积 × 敏感度`）；
+    ///   - **关系降温乘子不进 `product`**（`02 §9.2` 不变量 ⑥ 要求 `adapt ∈ [0.7,1.3]`，
+    ///     且 `product` 必须与七槽自洽 ⇒ 降温乘子单列 [`Self::cool_multiplier`]）。
     #[must_use]
     pub fn factors_snapshot(&self) -> crate::event::FactorsSnapshot {
-        let product = self.factors.raw() * self.adapt_factor;
         crate::event::FactorsSnapshot {
-            presence: self.factors.presence * self.factors.interaction,
-            busyness: 1.0,
-            personality: 1.0,
-            rhythm: 1.0,
-            needs: 1.0,
-            rough: 1.0,
-            adapt: self.adapt_factor,
-            product,
+            presence: self.factors.presence,
+            busyness: self.factors.busyness,
+            personality: self.factors.personality,
+            rhythm: self.factors.rhythm,
+            needs: self.factors.needs,
+            rough: self.factors.rough,
+            adapt: self.factors.adapt,
+            product: self.factors.product,
         }
     }
 
@@ -665,62 +815,37 @@ impl<'c> EmotionEngine<'c> {
         crate::event::project_snapshot(self, "", 0)
     }
 
-    /// 在场判定（含迟滞）。
-    ///
-    /// `preset_idle_ms >= awayThresholdSec×1000` 判离场，需持续 `hysteresisSec` 才翻转，
-    /// 避免临界抖动导致 P 速率噪声。
-    fn presence_factor(&mut self, env: &TickEnv<'_>, now_ms: i64) -> f32 {
-        self.presence_latch.here = presence_decide(
-            &mut self.presence_latch,
-            env.preset_idle_ms,
-            self.cfg.presence.away_threshold_sec,
-            self.cfg.presence.hysteresis_sec,
-            now_ms,
-        );
-        if self.presence_latch.here {
-            self.cfg.presence.factor_here
-        } else {
-            self.cfg.presence.factor_away
-        }
-    }
-
     /// 阶段阈值比较值（`02 §5.3`：`P_eff = P / threshold_scale`）。
     ///
     /// `threshold_scale = 1.2 − 0.4 × temper`，`temper=0.5` 时精确等于 1.0，
-    /// 保证典型场景对齐 5/15/30/60/120。
+    /// 保证典型场景对齐 5/15/30/60/120（S7-M4 起由 [`Personality`] 提供）。
     #[inline]
     fn threshold_scale(&self) -> f32 {
-        let s = self.cfg.personality.threshold_scale_base
-            - self.cfg.personality.threshold_scale_temper * self.temper;
-        if s > 0.0 {
-            s
-        } else {
-            1.0
-        }
+        self.personality.threshold_scale(&self.cfg.personality)
     }
 
     /// Mood 扣减幅度缩放（`02 §5.3`：`mood_delta_scale = 0.8 + 0.4 × temper`）。
     #[inline]
     fn mood_delta_scale(&self) -> f32 {
-        self.cfg.personality.mood_delta_base + self.cfg.personality.mood_delta_temper * self.temper
+        self.personality.mood_delta_scale(&self.cfg.personality)
     }
 
-    /// 阶段判定：`P_eff` → 目标档位（`02 §5.3` 冻结阈值表）。
+    /// 阶段判定：`P_eff` → 目标档位（`02 §5.3` 冻结阈值表；实装在 `neglect`）。
+    #[inline]
     fn level_for(&self, p_eff: f32) -> u8 {
-        let t = &self.cfg.thresholds;
-        if p_eff >= t.l5 as f32 {
-            5
-        } else if p_eff >= t.l4 as f32 {
-            4
-        } else if p_eff >= t.l3 as f32 {
-            3
-        } else if p_eff >= t.l2 as f32 {
-            2
-        } else if p_eff >= t.l1 as f32 {
-            1
-        } else {
-            0
+        neglect::level_for(p_eff, &self.cfg.thresholds)
+    }
+
+    /// 首建性格随机（S7-M4）：`personalityRolled == false` 时以注入 `now_ms` 为种子。
+    ///
+    /// 只随机**粘人度**（`clingyInitMin~Max` = 45~55），保证出厂 `personalityFactor ∈
+    /// [0.96, 1.04]`，与 AC-16 的 ±10% 容差自洽；重掷（放开全区间）归 S10 设置页。
+    fn ensure_personality_rolled(&mut self, now_ms: i64) {
+        if self.personality_rolled {
+            return;
         }
+        self.personality = Personality::roll_initial(now_ms.max(0) as u64, &self.cfg.personality);
+        self.personality_rolled = true;
     }
 
     /// 1Hz 业务 tick（`02 §5.2` 六步结构的 S4-M1 实装）。
@@ -729,6 +854,11 @@ impl<'c> EmotionEngine<'c> {
     pub fn tick_1s(&mut self, now_ms: i64, env: TickEnv<'_>) -> TickOutcome {
         // 暂停观察（P2-2：起止时间戳入状态；幂等）
         let pause_changed = self.state.pause.observe(env.session_paused, now_ms);
+
+        // 0.1) 首建性格随机（S7-M4）。**必须在首拍早退之前**：首拍只建基线不求解因子，
+        //      若放在其后，「全新安装的首拍」不会随机，性格会拖到第 2 拍才定。
+        //      种子取注入的 `now_ms`（C3 不读时钟），且「只发生一次」（标记随存档持久化）。
+        self.ensure_personality_rolled(now_ms);
 
         let Some(last) = self.last_tick_ms else {
             // 首拍：建立基线，不产生任何累积（避免把启动前的空闲算成冷落）。
@@ -753,6 +883,8 @@ impl<'c> EmotionEngine<'c> {
             self.neglect.rate_per_min = 0.0;
             self.neglect.pending_since_ms = None;
             self.neglect.pending_level = self.neglect.level;
+            // 暂停期间不维护预热窗口（宽限语义只对「刚回到电脑前」成立）。
+            self.solver.clear_warmup();
             return TickOutcome { events: vec![], pause_changed };
         }
 
@@ -776,21 +908,60 @@ impl<'c> EmotionEngine<'c> {
             None => CouplingOutput::default(),
         };
 
-        // ── 1) 因子求解（S4-M1 简化版；S7-M4 只替换这里）────────────────────
-        let (factors, _here) = FactorProduct::from_env(&env, self, now_ms);
-        self.factors = factors;
-        let raw = factors.raw() * self.adapt_factor;
+        // ── 1) 七因子固定顺序求解（S7-M4，`02 §5.2`；`solver` 内各步只读本拍快照）──
+        let mut policy = self.interaction;
+        // FR-11-12 层 ①：可达性**每拍如实喂入**（single source = TickEnv）。
+        policy.available = env.interaction_available;
+        let inputs = FactorInputs {
+            idle_ms: env.preset_idle_ms,
+            activity: env.activity.as_ref(),
+            satiety: self.state.values.satiety,
+            cleanliness: self.state.values.cleanliness,
+            personality: &self.personality,
+            rough: &self.rough,
+            adapt: &self.adapt,
+        };
+        let ctx = SolverCtx {
+            presence_cfg: &self.cfg.presence,
+            busyness_cfg: &self.cfg.busyness,
+            needs_cfg: &self.cfg.needs,
+            personality_cfg: &self.cfg.personality,
+            rhythm_cfg: &self.cfg.rhythm,
+            rhythm_table: &self.rhythm,
+            rough_cfg: &self.cfg.rough,
+            adapt_cfg: &self.cfg.adapt,
+            interaction: policy,
+        };
+        self.factors = self.solver.solve(now_ms, &env.now_local, &inputs, &ctx);
+        // 速率 = 七因子乘积 × 降温乘子 × 敏感度（FR-11-11；钳制见 `rate_from`）。
+        let raw = self.factors.product * self.factors.cool_mul;
         self.neglect.rate_per_min = rate_from(&self.sensitivity, raw);
 
-        // ── 2) ΔP 累积 + 忙碌封顶（外出期间冻结，`emotion.activity`）────────
+        // ── 2) ΔP 累积 + 忙碌档位封顶（12 / 28 / 120；外出期间冻结）──────────
         if !env.activity_running {
-            let cap = self.cfg.busyness.cap_free as f32;
-            self.neglect.cap = cap;
-            self.neglect.p = (self.neglect.p + dt_min * self.neglect.rate_per_min).clamp(0.0, cap);
+            let rate = self.neglect.rate_per_min;
+            neglect::accrue(&mut self.neglect, dt_min, rate, self.factors.busyness_cap);
         }
 
-        // ── 3~4) 阶段结算（60s 升级 / 30s 回退 / 不跳级）────────────────────
-        let mut events = self.settle_level(now_ms);
+        // ── 3) 可达性迁移（S7-M6 可解释性：进入 / 退出不可达各报一次）──────────
+        let mut events: Vec<EmotionEvent> = Vec::new();
+        if self.last_interaction_available != Some(env.interaction_available) {
+            self.last_interaction_available = Some(env.interaction_available);
+            // 恢复可交互：清掉层 ③ 兜底的保持窗口（条件已不适用）。
+            if env.interaction_available {
+                self.unreachable.reset();
+            }
+            events.push(EmotionEvent::InteractionReachability {
+                available: env.interaction_available,
+                level: self.neglect.level,
+            });
+        }
+
+        // ── 3.5) 摸鱼专属提示（AC-19）：摸鱼档持续 ≥`slackLingerSec` 且已 L3+ ──
+        events.extend(self.slack_linger_tick(now_ms));
+
+        // ── 4) 阶段结算（60s 升级 / 30s 回退 / 不跳级 / 自然消气 / 深夜重定向）──
+        events.extend(self.settle_level(now_ms, env.negative_happened));
 
         // ── 4.5) 三部曲阶段同步（S4-M3/S4-M4：L5 离家演出触发 / 档位回落清空）──
         // 必须在 `settle_level` 之后：本 tick 刚进入 L5 时要立刻开始离家演出计时。
@@ -801,13 +972,8 @@ impl<'c> EmotionEngine<'c> {
         // ── 5) Mood 一阶低通惯性 ────────────────────────────────────────────
         events.extend(self.step_mood(dt_min, env.event_delta, now_ms));
 
-        // ── 6) 日切（自然消气计量与正向计数的重置）──────────────────────────
+        // ── 6) 日切（自适应滚动 / 自然消气计量与正向计数的重置）──────────────
         events.extend(self.daily_roll(&env));
-
-        // 展示态投影：L0 且非想念 → 依 phase 保持 Idle（S4-M2 接 Happy/Curious 等）
-        if self.neglect.level == 0 && self.state.emotion == EmotionState::Idle {
-            self.positive_interactions = self.positive_interactions.saturating_add(0);
-        }
 
         let events = dedup_events(events);
         if !events.is_empty() {
@@ -818,29 +984,113 @@ impl<'c> EmotionEngine<'c> {
         TickOutcome { events, pause_changed }
     }
 
-    /// 阶段结算（`02 §5.3` 冻结口径）：确认期 + 不跳级 + 逐层扣 Mood。
-    fn settle_level(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+    /// 摸鱼专属提示（**AC-19**）：摸鱼档持续 ≥`busyness.slackLingerSec`（默认 40min）
+    /// 且档位已达 L3+ → 每档期触发**一次** [`EmotionEvent::SlackLinger`]。
+    ///
+    /// 池键取当前档位的 `levels[].linePool`（配置驱动，代码内不写字面量）；
+    /// 台词内容归 S7-M8（`lines.json` 现无「摸鱼专属」池）。
+    fn slack_linger_tick(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        if self.factors.busyness_level != BusynessLevel::Slack {
+            self.slack_since_ms = None;
+            self.slack_hint_fired = false;
+            return vec![];
+        }
+        let since = *self.slack_since_ms.get_or_insert(now_ms);
+        if self.slack_hint_fired || self.neglect.level < 3 {
+            return vec![];
+        }
+        let need_ms = (self.cfg.busyness.slack_linger_sec as i64).saturating_mul(1000);
+        if now_ms - since < need_ms {
+            return vec![];
+        }
+        self.slack_hint_fired = true;
+        let minutes = u32::try_from((now_ms - since) / 60_000).unwrap_or(u32::MAX);
+        vec![EmotionEvent::SlackLinger {
+            minutes,
+            pool: self.current_level_cfg().line_pool.clone(),
+        }]
+    }
+
+    /// 阶段结算（`02 §5.3` 冻结口径）：确认期 + 不跳级 + 逐层扣 Mood +
+    /// 自然消气通道（仅 L3→L2，S7-M5）+ 不可达兜底（仅 L4→L3，S7-M6）。
+    ///
+    /// ## 地板口径（三条并存，互不覆盖）
+    ///
+    ///   1. **正常可交互**（`confirm.naturalFloorLevel`，默认 3）：L3 及以上不自然回退，
+    ///      L4/L5 必须走 [`CoaxFlow`]（S4-M4 已锁）；
+    ///   2. **自然消气**（S7-M5）：`level == 3` 且四条件全满足 → 允许降到 L2；
+    ///   3. **不可达兜底**（S7-M6，层 ③）：`interaction_available == false` 且
+    ///      `P<10` 持续 `unreachableHoldSec` + 近 `unreachableNoNegativeSec` 无负向
+    ///      → 允许 **L4→L3**（`unreachableNaturalFloorLevel = 4`；**L5 永不**）。
+    fn settle_level(&mut self, now_ms: i64, negative_happened: bool) -> Vec<EmotionEvent> {
         let p_eff = self.neglect.p / self.threshold_scale();
         let mut target = self.level_for(p_eff);
-        // S4-M4（`01 §6.5.2` / `02 §5.3`）：**L4 生气 / L5 离家出走必须走 CoaxFlow**，
-        // 正常可交互时不开放自然回退（「任何降级路径不得产生负向扣减」R18-4 不受影响：
-        // 此处只是**阻止**降级，不做任何扣减）。`confirm.naturalFloorLevel` 的完整口径
-        // （含 L3 自然消气通道）归 S7-M5；本卡先锁 L4/L5 强制地板。
-        if target < self.neglect.level && self.neglect.level >= COAX_REQUIRED_MIN_LEVEL {
+        let cooling = self.adapt.is_cooling(&self.cfg.adapt);
+
+        // 自然消气计量（仅 L3 时维护，`02 §5.2` 第 3 步）。
+        if self.neglect.level == 3 {
+            self.natural_cool
+                .observe(now_ms, self.neglect.p, &self.cfg.confirm, negative_happened);
+        } else {
+            self.natural_cool.reset();
+        }
+        // 不可达兜底计量（仅不可达时维护）。
+        let fallback_open = self.interaction.unreachable_fallback_enabled()
+            && !self.factors.interaction_available;
+        if fallback_open {
+            let below = self.neglect.p.is_finite()
+                && self.neglect.p < self.unreachable.p_threshold;
+            self.unreachable.observe(now_ms, below, negative_happened);
+        } else {
+            self.unreachable.reset();
+        }
+
+        // 逐层结算前的**原始目标**（未经任何地板修正）——②③ 两条通道的放行条件都要
+        // 依据它判断「P 是否真的已落到目标档之下」，不能用修正后的 `target`（会被地板
+        // 抬回当前档，导致条件恒假）。
+        let raw_target = target;
+
+        // ① **L3+ 强制地板**（`01 §6.5.2` / §6.11.8.1）：L3 生闷气 / L4 生气 / L5 离家
+        //    出走**都不开放「无条件自然回退」**——L3 只能经自然消气通道降到 L2，
+        //    L4/L5 必须走 CoaxFlow（L4 另开一层不可达兜底）。L1/L2 不受本地板约束，
+        //    由 P 自然下降回退（`01 §6.11.8` 状态回退 ①）。
+        if target < self.neglect.level && self.neglect.level >= COAX_MIN_LEVEL {
             target = self.neglect.level;
         }
+        // ② **自然消气通道**（S7-M5 / `01 §6.11.8.1`）：**仅 L3→L2**；
+        //    `naturalFloorLevel` 设 4/5 即完全关闭该通道（与 PRD 的开关语义一致）。
+        let natural_floor = self.cfg.confirm.natural_floor_level;
+        let natural_cool = self.neglect.level == 3
+            && raw_target < 3
+            && natural_floor <= 3
+            && self
+                .natural_cool
+                .satisfied(now_ms, self.neglect.p, cooling, &self.cfg.confirm);
+        if natural_cool {
+            target = 2;
+        }
+        // ③ **不可达兜底**（S7-M6 / `02 §5.23` 第 3 层）：**仅 L4→L3**；
+        //    L5 任何情况不开放（`level == 4` 的硬条件即产品红线）。
+        let unreachable_fallback = !self.factors.interaction_available
+            && self.neglect.level == 4
+            && raw_target < 4
+            && fallback_open
+            && self.unreachable.satisfied(
+                now_ms,
+                self.interaction.unreachable_hold_sec,
+                self.interaction.unreachable_no_negative_sec,
+            );
+        if unreachable_fallback {
+            target = 3;
+        }
+
         if target == self.neglect.level {
             self.neglect.pending_since_ms = None;
             self.neglect.pending_level = self.neglect.level;
             return vec![];
         }
 
-        let need_ms = if target > self.neglect.level {
-            self.cfg.confirm.up_sec
-        } else {
-            self.cfg.confirm.down_sec
-        } as i64
-            * 1000;
+        let need_ms = neglect::confirm_ms(self.neglect.level, target, &self.cfg.confirm);
 
         // 目标变更 → 重新起计（幂等：同一目标保持同一起点）
         if self.neglect.pending_level != target {
@@ -877,9 +1127,10 @@ impl<'c> EmotionEngine<'c> {
                 }
                 self.state.values.mood = (self.state.values.mood + delta).clamp(0.0, 100.0);
             }
+            // 深夜重定向（B-4 / AC-20）：深夜不升级为生气，改播困倦催睡。
             let redirected = up
                 && def.level >= self.cfg.rhythm.night_redirect_from_level
-                && is_night(&self.cfg.rhythm, &self.state_reference_now_local(now_ms));
+                && self.factors.night;
             if def.mood_lock_max > 0 {
                 self.state.values.mood = self.state.values.mood.min(def.mood_lock_max as f32);
             }
@@ -888,15 +1139,29 @@ impl<'c> EmotionEngine<'c> {
             } else {
                 EmotionState::from_cfg_name(&def.emotion)
             };
+            let reason = if natural_cool {
+                ColdReason::NaturalCool
+            } else {
+                ColdReason::Accumulate
+            };
             out.push(EmotionEvent::ColdLevelChanged {
                 from: self.neglect.level,
                 to: next,
                 mood_delta: delta,
                 redirected,
-                reason: ColdReason::Accumulate,
+                reason,
             });
-            if up && def.level >= 2 && !redirected {
-                if let Some(first) = def.idle_pool.first() {
+            if up && def.level >= 2 {
+                if redirected {
+                    // AC-20：改用配置的深夜重定向动作（默认 ACT-I-02 打哈欠）。
+                    let action = self.cfg.rhythm.night_redirect_action_id.clone();
+                    if !action.is_empty() {
+                        out.push(EmotionEvent::ForceAction {
+                            action_id: action,
+                            priority: self.cfg.rhythm.night_redirect_priority.min(255) as u8,
+                        });
+                    }
+                } else if let Some(first) = def.idle_pool.first() {
                     out.push(EmotionEvent::ForceAction {
                         action_id: first.clone(),
                         priority: def.priority_floor.min(255) as u8,
@@ -906,30 +1171,55 @@ impl<'c> EmotionEngine<'c> {
             self.neglect.level = next;
         }
         self.neglect.pending_level = self.neglect.level;
+
+        // 自然消气结算（`01 §6.11.8.1`）：Mood 抬到 `naturalMoodFloor`（45）+ 配置的
+        // 自然消气动作（默认 `ACT-T-04`），**不播 `ACT-E-06`**（与 CoaxFlow 的差异是
+        // 产品底线：三部曲仍是最优解——更快、Mood 更高、有进度环与仪式感）。
+        if natural_cool {
+            let floor_mood = self.cfg.confirm.natural_mood_floor as f32;
+            self.state.values.mood = self.state.values.mood.max(floor_mood);
+            self.natural_cool.reset();
+            if !self.cfg.confirm.natural_cool_action_id.is_empty() {
+                out.push(EmotionEvent::ForceAction {
+                    action_id: self.cfg.confirm.natural_cool_action_id.clone(),
+                    priority: self.cfg.confirm.natural_cool_priority.min(255) as u8,
+                });
+            }
+        }
+        // 不可达兜底结算：仅当降级目标为 L3（L4→L3），复位计量避免重复触发。
+        if unreachable_fallback {
+            self.unreachable.reset();
+        }
         out
     }
 
-    /// 深夜判定所需的 `now_local`：取最近一次 tick 缓存的注入值。
+    /// Mood 一阶低通惯性（`02 §5 K-5` `step_mood`；S7-M5）。
     ///
-    /// C3 说明：本方法**不读时钟**；`now_local` 由调用方经 `WallClock::now_local()`
-    /// 取到后随 [`TickEnv`] 注入，此处只做缓存读取。
-    #[inline]
-    fn state_reference_now_local(&self, _now_ms: i64) -> chrono::DateTime<Local> {
-        self.last_now_local
-    }
-
-    /// Mood 一阶低通惯性（`02 §5 K-5` `step_mood`）。
+    /// ```text
+    /// MoodTarget = Mood − decayPerMin×Δt − drain(P)×Δt + Σ eventΔ
+    /// drain(P)   = moodDrainCoef × (P / drainRefP)^drainExp
+    /// Mood       = Mood + (MoodTarget − Mood) × α,  α = 1 − exp(−Δt/τ)
+    /// ```
+    ///
+    /// **`decayPerMin` 两档口径（S7-M5 裁定）**：`02 §5.7` 给 `decayPerMin = -1.0` /
+    /// `decayPerMinActive = -0.5`，`01 §6.11.3` 注为「互动活跃期 0.5」。本卡取
+    /// **「互动活跃」= 用户在场且交互可达**（`presence_here && interaction_available`）：
+    /// 人在电脑前陪着 → 衰减慢（−0.5/min）；人不在 / 不可交互 → 衰减快（−1.0/min）。
+    /// 该判定用到的两个布尔均来自本拍因子快照，不引入新感知量。
     fn step_mood(&mut self, dt_min: f32, event_delta: f32, now_ms: i64) -> Vec<EmotionEvent> {
         let m: &MoodDimCfg = &self.cfg.dimensions.mood;
         let ref_p = self.cfg.mood.drain_ref_p;
         let p_ratio = if ref_p > 0.0 { (self.neglect.p / ref_p).max(0.0) } else { 0.0 };
         let drain = self.cfg.mood.drain_coef * p_ratio.powf(self.cfg.mood.drain_exp);
-        // S4-M1 骨架：`is_active()` 判定依赖活跃度感知（S7-M4），本卡统一取
-        // `decayPerMinActive`；S7-M4 接入后按 `is_active()` 在两档间切换即可。
-        let decay = m.decay_per_min_active.abs();
-        // S7-M3：Mood 衰减乘子改由**耦合矩阵**给出（C-01/C-02/C-06 取 max + 5s 平滑，
-        // `02 §5.10` S3 阶段）。原 S4-M1 的 `emotion.json.needs.coef` 线性占位已移除——
-        // 该组系数是**七因子 `needs` 因子**（`02 §5.2`，归 S7-M4）的量，不复用于 Mood 衰减。
+        // 互动活跃期（在场 + 可达）→ `decayPerMinActive`；否则 `decayPerMin`（S7-M5）。
+        let active = self.factors.presence_here && self.factors.interaction_available;
+        let decay = if active {
+            m.decay_per_min_active.abs()
+        } else {
+            m.decay_per_min.abs()
+        };
+        // S7-M3：Mood 衰减乘子由**耦合矩阵**给出（C-01/C-02/C-06 取 max + 5s 平滑，
+        // `02 §5.10` S3 阶段）。
         let needs_mul = self.coupling_out.mood_decay_mul;
         // S7-M2：香味 Buff（`01 §6.12.3`：洗护用品 12min 内 Mood 衰减 ×0.8）。
         let scent_mul = if self.needs.scent_buff_active(now_ms) { SENT_BUFF_MOOD_DECAY_MUL } else { 1.0 };
@@ -957,7 +1247,7 @@ impl<'c> EmotionEngine<'c> {
         }
     }
 
-    /// 日切（自然消气计量与正向交互计数重置；数值日切归 S4-M2）。
+    /// 日切：自适应基线滚动（S7-M4）+ 自然消气计量与正向计数重置（S7-M5）。
     fn daily_roll(&mut self, env: &TickEnv<'_>) -> Vec<EmotionEvent> {
         let today = date_key(&env.now_local);
         if self.state.today.is_empty() {
@@ -965,24 +1255,51 @@ impl<'c> EmotionEngine<'c> {
             return vec![];
         }
         if self.state.today != today {
-            self.state.today = today;
+            self.state.today = today.clone();
             self.positive_interactions = 0;
             self.longing = false;
-            return vec![];
+            // S7-M4：自适应基线日切（`T_exp` 滚动 + 关系降温判定）。
+            let t_exp0 = self.personality.t_exp0(&self.cfg.adapt);
+            return self
+                .adapt
+                .roll_day(&today, t_exp0, &self.cfg.adapt)
+                .into_iter()
+                .map(|ev| match ev {
+                    crate::emotion::adapt::AdaptEvent::RelationCooling(level) => {
+                        EmotionEvent::RelationCooling { level }
+                    }
+                })
+                .collect();
         }
         vec![]
     }
 
-    /// 交互回调（S4-M1 只做最小记账：正向交互计数 + 事件净增益入口）。
+    /// 交互回调（最简记账：正向交互计数 + 自适应基线的间隔采样）。
     ///
-    /// 完整缓解表（`relief.hover/click/…`）与冷却（`cooldownSec`）归 S4-M2 / S4-M3；
-    /// 本卡只维护自然消气条件②所需的「净正向交互计数」。
+    /// 完整缓解表（`relief.hover/click/…`）与冷却（`cooldownSec`）见
+    /// [`Self::on_interaction_kind`] / [`Self::relief_for`]。
     pub fn on_interaction(&mut self, positive: bool, now_ms: i64) -> TickOutcome {
         self.last_tick_ms.get_or_insert(now_ms);
         if positive {
-            self.positive_interactions = self.positive_interactions.saturating_add(1);
+            self.observe_positive_interaction(now_ms);
         }
         TickOutcome::default()
+    }
+
+    /// 正向交互统一记账（S7-M4/S7-M5 单一入口）：计数 + 自适应间隔采样 + 自然消气窗口计数。
+    ///
+    /// **间隔采样口径**：相邻两次正向交互的间隔（分钟）送给 `AdaptationState::on_interval`，
+    /// 由后者按 `adapt.outlierHours` 剔除离群段（>8h）；首次交互无前驱 → 只锚定不采样。
+    fn observe_positive_interaction(&mut self, now_ms: i64) {
+        self.positive_interactions = self.positive_interactions.saturating_add(1);
+        self.natural_cool.observe_positive(now_ms);
+        let today = date_key(&self.last_now_local);
+        self.adapt.observe_interaction(&today);
+        if let Some(prev) = self.last_interaction_ms {
+            let interval_min = (now_ms - prev).max(0) as f32 / 60_000.0;
+            self.adapt.on_interval(&today, interval_min, &self.cfg.adapt);
+        }
+        self.last_interaction_ms = Some(now_ms);
     }
 
     // -----------------------------------------------------------------------
@@ -1079,13 +1396,14 @@ impl<'c> EmotionEngine<'c> {
         self.neglect.p = (self.neglect.p - amount).clamp(0.0, self.neglect.cap);
     }
 
-    /// 交互意图统一入口（S4-M3）：缓解表 → 三部曲推进 → 正向计数。
+    /// 交互意图统一入口（S4-M3 / S7-M4~M6）：缓解表 → 三部曲推进 → 正面 / 负面记账。
     ///
     /// `InteractionKind` 到三条通路的映射（唯一映射点，避免上层重复分支）：
     ///   - 缓解：Hover/Click/DoubleClick/Stroke/Feed/Bath、轨迹彩蛋 Circle/Line/Zigzag → Play；
     ///   - 三部曲：Click → 呼唤；DoubleClick → 比心；Tickle/Throw → **打断**（负向）；
     ///     `TrayCoax` → 呼唤（`02 §5.23` 第 2 层托盘替代入口）；
-    ///   - 正向计数：有缓解语义的交互计入（自然消气条件②，消费归 S7-M5）。
+    ///   - 记账：有缓解语义的交互计入正向（自然消气条件② + 自适应间隔采样，S7-M4/M5）；
+    ///     Tickle/Throw 计入**负向**（`rough` 计数 + 两条保持窗口中断，S7-M4/M6）。
     pub fn on_interaction_kind(&mut self, kind: InteractionKind, now_ms: i64) -> Vec<EmotionEvent> {
         self.last_tick_ms.get_or_insert(now_ms);
         let relief_kind = match kind {
@@ -1101,10 +1419,28 @@ impl<'c> EmotionEngine<'c> {
             _ => None,
         };
         let mut out = Vec::new();
+        if kind == InteractionKind::Tickle || kind == InteractionKind::Throw {
+            // B-6：负向事件 → `rough` 计数 + 两条保持窗口中断。
+            self.rough.observe_negative(now_ms, &self.cfg.rough);
+            self.natural_cool.observe(now_ms, self.neglect.p, &self.cfg.confirm, true);
+            self.unreachable.observe(now_ms, false, true);
+        }
         if let Some(rk) = relief_kind {
             let relief = self.relief_for(rk, now_ms);
             self.apply_relief(relief);
-            self.positive_interactions = self.positive_interactions.saturating_add(1);
+            self.observe_positive_interaction(now_ms);
+        }
+        // S7-M6 / `02 §5.23` M-05：托盘「喂食 / 洗澡」= 等效一次喂食 / 洗澡
+        // （除 P 缓解外，还要落到六维数值，否则「穿透时宠物长期挨饿变脏」）。
+        match kind {
+            InteractionKind::Feed => {
+                self.apply_need_delta(crate::emotion::need_keys::SATIETY, self.cfg.relief.feed as f32, now_ms);
+            }
+            InteractionKind::Bath => {
+                self.apply_need_delta(crate::emotion::need_keys::CLEANLINESS, self.cfg.relief.bath as f32, now_ms);
+                self.needs.mark_bath(self.needs_cfg, now_ms);
+            }
+            _ => {}
         }
 
         let coax_input = match kind {
@@ -1117,6 +1453,27 @@ impl<'c> EmotionEngine<'c> {
             out.extend(self.coax_input(input, now_ms));
         }
         out
+    }
+
+    /// 需求数值增量（S7-M6 托盘喂食 / 洗澡出口；`needs` 侧负责 clamp 与跨档事件）。
+    ///
+    /// 六维数值真源仍是 [`PetState::values`]（S7-M2 口径），此处只经 `NeedsSystem`
+    /// 的道具出口写入，避免第二真源。
+    fn apply_need_delta(&mut self, key: &str, delta: f32, now_ms: i64) {
+        let outcome = match key {
+            crate::emotion::need_keys::SATIETY => {
+                self.needs.add_satiety(&mut self.state.values, self.needs_cfg, delta)
+            }
+            crate::emotion::need_keys::CLEANLINESS => {
+                self.needs.add_cleanliness(&mut self.state.values, self.needs_cfg, delta)
+            }
+            _ => return,
+        };
+        // 道具出口也可能跨档（喂饱 → 分档变化）→ 供 `dp-app` 发 `pet://needs`。
+        if outcome.band_changed {
+            self.last_needs = Some(outcome);
+        }
+        let _ = now_ms;
     }
 
     /// 三部曲离散输入（`03 §2` 三部曲 / `02 §5.23` 托盘输入）。
@@ -1138,6 +1495,49 @@ impl<'c> EmotionEngine<'c> {
         self.coax_input(CoaxInput::TrayStroke, now_ms)
     }
 
+    /// **托盘替代入口单点分派**（S7-M6 / `01 FR-11-12` 第 2 层）。
+    ///
+    /// 托盘只有一个「❤ 摸摸{name}」项常驻，其**语义随三部曲阶段推进**（菜单项文案由
+    /// `dp-app` 依据 [`Self::coax_step`] 渲染：呼唤阶段显示「摸摸」、比心阶段显示「比心」）：
+    ///
+    ///   - `Idle` → [`CoaxInput::Call`]（呼唤）；
+    ///   - `Call` / `Stroke` → [`CoaxInput::TrayStroke`]（累计一次抚摸，满 `TRAY_COAX_STROKE_TAPS` 次进比心）；
+    ///   - `Heart` → [`CoaxInput::Heart`]（完成比心 → 三部曲成功）；
+    ///   - `Runaway` / `Away` → [`CoaxInput::Recall`]（L5 离家 → 先走回）。
+    ///
+    /// **产品底线**：经托盘编辑的仍是**完整道歉三部曲**（呼唤 → 抚摸 → 比心），
+    /// 不因「不可达」而降低难度（`01 FR-11-12` 🚫 条）。
+    pub fn coax_tray_tap(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        let input = match self.coax.step() {
+            // 已呼唤（或抚摸中）→ 每次累计一格抚摸（满 `TRAY_COAX_STROKE_TAPS` 进比心窗）。
+            CoaxStep::Call | CoaxStep::Stroke => CoaxInput::TrayStroke,
+            CoaxStep::Heart => CoaxInput::Heart,
+            CoaxStep::Runaway | CoaxStep::Away => CoaxInput::Recall,
+            // 未开始 → 首击 = 呼唤（`01 FR-11-12`「点托盘项 = 呼唤」）。
+            CoaxStep::Idle => CoaxInput::Call,
+        };
+        self.coax_input(input, now_ms)
+    }
+
+    /// 托盘替代入口的单次抚摸（`02 §5.23`：抚摸 = 完整一次抚摸，relief 15 / Mood +8）。
+    ///
+    /// 与 [`Self::coax_tray_stroke`] 的差别：本方法走**通用缓解表**（`relief.stroke` +
+    /// `strokeMaxPerWindow` 窗口上限 + 正向记账），用于「不可达且未在哄好流程中」的
+    /// 日常摸摸；`coax_tray_stroke` 只推进三部曲进度。
+    pub fn tray_stroke(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        self.on_interaction_kind(InteractionKind::Stroke, now_ms)
+    }
+
+    /// 托盘「喂食」（S7-M6 / `02 §5.23` M-05）：等效一次喂食（`relief.feed` + 饱食度恢复）。
+    pub fn tray_feed(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        self.on_interaction_kind(InteractionKind::Feed, now_ms)
+    }
+
+    /// 托盘「洗澡」（S7-M6 / `02 §5.23` M-05）：等效一次洗澡（`relief.bath` + 清洁度恢复）。
+    pub fn tray_bath(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
+        self.on_interaction_kind(InteractionKind::Bath, now_ms)
+    }
+
     /// L5 找回（托盘「把心月狐找回来」→ 走回，仍需完成三部曲）。
     pub fn coax_recall(&mut self, now_ms: i64) -> Vec<EmotionEvent> {
         self.coax_input(CoaxInput::Recall, now_ms)
@@ -1154,6 +1554,11 @@ impl<'c> EmotionEngine<'c> {
         self.neglect.level = 0;
         self.neglect.pending_level = 0;
         self.neglect.pending_since_ms = None;
+        // S7-M5/M6：两条保持窗口与摸鱼档期一并复位（兜底语义 = 完全回到初始）。
+        self.natural_cool.reset();
+        self.unreachable.reset();
+        self.slack_since_ms = None;
+        self.slack_hint_fired = false;
         self.state.emotion = EmotionState::Idle;
         let floor = self.cfg.coax.recover_mood_floor as f32;
         if self.state.values.mood < floor {
@@ -1291,6 +1696,21 @@ impl<'c> EmotionEngine<'c> {
     }
 
     /// 离线分块内的单步推进（不触碰 pause 窗口；`02 §5.5` 的 `tick_1s` 等价体）。
+    ///
+    /// ## 因子口径（S7-M4 登记，与 S5-M2 已交付行为**逐字一致**）
+    ///
+    /// 离线步的七因子取「**presence = `factorAway`（0.05），其余六项恒 1.0**」，封顶取
+    /// `busyness.capFree`（120）。理由：
+    ///
+    ///   1. `02 §5.5` 的四个离线边界算例（3h/4h/5h/24h）与 AC-18 / `02 §6.1` 的
+    ///      「P = 0.05 × 分钟数」推导，**明确以「其余因子 1.0」为前置**；
+    ///   2. 离线期间**没有任何感知样本**（`busyness` 恒轻度、`rough` 无负向事件），
+    ///      且模拟步不推进 `now_local`，若套用 `rhythm` 会因时段而扰动可复算性；
+    ///   3. 离线语义是「用户不在场」，不是「用户在忙 / 现在是深夜」——
+    ///      用 `presence` 单因子表达最忠实。
+    ///
+    /// 这同时保证 RV-16 的**第二道保险**（`P = 0.05 × 离线分钟数`：24h → 72 < 120）
+    /// 与封顶 L4 的推导成立。
     fn tick_offline_step(&mut self, now_ms: i64, env: TickEnv<'_>) {
         let Some(last) = self.last_tick_ms else {
             self.last_tick_ms = Some(now_ms);
@@ -1302,25 +1722,26 @@ impl<'c> EmotionEngine<'c> {
         }
         self.last_tick_ms = Some(now_ms);
         let dt_min = dt_ms as f32 / 60_000.0;
-        // 因子：不在场；`interaction_available` 保持与离线前一致（离线期间无交互概念，
-        // 但 FR-11-12 层①的「不可达」状态在用户离开前后应连续，避免回归瞬间速率跳变）。
-        self.factors = FactorProduct {
-            presence: self.cfg.presence.factor_away,
-            interaction: if env.interaction_available {
-                1.0
-            } else {
-                self.cfg.presence.factor_away.max(0.0)
-            },
+        // 离线因子口径：仅 presence 生效（不可达时与「离场」同档，不归零）。
+        let presence = if env.interaction_available {
+            self.cfg.presence.factor_away
+        } else {
+            self.interaction.unavailable_presence_factor
         };
-        self.neglect.rate_per_min = rate_from(&self.sensitivity, self.factors.raw() * self.adapt_factor);
-        // 离线期间的忙碌档归 `busyness_level`（S7-M4 引入）；S4-M1 只使用 `capFree`，
-        // 与 `tick_1s` 保持同一口径，保证 P 上界可复算（RV-16 的 `P = 0.05 × 分钟数`）。
+        self.factors = FactorSet {
+            presence,
+            presence_here: false,
+            interaction_available: env.interaction_available,
+            ..FactorSet::default()
+        };
+        self.factors.recompute_product();
+        self.neglect.rate_per_min = rate_from(&self.sensitivity, self.factors.product);
+        let rate = self.neglect.rate_per_min;
         let cap = self.cfg.busyness.cap_free as f32;
-        self.neglect.cap = cap;
-        self.neglect.p = (self.neglect.p + dt_min * self.neglect.rate_per_min).clamp(0.0, cap);
-        let _ = self.settle_level(now_ms);
+        neglect::accrue(&mut self.neglect, dt_min, rate, cap);
+        let _ = self.settle_level(now_ms, false);
         let _ = self.step_mood(dt_min, 0.0, now_ms);
-        // 离线期间不推进日切（S4-M2 用真实 now_local 处理跨日）
+        // 离线期间不推进日切（`02 §5.5`：日切用真实 `now_local` 处理跨日）
     }
 }
 
@@ -1333,56 +1754,6 @@ pub enum OfflineOutcome {
     ColdApplied(u8),
     /// > `longingMin`：想念展示。
     Longing(u8),
-}
-
-/// 在场判定（迟滞实现，纯函数 + 就地更新）。
-fn presence_decide(
-    latch: &mut PresenceLatch,
-    idle_ms: u64,
-    away_threshold_sec: u64,
-    hysteresis_sec: u64,
-    now_ms: i64,
-) -> bool {
-    let away_ms = away_threshold_sec.saturating_mul(1000);
-    let hyst_ms = hysteresis_sec.saturating_mul(1000) as i64;
-    let idle = if idle_ms == u64::MAX { away_ms + 1 } else { idle_ms };
-    let want_here = idle < away_ms;
-    if want_here == latch.here {
-        latch.since_ms = None;
-        return latch.here;
-    }
-    let since = *latch.since_ms.get_or_insert(now_ms);
-    if now_ms - since >= hyst_ms {
-        latch.here = want_here;
-        latch.since_ms = None;
-    }
-    latch.here
-}
-
-/// 深夜判定（`rhythm.segments` 中 id == "night" 的时段；配置驱动）。
-fn is_night(rhythm: &crate::config::model::RhythmCfg, now_local: &chrono::DateTime<Local>) -> bool {
-    let hm = now_local.hour() * 60 + now_local.minute();
-    for seg in &rhythm.segments {
-        if seg.id != "night" {
-            continue;
-        }
-        if let (Some(from), Some(to)) = (parse_hm(&seg.from), parse_hm(&seg.to)) {
-            return if from <= to { hm >= from && hm < to } else { hm >= from || hm < to };
-        }
-    }
-    false
-}
-
-/// `"HH:mm"` → 当日分钟数。
-fn parse_hm(s: &str) -> Option<u32> {
-    let (h, m) = s.split_once(':')?;
-    let h: u32 = h.trim().parse().ok()?;
-    let m: u32 = m.trim().parse().ok()?;
-    if h < 24 && m < 60 {
-        Some(h * 60 + m)
-    } else {
-        None
-    }
 }
 
 /// `YYYY-MM-DD` 日期键（日切用；不读时钟，纯格式投影）。
@@ -1717,13 +2088,33 @@ mod tests {
             }
         }
         assert_eq!(e.neglect.level, 3);
-        let mood_at_l3 = e.state.values.mood;
 
-        // 直接压 P 回 0 → 逐层回落，全程 mood_delta 必须为 0
+        // ① L3 → L2（S7-M5 收紧）：L3 **不开放无条件自然回退**，只能走自然消气通道，
+        //    故先补齐该通道的三条可满足条件（P<15 持续 60s + 期间正向交互 ≥3 + 近 1h 无负向）。
         e.neglect.p = 0.0;
+        for i in 0..cfg.confirm.natural_min_positive {
+            let _ = e.on_interaction(true, t + 1 + i as i64);
+        }
         let mut deltas = Vec::new();
+        for _ in 0..(cfg.confirm.natural_hold_sec + 120) {
+            t += 1_000;
+            e.neglect.p = 0.0;
+            for ev in e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) }).events {
+                if let EmotionEvent::ColdLevelChanged { mood_delta, .. } = ev {
+                    deltas.push(mood_delta);
+                }
+            }
+            if e.neglect.level == 2 {
+                break;
+            }
+        }
+        assert_eq!(e.neglect.level, 2, "L3 只经自然消气通道降到 L2");
+        let mood_at_l2 = e.state.values.mood;
+
+        // ② L2 → L0：由 P 自然下降回退（`01 §6.11.8` 状态回退 ①），全程 mood_delta 必须为 0
         for _ in 0..40 {
-            t += 1000;
+            t += 1_000;
+            e.neglect.p = 0.0;
             for ev in e.tick_1s(t, TickEnv { preset_idle_ms: u64::MAX, ..env(day()) }).events {
                 if let EmotionEvent::ColdLevelChanged { mood_delta, .. } = ev {
                     deltas.push(mood_delta);
@@ -1735,7 +2126,7 @@ mod tests {
         }
         assert_eq!(e.neglect.level, 0, "应逐层回落到 L0");
         assert!(deltas.iter().all(|d| *d == 0.0), "降级不得扣减 Mood：{deltas:?}");
-        assert_eq!(e.state.values.mood, mood_at_l3, "降级不得退还也不得再扣");
+        assert_eq!(e.state.values.mood, mood_at_l2, "降级不得退还也不得再扣");
     }
 
     /// S4-M4（`01 §6.5.2` / `02 §5.3`）：**L4 生气 / L5 离家出走必须走 CoaxFlow**，
@@ -1986,6 +2377,9 @@ mod tests {
         let cfg = EmotionConfig::default();
         let needs = NeedsConfig::default();
         let mut e = EmotionEngine::new(&cfg, &needs);
+        // S7-M4：首建性格随机（粘人度 45~55）会轻微缩放乘积；本用例断言「典型场景
+        // product == 1.0」，故先钉住出厂五维（粘人 50 → personality 1.0 / adapt 1.0）。
+        e.set_personality(Personality::from_cfg(&cfg.personality));
         e.tick_1s(0, env(day())); // 首拍建基线（不求解因子）
         e.tick_1s(1_000, env_here(day()));
         assert!(
@@ -2010,6 +2404,7 @@ mod tests {
         let cfg = EmotionConfig::default();
         let needs = NeedsConfig::default();
         let mut e = EmotionEngine::new(&cfg, &needs);
+        e.set_personality(Personality::from_cfg(&cfg.personality));
         e.tick_1s(0, env_here(day()));
         e.tick_1s(1_000, TickEnv { interaction_available: false, ..env_here(day()) });
         let want = cfg.presence.factor_here * cfg.presence.factor_away;
@@ -2021,6 +2416,7 @@ mod tests {
         let cfg = EmotionConfig::default();
         let needs = NeedsConfig::default();
         let mut e = EmotionEngine::new(&cfg, &needs);
+        e.set_personality(Personality::from_cfg(&cfg.personality));
         e.tick_1s(0, env_here(day()));
         e.tick_1s(1_000, env_here(day()));
         // 离场候选起计：迟滞 15s 内仍按在场
@@ -2046,8 +2442,19 @@ mod tests {
         );
         e.tick_1s(40_000, env_here(day()));
         assert!(
-            (e.neglect.rate_per_min - cfg.presence.factor_here).abs() < 1e-4,
-            "回归迟滞满应切回在场"
+            (e.factors().presence - cfg.presence.factor_here).abs() < 1e-4,
+            "回归迟滞满应切回在场（presence 槽 = {}）",
+            e.factors().presence
+        );
+        // 回迁同时开启「开机宽限」窗口（S7-M5）：rhythm × warmupFactor，
+        // 故此时**总速率**低于 factorHere 属预期，宽限窗口结束后即恢复。
+        assert!(e.in_warmup(), "回迁应当开启宽限窗口");
+        // 容差 1e-3：本拍 `needs` 因子已因 satiety 自然衰减（−0.05/min）微微 >1.0。
+        let want = cfg.presence.factor_here * cfg.rhythm.warmup_factor;
+        assert!(
+            (e.neglect.rate_per_min - want).abs() < 1e-3,
+            "宽限期内速率 ≈ factorHere × warmupFactor（{want}），实际 {}",
+            e.neglect.rate_per_min
         );
     }
 

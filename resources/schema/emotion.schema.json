@@ -55,6 +55,7 @@
         "kpsDeepThreshold": 2.5,
         "movePxPerMinDeep": 3000,
         "slackApps": [],
+        "slackLingerSec": 2400,
         "smoothingSec": 20
       },
       "allOf": [
@@ -85,6 +86,8 @@
       "default": {
         "coolDaysBlock": 3,
         "downSec": 30,
+        "naturalCoolActionId": "ACT-T-04",
+        "naturalCoolPriority": 8,
         "naturalFloorLevel": 3,
         "naturalHoldSec": 60,
         "naturalMinPositive": 3,
@@ -302,6 +305,8 @@
       "default": {
         "clingyCoefA": 0.6000000238418579,
         "clingyCoefB": 0.800000011920929,
+        "clingyInitMax": 55.0,
+        "clingyInitMin": 45.0,
         "defaults": {
           "clingy": 0.5,
           "courage": 0.5,
@@ -380,7 +385,9 @@
             "19:00"
           ]
         ],
+        "nightRedirectActionId": "ACT-I-02",
         "nightRedirectFromLevel": 2,
+        "nightRedirectPriority": 8,
         "segments": [
           {
             "factor": 1.0,
@@ -717,6 +724,13 @@
             "type": "string"
           }
         },
+        "slackLingerSec": {
+          "description": "摸鱼持续多久后播专属台词（秒；`01 AC-19` 前台视频 40min = 2400）。",
+          "default": 2400,
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
         "smoothingSec": {
           "description": "强度平滑窗口（秒）。",
           "default": 20,
@@ -795,6 +809,18 @@
           "default": 30,
           "type": "integer",
           "format": "uint64",
+          "minimum": 0.0
+        },
+        "naturalCoolActionId": {
+          "description": "自然消气动作 ID（`01 §6.11.8.1`：`ACT-T-04`；`02 §5.7` 无对应键，S7-M5 登记）。",
+          "default": "ACT-T-04",
+          "type": "string"
+        },
+        "naturalCoolPriority": {
+          "description": "自然消气动作优先级（`01 §6.11.8.1`：8）。",
+          "default": 8,
+          "type": "integer",
+          "format": "uint32",
           "minimum": 0.0
         },
         "naturalFloorLevel": {
@@ -1217,6 +1243,18 @@
           "type": "number",
           "format": "float"
         },
+        "clingyInitMax": {
+          "description": "首次创建时粘人度随机区间上限（`01 §6.11.13`：55）。",
+          "default": 55.0,
+          "type": "number",
+          "format": "float"
+        },
+        "clingyInitMin": {
+          "description": "首次创建时粘人度随机区间下限（`01 §6.11.13`：45）。",
+          "default": 45.0,
+          "type": "number",
+          "format": "float"
+        },
         "defaults": {
           "description": "五维默认值。",
           "default": {
@@ -1517,9 +1555,21 @@
             "minItems": 2
           }
         },
+        "nightRedirectActionId": {
+          "description": "深夜重定向动作 ID（`01 B-4`：改播打哈欠催睡；`02 §5.7` 无对应键，S7-M5 登记）。",
+          "default": "ACT-I-02",
+          "type": "string"
+        },
         "nightRedirectFromLevel": {
           "description": "深夜重定向起始等级。",
           "default": 2,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "nightRedirectPriority": {
+          "description": "深夜重定向动作优先级。",
+          "default": 8,
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0

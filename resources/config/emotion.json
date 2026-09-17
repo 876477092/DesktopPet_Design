@@ -22,7 +22,8 @@
     "movePxPerMinDeep": 3000,
     "deepApps": [],
     "slackApps": [],
-    "smoothingSec": 20
+    "smoothingSec": 20,
+    "slackLingerSec": 2400
   },
   "rhythm": {
     "segments": [
@@ -36,6 +37,8 @@
     "mealWindows": [["07:00", "09:00"], ["11:00", "13:00"], ["17:00", "19:00"]],
     "mealFactor": 1.15,
     "nightRedirectFromLevel": 2,
+    "nightRedirectActionId": "ACT-I-02",
+    "nightRedirectPriority": 8,
     "warmupMinutes": 10,
     "warmupFactor": 0.5
   },
@@ -49,6 +52,8 @@
     "moodDeltaBase": 0.8,
     "moodDeltaTemper": 0.4,
     "defaults": { "clingy": 0.50, "curiosity": 0.70, "temper": 0.55, "courage": 0.50, "diligence": 0.60 },
+    "clingyInitMin": 45,
+    "clingyInitMax": 55,
     "rerollPerDay": 3,
     "rerollJitter": 0.15
   },
@@ -77,7 +82,9 @@
     "naturalPThreshold": 15,
     "noNegativeWindowSec": 3600,
     "coolDaysBlock": 3,
-    "naturalMoodFloor": 45
+    "naturalMoodFloor": 45,
+    "naturalCoolActionId": "ACT-T-04",
+    "naturalCoolPriority": 8
   },
   "relief": {
     "hover": 2,

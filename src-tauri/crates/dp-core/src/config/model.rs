@@ -1881,6 +1881,8 @@ pub struct BusynessCfg {
     pub slack_apps: Vec<String>,
     /// 强度平滑窗口（秒）。
     pub smoothing_sec: u64,
+    /// 摸鱼持续多久后播专属台词（秒；`01 AC-19` 前台视频 40min = 2400）。
+    pub slack_linger_sec: u64,
 }
 
 impl Default for BusynessCfg {
@@ -1900,6 +1902,7 @@ impl Default for BusynessCfg {
             deep_apps: Vec::new(),
             slack_apps: Vec::new(),
             smoothing_sec: 20,
+            slack_linger_sec: 2400,
         }
     }
 }
@@ -1943,6 +1946,10 @@ pub struct RhythmCfg {
     pub meal_factor: f32,
     /// 深夜重定向起始等级。
     pub night_redirect_from_level: u32,
+    /// 深夜重定向动作 ID（`01 B-4`：改播打哈欠催睡；`02 §5.7` 无对应键，S7-M5 登记）。
+    pub night_redirect_action_id: String,
+    /// 深夜重定向动作优先级。
+    pub night_redirect_priority: u32,
     /// 预热时长（分钟）。
     pub warmup_minutes: u32,
     /// 预热因子。
@@ -1973,6 +1980,8 @@ impl Default for RhythmCfg {
             ],
             meal_factor: 1.15,
             night_redirect_from_level: 2,
+            night_redirect_action_id: "ACT-I-02".to_string(),
+            night_redirect_priority: 8,
             warmup_minutes: 10,
             warmup_factor: 0.5,
         }
@@ -2053,6 +2062,10 @@ pub struct PersonalityCfg {
     pub mood_delta_temper: f32,
     /// 五维默认值。
     pub defaults: PersonalityDefaultsCfg,
+    /// 首次创建时粘人度随机区间下限（`01 §6.11.13`：45）。
+    pub clingy_init_min: f32,
+    /// 首次创建时粘人度随机区间上限（`01 §6.11.13`：55）。
+    pub clingy_init_max: f32,
     /// 每日重掷次数。
     pub reroll_per_day: u32,
     /// 重掷抖动。
@@ -2069,6 +2082,8 @@ impl Default for PersonalityCfg {
             mood_delta_base: 0.8,
             mood_delta_temper: 0.4,
             defaults: PersonalityDefaultsCfg::default(),
+            clingy_init_min: 45.0,
+            clingy_init_max: 55.0,
             reroll_per_day: 3,
             reroll_jitter: 0.15,
         }
@@ -2203,6 +2218,10 @@ pub struct ConfirmCfg {
     pub cool_days_block: u32,
     /// 自然回退心情下限。
     pub natural_mood_floor: u32,
+    /// 自然消气动作 ID（`01 §6.11.8.1`：`ACT-T-04`；`02 §5.7` 无对应键，S7-M5 登记）。
+    pub natural_cool_action_id: String,
+    /// 自然消气动作优先级（`01 §6.11.8.1`：8）。
+    pub natural_cool_priority: u32,
 }
 
 impl Default for ConfirmCfg {
@@ -2217,6 +2236,8 @@ impl Default for ConfirmCfg {
             no_negative_window_sec: 3600,
             cool_days_block: 3,
             natural_mood_floor: 45,
+            natural_cool_action_id: "ACT-T-04".to_string(),
+            natural_cool_priority: 8,
         }
     }
 }

@@ -55,8 +55,9 @@ use dp_core::config::{ConfigBundle, ConfigService};
 use dp_core::config::model::{
     ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig, RoamCfg,
 };
-use dp_core::emotion::TickEnv;
 use dp_core::emotion::coax::CoaxStep;
+use dp_core::emotion::solver::InteractionPolicy;
+use dp_core::emotion::TickEnv;
 use dp_core::emotion::lines::{
     BubblePlanner, LinesLibrary, PlaceholderVars, PlannedBubble, render_placeholders,
 };
@@ -70,6 +71,7 @@ use dp_core::motion::{
     MotionEngine, MotionEvent, PhysicsEngine, PlatformGraph, PlatformInputs, StandSurface, Vec2,
 };
 use dp_core::needs::DispatchKind;
+use dp_platform::win::tray::TrayIconState;
 use dp_core::perception::{
     ActivitySample, PerceptionBus, PerceptionEvent, ReminderChannel, ReminderConfig,
     ReminderScheduler, SystemSample, SystemWallClock, WallClock,
@@ -204,6 +206,23 @@ pub struct LogicOutcome {
 
 /// 显示器几何类型别名（等价 `dp_core::motion::MonitorGeom`）。
 type MonitorGeomAlias = dp_core::motion::MonitorGeom;
+
+/// `settings.json.interaction` → 内核侧交互策略（S7-M6 / FR-11-12 三层防护的数值口径）。
+///
+/// **单一搬运点**：全项目只在这里做「配置 → 内核策略」的字段搬运，避免多处各写一遍
+/// 造成口径漂移。`available` 恒置 `true`——它是**每拍运行时量**，由
+/// `TickEnv::interaction_available` 如实喂入，配置侧不参与（避免两处真源）。
+#[must_use]
+pub fn interaction_policy_of(cfg: &InteractionCfg) -> InteractionPolicy {
+    InteractionPolicy {
+        available: true,
+        unavailable_presence_factor: cfg.unavailable_presence_factor,
+        tray_fallback_enabled: cfg.tray_fallback_enabled,
+        unreachable_floor_level: u8::try_from(cfg.unreachable_natural_floor_level).unwrap_or(4),
+        unreachable_hold_sec: cfg.unreachable_hold_sec,
+        unreachable_no_negative_sec: cfg.unreachable_no_negative_sec,
+    }
+}
 
 /// `seed_k` 递推（SplitMix 风格摘取；公开以便单测直接断言递推性质）。
 #[must_use]
@@ -449,6 +468,15 @@ pub struct CoreLoopState {
     dnd_pause_bubbles: bool,
     /// 活跃感知开关（Q-18 / S5-M4 热更新）：关闭后在场判定退化为「恒在场」（纯时间模型）。
     activity_sensing: bool,
+    /// 鼠标穿透是否开启（S5-M4 设置快照镜像；S7-M6 用作 FR-11-12 层 ① 的输入之一）。
+    ///
+    /// `interaction_available = !click_through && !dnd && !runaway_away`——三源合并后喂入
+    /// `TickEnv::interaction_available`，**不可达判定只有这一个真源**。
+    click_through: bool,
+    /// 上一次同步到托盘的图标态（S7-M6：只在变化时调 `set_state`，避免每拍重建菜单）。
+    tray_state: Option<TrayIconState>,
+    /// 上一次同步到托盘的「离家」菜单位（决定是否追加「把{name}找回来」项）。
+    tray_left_home: bool,
     /// 自动走动开关（S5-M4）。
     ///
     /// ⚠️ **已知缺口（登记 §3.3 遗留，非本卡可闭环）**：本卡只把它落到设置状态、存档 B 段
@@ -528,20 +556,29 @@ impl CoreLoopState {
         // （见 `EmotionEngine::restore` 文档）。
         // 无锚点（`lastTickMs == 0`：全新安装，或上次运行在首个业务档落盘前就退出）→
         // 走 `new`（默认值 + 首拍建立基线），不恢复：此时「距 1970 纪元」不是离线时长。
-        let emotion = match save.as_ref().filter(|store| store.has_session_anchor()) {
+        let mut emotion = match save.as_ref().filter(|store| store.has_session_anchor()) {
             Some(store) => {
                 let cached = store.cache();
-                EmotionEngine::restore(
+                let engine = EmotionEngine::restore(
                     cfg_ref,
                     needs_ref,
                     cached.to_pet_state(),
                     cached.emotion.neglect,
                     cached.emotion.sensitivity,
                     cached.meta.last_tick_ms,
-                )
+                );
+                // S7-M4：段 C 因子侧（性格 / 首建标记 / 自适应 / 粗暴）随存档恢复。
+                // **必须在首个 tick 之前**：否则首拍会按「未随过」重新随机性格。
+                engine
             }
             None => EmotionEngine::new(cfg_ref, needs_ref),
         };
+        if let Some(store) = save.as_ref().filter(|s| s.has_session_anchor()) {
+            emotion.restore_factors(&store.cache().emotion);
+        }
+        // S7-M6：FR-11-12 三层防护的**数值口径**来自 `settings.json.interaction`
+        // （内核不持有配置引用，避免生命周期纠缠；只搬运 Copy 的策略结构）。
+        emotion.set_interaction_policy(interaction_policy_of(&interaction_cfg));
         // S4-M5：气泡计划器的冷却 / 间隔参数全部取自 `lines.json.selector`（C7）。
         let bubble = BubblePlanner::from_library(&lines);
         // S4-M5：`{name}` 变量取配置默认名（C2：代码内零角色名字面量）。
@@ -582,6 +619,9 @@ impl CoreLoopState {
             dnd: false,
             dnd_pause_bubbles: true,
             activity_sensing: true,
+            click_through: false,
+            tray_state: None,
+            tray_left_home: false,
             auto_roam: true,
             activity: ActivitySample::default(),
             reminders: ReminderScheduler::new(
@@ -600,7 +640,11 @@ impl CoreLoopState {
         self.emotion.set_sensitivity_value(snapshot.sensitivity_value);
         self.emotion.set_easy_coax_mode(snapshot.easy_coax_mode);
         self.dnd = snapshot.do_not_disturb;
+        self.click_through = snapshot.click_through;
         self.activity_sensing = snapshot.activity_sensing;
+        // S7-M6：交互策略随设置重算（层 ① 的不可达因子 / 层 ③ 的两条阈值与兜底等级）。
+        self.emotion
+            .set_interaction_policy(interaction_policy_of(&self.interaction_cfg));
         self.auto_roam = snapshot.auto_roam;
         self.interaction_cfg.click_feedback.enabled = snapshot.click_feedback_enabled;
         // 节奏：写进「换相重建用」的配置副本。**口径说明**：`MotionEngine` 在构造时持有
@@ -616,6 +660,59 @@ impl CoreLoopState {
     /// 出厂默认，用户改动落在存档 `settings.behavior.doNotDisturb`）。
     pub fn apply_schedule_flags(&mut self, pause_bubbles: bool) {
         self.dnd_pause_bubbles = pause_bubbles;
+    }
+
+    // -----------------------------------------------------------------------
+    // S7-M6：交互可达性与托盘替代入口（FR-11-12 三层防护）
+    // -----------------------------------------------------------------------
+
+    /// 交互是否可达（FR-11-12 层 ① 的**唯一判定点**）。
+    ///
+    /// 三个来源任一为真即不可达：
+    ///   1. `click_through`（穿透）：`WH_MOUSE_LL` + `WH_KEYBOARD_LL` 双双卸载；
+    ///   2. `dnd`（勿扰）：鼠标钩子卸载（`01 FR-10-4`）；
+    ///   3. 已离家出走（`runaway_away`）：宠物窗口本身隐藏，桌面无目标可点。
+    ///
+    /// **已知缺口（登记 §3.3）**：钩子因完整性级别 / `LowLevelHooksTimeout` 安装失败时的
+    /// 「静默不可达」窗口**不在本判定覆盖范围**（缺该失败信号的上报通路），
+    /// 故本判定只覆盖「配置层面可判定的三源」。
+    #[must_use]
+    pub fn interaction_available(&self) -> bool {
+        !self.click_through && !self.dnd && !self.runaway_away
+    }
+
+    /// 托盘图标态（S7-M6）：离家 > 不可交互 > 普通（优先级从高到低）。
+    #[must_use]
+    pub fn tray_icon_state(&self) -> TrayIconState {
+        if self.runaway_away {
+            TrayIconState::LeftHome
+        } else if !self.interaction_available() {
+            TrayIconState::NotInteractive
+        } else {
+            TrayIconState::Normal
+        }
+    }
+
+    /// 同步托盘图标 / tooltip / 菜单（S7-M6；**仅变化时**执行，避免每拍重建菜单）。
+    ///
+    /// 两个变化源：
+    ///   - 图标态（普通 / 离家灰化 / 不可交互）；
+    ///   - 「离家」菜单位（决定是否追加「把{name}找回来」）。
+    ///
+    /// 纯逻辑模式（`app = None`）与未装托盘（`tray_by_id` 取不到）均静默降级。
+    pub fn sync_tray(&mut self, app: Option<&AppHandle>) {
+        let Some(handle) = app else { return };
+        let icon = self.tray_icon_state();
+        let icon_changed = self.tray_state != Some(icon);
+        let menu_changed = self.tray_left_home != self.runaway_away;
+        if !icon_changed && !menu_changed {
+            return;
+        }
+        if let Err(err) = crate::tray_menu::sync_state(handle, icon, self.runaway_away) {
+            eprintln!("[dp-app] 托盘状态同步失败（降级继续）：{err}");
+        }
+        self.tray_state = Some(icon);
+        self.tray_left_home = self.runaway_away;
     }
 
     /// 消费应用层投递的设置补丁（S5-M4 业务档每拍调用一次；无待消费 → 立即返回）。
@@ -807,9 +904,14 @@ impl CoreLoopState {
             activity_running: false,
             event_delta: 0.0,
             preset_idle_ms: u64::MAX,
-            interaction_available: true,
+            // S7-M6：离线期间的可达性沿用**离线前**的运行时判定（离线不改变穿透 / 勿扰 /
+            // 离家三源，故不得在此凭空改写；S7-M4 的离线因子口径只取 presence 一项）。
+            interaction_available: self.interaction_available(),
             satiety: self.emotion.state.values.satiety,
             cleanliness: self.emotion.state.values.cleanliness,
+            // S7-M4：离线期间无感知样本（忙碌档退化轻度，`02 §5.5` 的算例前置）。
+            activity: None,
+            negative_happened: false,
             _marker: core::marker::PhantomData,
         };
         let outcome = self.emotion.offline_compensate(away_ms, env);
@@ -952,6 +1054,20 @@ impl CoreLoopState {
                 eprintln!("[dp-app] core-loop 收到「把心月狐找回来」：L5 走回，仍需完成三部曲");
                 self.emotion.coax_recall(now_ms as i64)
             }
+            // S7-M6（FR-11-12 层 ②）：托盘替代入口。**仍走完整三部曲**（产品底线不动）。
+            CoreInput::TrayCoax => {
+                let stage = self.emotion.coax_step();
+                eprintln!("[dp-app] core-loop 收到托盘「摸摸」输入：coax 阶段={stage:?}");
+                self.emotion.coax_tray_tap(now_ms as i64)
+            }
+            CoreInput::TrayFeed => {
+                eprintln!("[dp-app] core-loop 收到托盘「喂食」：等效一次喂食");
+                self.emotion.tray_feed(now_ms as i64)
+            }
+            CoreInput::TrayBath => {
+                eprintln!("[dp-app] core-loop 收到托盘「洗澡」：等效一次洗澡");
+                self.emotion.tray_bath(now_ms as i64)
+            }
             // S5-M4：重置数据 / 导入存档 / 退出需要 `AppHandle`（重启进程 / 强制落盘后退出），
             // 由 [`Self::handle_admin_input`] 在 drain 处先行消化；走到这里说明调用方
             // 未走该出口（属实现错误），按「不产生情绪事件」处理并记日志。
@@ -1001,9 +1117,14 @@ impl CoreLoopState {
         now_mono_ms: u64,
     ) -> bool {
         match input {
-            CoreInput::ResetEmotion | CoreInput::RecallRunaway | CoreInput::FlushSave { .. } => {
-                false
-            }
+            // S7-M6：三个托盘替代入口不需要 `AppHandle`（只动内核状态）→ 交回
+            // `apply_core_input` 落地，与「重置情绪 / 找回」同一出口。
+            CoreInput::ResetEmotion
+            | CoreInput::RecallRunaway
+            | CoreInput::TrayCoax
+            | CoreInput::TrayFeed
+            | CoreInput::TrayBath
+            | CoreInput::FlushSave { .. } => false,
             CoreInput::ResetAllData => {
                 match self.save.as_mut() {
                     Some(save) => match save.reset_to_default(now_mono_ms) {
@@ -1424,9 +1545,17 @@ impl CoreLoopState {
             } else {
                 0
             },
-            interaction_available: true,
+            // S7-M6 / FR-11-12：**不可达判定唯一真源** = 穿透 ∨ 勿扰 ∨ 已离家。
+            // （`dnd` 会卸载鼠标钩子，`click_through` 会卸载鼠标 + 键盘钩子，`runaway_away`
+            //   时窗口本身隐藏 —— 三者都让桌面交互完全不可达。）
+            interaction_available: self.interaction_available(),
             satiety: self.emotion.state.values.satiety,
             cleanliness: self.emotion.state.values.cleanliness,
+            // S7-M4：活动感知采样（隐私关闭时**不喂**，忙碌档退化为轻度；Q-18 ④）。
+            activity: if self.activity_sensing { Some(self.activity) } else { None },
+            // 负向事件的**主通路**是 `on_interaction_kind(Tickle/Throw)`（逐次精确定位）；
+            // 本字段保留给「非交互来源的负向事件」（如跨档结算），当前恒 false。
+            negative_happened: false,
             ..TickEnv::default()
         };
         // 交互净增益按 tick 消费（幂等：喂入后清零，避免重复计入后续 tick）。
@@ -1456,6 +1585,9 @@ impl CoreLoopState {
 
         // ④''' S7-M3：耦合矩阵速度输出 → 行走速度（C-12 精力 ×0.8 / C-11 档位饥饿 ×0.85）。
         self.apply_speed_mul();
+
+        // ④'''' S7-M6：托盘图标 / 菜单位同步（仅变化时调，避免每拍重建菜单）。
+        self.sync_tray(app);
 
         // ⑤ 1Hz 全量快照（`pet://state`）：无论有无算法事件都发，供属性面板 /
         //    原因卡实时刷新（`02 §7.6` 频率列 = 1Hz）。
@@ -1650,6 +1782,8 @@ impl CoreLoopState {
                 .bubble_for_level(&self.lines, self.emotion.cfg().levels.as_slice(), *to, &self.vars, now_ms),
             EmotionEvent::CoaxSucceeded { .. } => RUNAWAY_POOL,
             EmotionEvent::CoaxProgress { step: CoaxStep::Heart, .. } => HAPPY_POOL,
+            // S7-M5 / AC-19：摸鱼专属提示——池键由内核按档位给出（配置驱动）。
+            EmotionEvent::SlackLinger { pool, .. } => pool.as_str(),
             _ => return None,
         };
         let preempt = pool == HAPPY_POOL;

@@ -71,6 +71,37 @@ pub enum EmotionCommand {
     Recall,
 }
 
+/// 托盘替代交互入口命令（**S7-M6** / `02 §5.23`：`pet_tray_coax(step)`）。
+///
+/// 语义：不可达期间（穿透 / 勿扰 / 已离家）桌面交互完全失效，`FR-11-12` 层 ② 要求
+/// **托盘菜单**提供替代入口。托盘菜单项自身已投递（`tray_menu::apply_action`），
+/// 本命令是给**前端**（情绪原因卡的「摸摸 / 喂食 / 洗澡」快捷按钮、设置页引导）用的
+/// 等价入口——两者走同一条入站通道与同一内核接口，故行为完全一致。
+///
+/// `step` 参数只作**诊断标记**（`"coax"` / `"feed"` / `"bath"` / `"recall"`），
+/// **不驱动状态机**：抚摸阶段推进一律由 `CoaxFlow` 自身状态决定（单一真源，
+/// 避免前端传参与内核状态不一致时越级完成三部曲）。
+///
+/// # Errors
+/// 入站通道未装配（纯逻辑模式 / core-loop 未起）时返回中文可读错误串。
+#[tauri::command]
+pub fn pet_tray_coax(app: AppHandle, step: String) -> Result<(), String> {
+    use tauri::Manager;
+
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法下发托盘交互".to_string())?;
+    let input = match step.as_str() {
+        "coax" => crate::bridge::CoreInput::TrayCoax,
+        "feed" => crate::bridge::CoreInput::TrayFeed,
+        "bath" => crate::bridge::CoreInput::TrayBath,
+        "recall" => crate::bridge::CoreInput::RecallRunaway,
+        other => return Err(format!("未知的托盘交互步骤：{other}")),
+    };
+    channel.push(input);
+    Ok(())
+}
+
 /// 情绪兜底命令（前端 `invoke('pet_emotion_command', { command })`）。
 ///
 /// 只做**投递**：把指令经 [`crate::bridge::CoreInputChannel`] 送给 core-loop 逻辑档

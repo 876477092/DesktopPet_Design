@@ -901,6 +901,15 @@ pub enum CoreInput {
     ResetEmotion,
     /// 托盘「把心月狐找回来」→ L5 找回走回（`01 §6.5.2`）。
     RecallRunaway,
+    /// **FR-11-12 层 ②**：托盘「❤ 摸摸{name}」→ 按 `CoaxFlow` 当前阶段分派
+    /// （呼唤 / 累计抚摸 / 比心；L5 离家时为走回）。
+    ///
+    /// 语义随阶段切换（同一菜单项），见 `EmotionEngine::coax_tray_tap` 的口径说明。
+    TrayCoax,
+    /// **FR-11-12 层 ②**：托盘「🍙 喂食」→ 等效一次喂食（`relief.feed` + 饱食度）。
+    TrayFeed,
+    /// **FR-11-12 层 ②**：托盘「🛁 洗澡」→ 等效一次洗澡（`relief.bath` + 清洁度）。
+    TrayBath,
     /// 设置页「重置全部数据」（`01 FR-8-4`）→ 清档重建 + 重启进程。
     ///
     /// 走 core-loop 的原因：存档**唯一写者**是 core-loop，命令层直写会破坏单写者语义。
@@ -934,6 +943,9 @@ impl CoreInput {
         match self {
             CoreInput::ResetEmotion => "ResetEmotion",
             CoreInput::RecallRunaway => "RecallRunaway",
+            CoreInput::TrayCoax => "TrayCoax",
+            CoreInput::TrayFeed => "TrayFeed",
+            CoreInput::TrayBath => "TrayBath",
             CoreInput::ResetAllData => "ResetAllData",
             CoreInput::ImportSave { .. } => "ImportSave",
             CoreInput::Shutdown => "Shutdown",
