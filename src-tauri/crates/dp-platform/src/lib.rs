@@ -23,8 +23,8 @@ pub mod traits;
 pub mod win;
 
 pub use traits::{
-    HitMask, HitResult, HitSource, HitZone, PlatformError, PlatformWindow, RawWindowHandle, Result,
-    TopmostMode, Vec2,
+    ActivitySensing, HitMask, HitResult, HitSource, HitZone, InputIntensity, PlatformError,
+    PlatformWindow, RawWindowHandle, Result, TopmostMode, Vec2,
 };
 
 #[cfg(windows)]
@@ -43,5 +43,10 @@ pub use win::{
 #[cfg(windows)]
 pub use win::system::{
     battery_status, process_load_from_deltas, process_memory_bytes, BatteryState, CpuLoadSampler,
-    ProcCpuSampler,
+    InputIntensitySampler, InputTotals, ProcCpuSampler,
 };
+
+// S7-M1（T-20 / FR-6-3 增量）：前台进程类别哈希（唯一出参 u64，明文不出函数）与
+// 键盘只计数钩子（隐私 / 穿透双 gate 幂等装卸）。
+#[cfg(windows)]
+pub use win::{foreground_process_hash, fnv1a64, KeyCounters, KeyHookBackend, KeyHookService};

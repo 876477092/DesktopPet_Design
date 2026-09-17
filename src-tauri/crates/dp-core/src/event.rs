@@ -66,6 +66,11 @@ pub const EVENT_BUBBLE: &str = "pet://bubble";
 /// C8 说明：与 `EVENT_BUBBLE` 同口径——**不新增事件名**，只补生产者 + 冻结载荷字段。
 pub const EVENT_CONFIG: &str = "pet://config";
 
+/// `pet://needs` 事件名（`02 §7.6`：core → 设置窗口，载荷 `NeedsChanged`，
+/// **属性跨档时**；**S7-M2 起启用**——事件名早已登记于 `02 §7.6`，本卡只补齐
+/// Rust 侧生产者并冻结载荷字段（C8：不新增事件名）。
+pub const EVENT_NEEDS: &str = "pet://needs";
+
 /// `pet://perf` 事件名（`02 §7.6`：core → 设置窗口，载荷 `metrics::PerfWire`
 /// `{fps,cpu,mem,level}`，5s 周期；**S6-M1 起启用**）。
 ///
@@ -78,6 +83,9 @@ pub const COAX_CMD_VERSION: u32 = 1;
 
 /// [`ConfigSetWire`] 载荷版本（v1；与前端 `CONFIG_CMD_VERSION` 同源）。
 pub const CONFIG_WIRE_VERSION: u32 = 1;
+
+/// [`NeedsWire`] 载荷版本（v1；S7-M2 冻结，前端消费端类型归 S10-M1）。
+pub const NEEDS_WIRE_VERSION: u32 = 1;
 
 /// 快照载荷版本（`02 §4.3` `v: 2`；与前端 `PetSnapshotV2.v` 同源）。
 pub const SNAPSHOT_VERSION: u32 = 2;
@@ -861,6 +869,46 @@ pub fn wire_for_config(revision: u64, changed: &[&str], persisted: bool) -> Wire
         persisted,
     };
     WireEvent::new(EVENT_CONFIG, &payload)
+}
+
+/// `pet://needs` 载荷 v1（`02 §7.6` `NeedsChanged`，**S7-M2 起启用**）。
+///
+/// 语义：**属性跨档时**的单帧通知（非周期性）。属性面板的连续数值刷新走
+/// `pet://state` 的 1Hz 全量快照（S4-M2）；本事件只回答「哪一维刚跨了哪一档」，
+/// 供 UI 做低值变橙 / 变红、脉冲提示与档位文案切换。
+///
+/// 字段冻结（S7-M2）：`version` / `satiety` / `cleanliness` / `satietyBand` /
+/// `cleanBand`。档位为**字符串 ID**（与 `needs.json.bands.*[].id` 逐字一致，C7），
+/// 消费端对未知 ID 应忽略而非报错（前向兼容：未来加档位不破坏旧消费端）。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeedsWire {
+    /// 载荷结构版本（[`NEEDS_WIRE_VERSION`]）。
+    pub version: u32,
+    /// 当前饱食度。
+    pub satiety: f32,
+    /// 当前清洁度。
+    pub cleanliness: f32,
+    /// 当前饱食档 ID。
+    pub satiety_band: String,
+    /// 当前清洁档 ID。
+    pub clean_band: String,
+}
+
+/// 构造 `pet://needs` 线上事件（唯一生产点，C8）。
+///
+/// **仅当** [`NeedsOutcome::band_changed`] 为真时调用（跨档语义）；
+/// 未跨档时调用方不应产出事件（`02 §7.6` 频率列 = 属性跨档时）。
+#[must_use]
+pub fn wire_for_needs(outcome: &crate::needs::NeedsOutcome) -> WireEvent {
+    let payload = NeedsWire {
+        version: NEEDS_WIRE_VERSION,
+        satiety: outcome.satiety,
+        cleanliness: outcome.cleanliness,
+        satiety_band: outcome.satiety_band.id().to_string(),
+        clean_band: outcome.clean_band.id().to_string(),
+    };
+    WireEvent::new(EVENT_NEEDS, &payload)
 }
 
 #[cfg(test)]

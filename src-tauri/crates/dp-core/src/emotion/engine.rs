@@ -30,6 +30,9 @@
 use chrono::{Datelike, Local, Timelike};
 
 use crate::config::model::{EmotionLevelCfg, MoodDimCfg};
+use crate::needs::coupling::{CouplingOutput, CouplingSolver, CouplingSnapshot};
+use crate::needs::{NeedsEnv, NeedsOutcome, NeedsSystem};
+use crate::perception::time::{minute_of_day, TimeRhythm};
 use crate::emotion::coax::{
     CoaxEffect, CoaxFailReason, CoaxFlow, CoaxInput, CoaxStep, COAX_REQUIRED_MIN_LEVEL,
     COAX_SUCCESS_ACTION, COAX_SUCCESS_PRIORITY,
@@ -433,6 +436,41 @@ pub struct EmotionEngine<'c> {
     coax: CoaxFlow,
     /// 交互缓解冷却与抚摸窗口（S4-M3）。
     relief: ReliefTracker,
+    /// 需求系统（S7-M2：自然变化 / 事件扣减 / 冷却记账；六维数值真源仍是 `state.values`）。
+    needs: NeedsSystem,
+    /// 一日节律表（S7-M1：6 段时段 + 用餐窗口；配置驱动，零分配）。
+    rhythm: TimeRhythm,
+    /// 耦合矩阵求解器（S7-M3；`None` = 构建期环检测未过 → 全中性输出，不崩）。
+    coupling: Option<CouplingSolver<'c>>,
+    /// 本拍耦合输出（S3 阶段消费面：Mood 衰减 / 速度 / 收益 / 派遣门禁）。
+    coupling_out: CouplingOutput<'c>,
+    /// 本拍需求推进产出（跨档判定 → `pet://needs`，由 `dp-app` 读后 emit）；
+    /// `None` = 尚未推进过（首个业务档之前）。
+    last_needs: Option<NeedsOutcome>,
+}
+
+/// 香味 Buff 期间的 Mood 衰减倍率（`01 §6.12.3`：洗护用品免冷却 + 12min 内 ×0.8）。
+///
+/// 口径说明（C7 登记）：`needs.json` 当前**无**该键（文档只给固定倍数），故以本常量
+/// 承载；若后续配置化，应同时改为从 `needs.json.bath` 读取（届时删除本常量）。
+const SENT_BUFF_MOOD_DECAY_MUL: f32 = 0.8;
+
+/// 构建耦合求解器（S7-M3）。
+///
+/// 构建期环检测失败 → `None` + 告警（降级不崩，`02 §7.4.2`）：此后
+/// [`EmotionEngine::coupling`] 恒为全中性输出（所有乘子 1.0、无拒绝），
+/// 即「矩阵不可用时退回无耦合」，绝不 panic。
+/// 正常路径下 `ConfigService::load_all` 已在装载期拒绝成环配置，本函数是第二道保险。
+fn build_coupling<'c>(
+    needs_cfg: &'c crate::config::model::NeedsConfig,
+) -> Option<CouplingSolver<'c>> {
+    match CouplingSolver::build(&needs_cfg.coupling) {
+        Ok(solver) => Some(solver),
+        Err(err) => {
+            tracing::warn!("耦合矩阵构建失败，退化为无耦合：{err}");
+            None
+        }
+    }
 }
 
 impl<'c> EmotionEngine<'c> {
@@ -461,6 +499,11 @@ impl<'c> EmotionEngine<'c> {
             positive_interactions: 0,
             coax: CoaxFlow::new(),
             relief: ReliefTracker::default(),
+            needs: NeedsSystem::new(),
+            rhythm: TimeRhythm::from_cfg(&cfg.rhythm),
+            coupling: build_coupling(needs_cfg),
+            coupling_out: CouplingOutput::default(),
+            last_needs: None,
         }
     }
 
@@ -503,6 +546,57 @@ impl<'c> EmotionEngine<'c> {
     #[inline]
     pub fn needs_cfg(&self) -> &'c crate::config::model::NeedsConfig {
         self.needs_cfg
+    }
+
+    /// 只读：需求系统（S7-M2；冷却时间戳与分档缓存）。
+    #[inline]
+    pub const fn needs(&self) -> &NeedsSystem {
+        &self.needs
+    }
+
+    /// 可写：需求系统（供上层在道具 / 事件后回写冷却时间戳）。
+    #[inline]
+    pub fn needs_mut(&mut self) -> &mut NeedsSystem {
+        &mut self.needs
+    }
+
+    /// 只读：一日节律表（S7-M1；时段 + 用餐窗口）。
+    #[inline]
+    pub const fn rhythm(&self) -> &TimeRhythm {
+        &self.rhythm
+    }
+
+    /// 只读：本拍耦合输出（S7-M3；S3 阶段消费面）。
+    #[inline]
+    pub const fn coupling(&self) -> &CouplingOutput<'c> {
+        &self.coupling_out
+    }
+
+    /// 只读：本拍需求推进产出（`None` = 尚未推进；`band_changed` = 需发 `pet://needs`）。
+    #[inline]
+    pub const fn last_needs(&self) -> Option<NeedsOutcome> {
+        self.last_needs
+    }
+
+    /// 移动 / 动作速度乘子（S7-M3 C-12：`Energy < 20` → ×0.8）。
+    ///
+    /// 与 [`Self::needs`] 的分档 `speed_mul`（`satiety < 20` → ×0.85）**相乘**后使用；
+    /// 消费点 = `MotionEngine::set_speed_mul`（core-loop 每 logic tick 注入）。
+    #[inline]
+    pub fn speed_mul(&self) -> f32 {
+        self.coupling_out.speed_mul
+    }
+
+    /// 派遣门禁（S7-M3 / AC-30 / AC-31）：**矩阵级**拒绝判定（`true` = 允许）。
+    ///
+    /// 调用方应与 [`crate::needs::bands::BandEffects::denies_dispatch`]（分档级拒绝）
+    /// 取**并集**（两处配置语义一致，见 `01 §6.12.4` 与 §6.12.2/3 对照）。
+    #[must_use]
+    pub fn dispatch_verdict(&self, kind: crate::needs::DispatchKind) -> bool {
+        match &self.coupling {
+            Some(solver) => solver.dispatch_verdict(kind, &self.coupling_out).is_allowed(),
+            None => true,
+        }
     }
 
     /// 只读：是否处于想念展示。
@@ -611,18 +705,6 @@ impl<'c> EmotionEngine<'c> {
         self.cfg.personality.mood_delta_base + self.cfg.personality.mood_delta_temper * self.temper
     }
 
-    /// 需求衰减放大（S4-M1 简化：「亏空」按 satiety/cleanliness 的缺口线性放大量）。
-    ///
-    /// 完整口径（`needs.coef × max(0, (deficitRef − min(satiety,cleanliness))/deficitRef)`）
-    /// 归 S4-M2+S7；本卡只保证「漏了/脏了心情掉得快」的定性方向，且系数全部取自配置。
-    fn needs_mood_decay_mul(&self, env: &TickEnv<'_>) -> f32 {
-        let ref_v = self.cfg.needs.deficit_ref;
-        if ref_v <= 0.0 {
-            return 1.0;
-        }
-        1.0 + self.cfg.needs.coef * ((ref_v - env.satiety.min(env.cleanliness)) / ref_v).max(0.0)
-    }
-
     /// 阶段判定：`P_eff` → 目标档位（`02 §5.3` 冻结阈值表）。
     fn level_for(&self, p_eff: f32) -> u8 {
         let t = &self.cfg.thresholds;
@@ -674,6 +756,26 @@ impl<'c> EmotionEngine<'c> {
             return TickOutcome { events: vec![], pause_changed };
         }
 
+        // ── 0.5) 需求推进（S7-M2：六维自然变化 + 分档）+ 耦合求解（S7-M3）──────
+        // 顺序说明：需求先推进（S2 阶段属性变化），再取**耦合快照**做 S1 求耦合，
+        // 本拍后续的 Mood 衰减（S3 阶段）即用本拍矩阵结果——与 `02 §5.10`
+        // 「S0 快照 → S1 求耦合 → S2 属性变化 → S3 Mood/Affinity」同序。
+        // 用餐窗口取自 `emotion.json.rhythm.mealWindows`（07-09 / 11-13 / 17-19）。
+        let minute = minute_of_day(&env.now_local);
+        let needs_env = NeedsEnv::new(
+            now_ms,
+            self.rhythm.is_meal_window(minute),
+            env.activity_running,
+            matches!(self.state.emotion, EmotionState::Sleepy),
+        );
+        self.last_needs =
+            Some(self.needs.tick(&mut self.state.values, self.needs_cfg, dt_min, &needs_env));
+        let snapshot = CouplingSnapshot::from(&self.state.values);
+        self.coupling_out = match self.coupling.as_mut() {
+            Some(solver) => solver.evaluate(&snapshot, now_ms),
+            None => CouplingOutput::default(),
+        };
+
         // ── 1) 因子求解（S4-M1 简化版；S7-M4 只替换这里）────────────────────
         let (factors, _here) = FactorProduct::from_env(&env, self, now_ms);
         self.factors = factors;
@@ -697,7 +799,7 @@ impl<'c> EmotionEngine<'c> {
         events.extend(self.apply_coax_effects(coax_effects));
 
         // ── 5) Mood 一阶低通惯性 ────────────────────────────────────────────
-        events.extend(self.step_mood(dt_min, env.event_delta, &env));
+        events.extend(self.step_mood(dt_min, env.event_delta, now_ms));
 
         // ── 6) 日切（自然消气计量与正向计数的重置）──────────────────────────
         events.extend(self.daily_roll(&env));
@@ -817,7 +919,7 @@ impl<'c> EmotionEngine<'c> {
     }
 
     /// Mood 一阶低通惯性（`02 §5 K-5` `step_mood`）。
-    fn step_mood(&mut self, dt_min: f32, event_delta: f32, env: &TickEnv<'_>) -> Vec<EmotionEvent> {
+    fn step_mood(&mut self, dt_min: f32, event_delta: f32, now_ms: i64) -> Vec<EmotionEvent> {
         let m: &MoodDimCfg = &self.cfg.dimensions.mood;
         let ref_p = self.cfg.mood.drain_ref_p;
         let p_ratio = if ref_p > 0.0 { (self.neglect.p / ref_p).max(0.0) } else { 0.0 };
@@ -825,7 +927,13 @@ impl<'c> EmotionEngine<'c> {
         // S4-M1 骨架：`is_active()` 判定依赖活跃度感知（S7-M4），本卡统一取
         // `decayPerMinActive`；S7-M4 接入后按 `is_active()` 在两档间切换即可。
         let decay = m.decay_per_min_active.abs();
-        let needs_mul = self.needs_mood_decay_mul(env);
+        // S7-M3：Mood 衰减乘子改由**耦合矩阵**给出（C-01/C-02/C-06 取 max + 5s 平滑，
+        // `02 §5.10` S3 阶段）。原 S4-M1 的 `emotion.json.needs.coef` 线性占位已移除——
+        // 该组系数是**七因子 `needs` 因子**（`02 §5.2`，归 S7-M4）的量，不复用于 Mood 衰减。
+        let needs_mul = self.coupling_out.mood_decay_mul;
+        // S7-M2：香味 Buff（`01 §6.12.3`：洗护用品 12min 内 Mood 衰减 ×0.8）。
+        let scent_mul = if self.needs.scent_buff_active(now_ms) { SENT_BUFF_MOOD_DECAY_MUL } else { 1.0 };
+        let needs_mul = needs_mul * scent_mul;
         let target = self.state.values.mood - decay * needs_mul * dt_min - drain * dt_min + event_delta;
         let tau = if target < self.state.values.mood {
             self.cfg.inertia.tau_down_sec as f32
@@ -1211,7 +1319,7 @@ impl<'c> EmotionEngine<'c> {
         self.neglect.cap = cap;
         self.neglect.p = (self.neglect.p + dt_min * self.neglect.rate_per_min).clamp(0.0, cap);
         let _ = self.settle_level(now_ms);
-        let _ = self.step_mood(dt_min, 0.0, &env);
+        let _ = self.step_mood(dt_min, 0.0, now_ms);
         // 离线期间不推进日切（S4-M2 用真实 now_local 处理跨日）
     }
 }
@@ -2507,8 +2615,12 @@ mod tests {
         assert!(high > low * 4.0, "抽血应超线性：low={low} high={high}");
     }
 
+    /// **S7-M3 起口径变更**：Mood 衰减乘子由**耦合矩阵**（C-01/C-02/C-06 取 max + 5s 平滑）
+    /// 给出，不再是 S4-M1 的 `emotion.json.needs.coef` 线性占位——后者是七因子 `needs`
+    /// 因子（`02 §5.2`，归 S7-M4）的量。本测试锁定「亏空 → 衰减更快」的定性方向仍成立，
+    /// 且放大倍数与 `02 §5.10` 的矩阵系数一致（`satiety<=0` → ×2.5）。
     #[test]
-    fn needs_decay_multiplier_follows_config_coef() {
+    fn mood_decay_multiplier_follows_coupling_matrix() {
         let needs = NeedsConfig::default();
         let mut cfg = EmotionConfig::default();
         cfg.dimensions.mood.decay_per_min = 0.0;
@@ -2517,24 +2629,26 @@ mod tests {
         cfg.inertia.tau_up_sec = 1;
         cfg.mood.drain_coef = 0.0;
 
-        let measure = |sat: f32| -> f32 {
+        let measure = |sat: f32| -> (f32, f32) {
             let mut e = EmotionEngine::new(&cfg, &needs);
             e.tick_1s(0, env(day()));
-            e.tick_1s(1_000, env(day())); // 建立非零 rate 基线
+            e.tick_1s(1_000, env(day())); // 建立基线（耦合快照取自内核数值）
+            // 直接改内核六维数值：`state.values` 是耦合快照 S0 的唯一来源。
+            e.state.values.satiety = sat;
+            e.state.values.cleanliness = sat;
             let before = e.state.values.mood;
-            let mut env2 = env(day());
-            env2.satiety = sat;
-            env2.cleanliness = sat;
-            // 用一个较大 Δt 让衰减可见（30 个 1s tick 累计）
+            // 30 个 1s tick：越过 5s 平滑窗口，使 `moodDecayMul` 收敛到矩阵真值。
             let mut t = 1_000i64;
             for _ in 0..30 {
                 t += 1_000;
-                e.tick_1s(t, env2);
+                e.tick_1s(t, env(day()));
             }
-            before - e.state.values.mood
+            (before - e.state.values.mood, e.coupling().mood_decay_mul)
         };
-        let full = measure(100.0); // 无亏空
-        let starved = measure(0.0); // 满亏空
+        let (full, full_mul) = measure(100.0); // 无亏空 → 无规则命中
+        let (starved, starved_mul) = measure(0.0); // satiety=0 → C-02(2.5) 与 C-06(1.3) 取 max
+        assert!((full_mul - 1.0).abs() < 1e-6, "无亏空乘子应为 1.0：{full_mul}");
+        assert!((starved_mul - 2.5).abs() < 1e-6, "satiety<=0 → C-02 = 2.5：{starved_mul}");
         assert!(starved > full, "亏空应放大衰减：full={full} starved={starved}");
         assert!(full > 0.0, "基础自然衰减应生效");
     }

@@ -8,11 +8,19 @@
 //!
 //! 边界：通道断开（消费端已销毁）时 `offer` 静默丢弃、**永不阻塞 / panic**
 //! （采样线程的健康高于任何单条事件）。
+//!
+//! **S7-M1 扩展（T-20 / `02 §5.6`）**：活动感知（键击 / 点击 / 移动强度 + 前台进程
+//! 类别哈希）采样频率远低于光标（1Hz 级 vs 20Hz），且**只需最新值**。为免其挤占
+//! 20Hz 光标队列，总线支持按容量构造（[`PerceptionBus::new_with_cap`]），活动感知走
+//! 窄容量 [`ACTIVITY_CHANNEL_CAP`]（= 8）。丢弃策略与主队列一致（满则丢最旧）。
 
 use crossbeam_channel::{Receiver, Sender, TrySendError};
 
 /// 感知事件通道容量（`02 §1.4`：`bounded(64)`，满则丢最旧）。
 pub const PERCEPTION_CHANNEL_CAP: usize = 64;
+
+/// 活动感知通道容量（S7-M1：1Hz 级采样 + 只需最新值 → 窄队列足以，且不挤占光标队列）。
+pub const ACTIVITY_CHANNEL_CAP: usize = 8;
 
 /// perception → core 单生产者单消费者总线：最新值优先，满则丢弃最旧。
 ///
@@ -24,14 +32,32 @@ pub struct PerceptionBus<E> {
     tx: Sender<E>,
     /// 接收端（core 主循环侧）。
     rx: Receiver<E>,
+    /// 构造时的通道容量（`offer` 溢出重试上限据此推导）。
+    cap: usize,
 }
 
 impl<E> PerceptionBus<E> {
     /// 以固定容量 [`PERCEPTION_CHANNEL_CAP`] 构造总线。
     #[must_use]
     pub fn new() -> Self {
-        let (tx, rx) = crossbeam_channel::bounded(PERCEPTION_CHANNEL_CAP);
-        Self { tx, rx }
+        Self::new_with_cap(PERCEPTION_CHANNEL_CAP)
+    }
+
+    /// 以指定容量构造总线（S7-M1：活动感知用 [`ACTIVITY_CHANNEL_CAP`]）。
+    ///
+    /// `cap == 0` 按 1 处理（防御：零容量通道无法投递任何事件，与「最新值优先」语义相悖）。
+    /// 丢弃策略与默认容量完全一致——满则丢最旧、断开则静默丢弃。
+    #[must_use]
+    pub fn new_with_cap(cap: usize) -> Self {
+        let cap = cap.max(1);
+        let (tx, rx) = crossbeam_channel::bounded(cap);
+        Self { tx, rx, cap }
+    }
+
+    /// 本总线的通道容量（自检 / 测试观测口）。
+    #[must_use]
+    pub const fn cap(&self) -> usize {
+        self.cap
     }
 
     /// 生产者侧投递：满则先丢弃最旧一条再入队（`02 §1.4` 最新值优先）；
@@ -41,7 +67,7 @@ impl<E> PerceptionBus<E> {
     /// 最旧即可腾位，实际一次重试内成功）；超限则放弃本次事件。
     pub fn offer(&self, ev: E) {
         let mut ev = ev;
-        for _ in 0..=PERCEPTION_CHANNEL_CAP {
+        for _ in 0..=self.cap {
             match self.tx.try_send(ev) {
                 Ok(()) => return,
                 Err(TrySendError::Full(returned)) => {
@@ -164,5 +190,43 @@ mod tests {
         assert!(bus.is_empty());
         bus.offer(9);
         assert_eq!(bus.len(), 1);
+        assert_eq!(bus.cap(), PERCEPTION_CHANNEL_CAP);
+    }
+
+    // -- S7-M1：窄容量活动感知总线 -------------------------------------------
+
+    #[test]
+    fn narrow_bus_keeps_only_latest_values() {
+        let bus: PerceptionBus<u32> = PerceptionBus::new_with_cap(ACTIVITY_CHANNEL_CAP);
+        assert_eq!(bus.cap(), ACTIVITY_CHANNEL_CAP);
+        for i in 0..(ACTIVITY_CHANNEL_CAP as u32 + 5) {
+            bus.offer(i);
+        }
+        assert_eq!(bus.len(), ACTIVITY_CHANNEL_CAP, "容量恒为构造值");
+        let mut out = Vec::new();
+        bus.drain(&mut out);
+        assert_eq!(out.last(), Some(&(ACTIVITY_CHANNEL_CAP as u32 + 4)), "最新值必须保留");
+        assert_eq!(out.first(), Some(&5), "最旧的 0..5 被丢弃");
+    }
+
+    #[test]
+    fn zero_capacity_is_clamped_to_one() {
+        let bus: PerceptionBus<u32> = PerceptionBus::new_with_cap(0);
+        assert_eq!(bus.cap(), 1, "零容量按 1 处理（防御）");
+        bus.offer(7);
+        bus.offer(8);
+        assert_eq!(bus.len(), 1);
+        let mut out = Vec::new();
+        bus.drain(&mut out);
+        assert_eq!(out, vec![8], "单槽只保留最新值");
+    }
+
+    #[test]
+    fn narrow_bus_disconnected_offer_stays_silent() {
+        let mut bus: PerceptionBus<u32> = PerceptionBus::new_with_cap(ACTIVITY_CHANNEL_CAP);
+        let real_rx = bus.take_receiver();
+        drop(real_rx);
+        bus.offer(1); // 不得 panic / 阻塞
+        assert!(bus.is_empty());
     }
 }

@@ -399,6 +399,10 @@ mod tests {
     // -- 平台消失即坠 / 恢复落地（AC-08a） ---------------------------------------
 
     /// 可开关的测试桩站立面：模拟窗口开/关（关 → 无任何合法站立点）。
+    ///
+    /// `Debug`（S7-M3 前置首件）：`StandSurface` 新增 `Debug` 超 trait 后，
+    /// 测试桩实现必须可打印。
+    #[derive(Debug)]
     struct ToggleFloor {
         open: Cell<bool>,
         floor_y: f32,

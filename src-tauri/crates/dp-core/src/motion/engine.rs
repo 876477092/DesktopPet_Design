@@ -74,8 +74,24 @@ pub struct MotionEngine {
     monitors: Vec<MonitorGeom>,
     /// 站立面（兜底地面，随 monitors 重建）。
     floor: DesktopFloor,
+    /// **决策层**注入站立面（S7-M3 前置首件 / B12-① / P2-16）。
+    ///
+    /// `None` = 决策层亦用 [`DesktopFloor`]（无参 [`MotionEngine::new`] 的既有行为，
+    /// 逐字不变）。`Some(graph)` 时**仅决策层**（目标采样 / 目标钳制 / 路标合法性）
+    /// 改用注入面（如 S2-M6 `PlatformGraph` 的标题栏平台），据此「走上标题栏站立」
+    /// 在决策层生效；**物理落地缓冲仍由 `floor` 兜底**（`02 §5 K-3` 的
+    /// `DesktopFloor` 语义不被注入削弱）。
+    ///
+    /// `Send + Sync` 约束：引擎随 `CoreLoopState` 被 `move` 进 core-loop 线程，
+    /// 端口对象须可跨线程（与其余端口同口径）。
+    decision_surface: Option<Box<dyn StandSurface + Send + Sync>>,
     /// 漫游配置（`02 K-3` 单一真源）。
     cfg: RoamCfg,
+    /// 行走速度外部乘子（S7-M3：耦合矩阵 `speed` 输出，C-11 档位 ×0.85 / C-12 精力 ×0.8）。
+    ///
+    /// 语义：**只缩放行走速度**，不改变决策间隔与路径规划；恒被钳到 `(0, 4]`
+    /// （防御外部注入 0 / NaN 导致「永不到达」）。
+    speed_mul: f32,
     /// 决策间隔随机流（与采样器流分离）。
     pacing_rng: SplitMix64,
     /// 漫游采样器（含独立随机流）。
@@ -117,7 +133,9 @@ impl MotionEngine {
         let mut engine = Self {
             monitors,
             floor,
+            decision_surface: None,
             cfg,
+            speed_mul: 1.0,
             pacing_rng: SplitMix64::new(seed.wrapping_add(PACING_SEED_OFFSET)),
             sampler: RoamSampler::new(seed),
             pos,
@@ -137,6 +155,45 @@ impl MotionEngine {
         let first_interval = decision_interval_ms(&mut engine.pacing_rng, &engine.cfg);
         engine.next_decision_ms = now_ms.saturating_add(first_interval);
         engine
+    }
+
+    /// 构造引擎并注入**决策层站立面**（S7-M3 前置首件：B12-① / P2-16）。
+    ///
+    /// 语义：与 [`MotionEngine::new`] 逐字等价，额外把 `surface` 作为**决策层**
+    /// 站立面（目标采样、目标钳制、绕行路标合法性判定）；`DesktopFloor` 仍是
+    /// 物理落地与兜底钳制的实现（`02 §5 K-3`：注入仅影响决策层平台判定，
+    /// 「走上标题栏站立」在决策层生效）。
+    ///
+    /// 注入面在 [`MotionEngine::on_monitors_changed`] 后**不被重建**：调用方
+    /// （`dp-app` 装配）负责让注入面自身跟随显示器变更刷新（如
+    /// [`crate::motion::PlatformGraph::rebuild`]）。
+    #[must_use]
+    pub fn new_with_surface(
+        pos: Vec2,
+        monitors: Vec<MonitorGeom>,
+        cfg: RoamCfg,
+        seed: u64,
+        now_ms: u64,
+        surface: Box<dyn StandSurface + Send + Sync>,
+    ) -> Self {
+        let mut engine = Self::new(pos, monitors, cfg, seed, now_ms);
+        engine.decision_surface = Some(surface);
+        engine
+    }
+
+    /// 决策层站立面（`Some(注入面)` 优先，否则 [`DesktopFloor`] 兜底）。
+    #[must_use]
+    pub fn surface(&self) -> &dyn StandSurface {
+        match &self.decision_surface {
+            Some(surface) => surface.as_ref(),
+            None => &self.floor,
+        }
+    }
+
+    /// 是否已注入决策层站立面（装配自检 / 测试观测口）。
+    #[must_use]
+    pub const fn has_injected_surface(&self) -> bool {
+        self.decision_surface.is_some()
     }
 
     // -- 只读查询 ---------------------------------------------------------------
@@ -169,6 +226,20 @@ impl MotionEngine {
     #[must_use]
     pub const fn migration_deadline_ms(&self) -> Option<u64> {
         self.migration_deadline_ms
+    }
+
+    /// 当前外部速度乘子（S7-M3；默认 1.0）。
+    #[must_use]
+    pub const fn speed_mul(&self) -> f32 {
+        self.speed_mul
+    }
+
+    /// 设置外部速度乘子（S7-M3：core-loop 每 logic tick 由情绪内核 `speed_mul()`
+    /// × 需求分档 `speed_mul()` 注入）。
+    ///
+    /// 防御：非有限 / ≤ 0 → 视为 1.0（不缩放）；上限钳 4.0（防外部误注入导致瞬移观感）。
+    pub fn set_speed_mul(&mut self, mul: f32) {
+        self.speed_mul = if mul.is_finite() && mul > 0.0 { mul.min(4.0) } else { 1.0 };
     }
 
     /// 是否行走中。
@@ -220,7 +291,7 @@ impl MotionEngine {
         if self.monitors.is_empty() {
             return false;
         }
-        let target = self.floor.clamp_to_stand(target);
+        let target = self.surface().clamp_to_stand(target);
         self.waypoints = self.plan_path(self.pos, target, None);
         true
     }
@@ -268,7 +339,8 @@ impl MotionEngine {
         }
         // 速度防御：非有限 / ≤ 0 → 回退内置默认（60 VDC px/s）。
         let fallback = RoamCfg::default().walk_speed_px_per_sec;
-        let speed = self.cfg.walk_speed_px_per_sec;
+        // S7-M3：叠加外部速度乘子（精力 <20 疲劳 / 饥饿减速）。
+        let speed = self.cfg.walk_speed_px_per_sec * self.speed_mul;
         let speed = if speed.is_finite() && speed > 0.0 { speed } else { fallback };
         let mut budget = speed * dt_ms as f32 / 1000.0;
         while budget > 0.0 {
@@ -314,7 +386,14 @@ impl MotionEngine {
         let heat = self
             .cursor_pos
             .map(|p| CursorHeat::new(p, self.cfg.cursor_avoid_radius_px as f32));
-        match self.sampler.decide_target(&region, &self.floor, heat, &[]) {
+        // 决策层站立面（S7-M3 前置首件）：注入面优先，否则 DesktopFloor 兜底。
+        // 字段级拆分借用：`surface` 借 `decision_surface` / `floor`，与 `sampler`
+        // 的可变借用互不相交。
+        let surface: &dyn StandSurface = match &self.decision_surface {
+            Some(s) => s.as_ref(),
+            None => &self.floor,
+        };
+        match self.sampler.decide_target(&region, surface, heat, &[]) {
             Some(target) => {
                 let cross = self.monitor_at(target).is_some_and(|m| m.id != cur.id);
                 self.waypoints = self.plan_path(self.pos, target, heat);
@@ -338,7 +417,7 @@ impl MotionEngine {
         if a.id == b.id {
             if let Some(h) = heat {
                 if let Some(wp) = detour_waypoint(from, to, &h) {
-                    if self.floor.is_valid_stand(wp) {
+                    if self.surface().is_valid_stand(wp) {
                         return vec![wp, to];
                     }
                 }
@@ -431,6 +510,7 @@ pub(crate) fn seam_waypoint(a: &MonitorGeom, b: &MonitorGeom, from: Vec2) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::STAND_EPS_PX;
 
     /// 主屏：VDC (0,0) 1920×1080，工作区底边 1040。
     fn mon_a() -> MonitorGeom {
@@ -714,5 +794,79 @@ mod tests {
         let mut bare =
             MotionEngine::new(Vec2::new(0.0, 0.0), Vec::new(), cfg([5, 30], 1.0, 60.0), 42, 0);
         assert!(!bare.walk_to(Vec2::new(10.0, 10.0)), "无显示器 walk_to 返回 false");
+    }
+
+    // -- S7-M3 前置首件：决策层站立面注入（B12-① / P2-16） ----------------------
+
+    /// 测试桩：标题栏平台（y = `band_y` 的一条水平带）。
+    #[derive(Debug)]
+    struct TitlebarSurface {
+        band_y: f32,
+        left: f32,
+        right: f32,
+    }
+
+    impl StandSurface for TitlebarSurface {
+        fn is_valid_stand(&self, p: Vec2) -> bool {
+            (p.y - self.band_y).abs() <= STAND_EPS_PX && p.x >= self.left && p.x < self.right
+        }
+
+        fn clamp_to_stand(&self, p: Vec2) -> Vec2 {
+            Vec2::new(p.x.clamp(self.left, self.right), self.band_y)
+        }
+    }
+
+    #[test]
+    fn default_engine_has_no_injected_surface_and_uses_desktop_floor() {
+        let eng = MotionEngine::new(Vec2::new(960.0, 1040.0), vec![mon_a()], cfg([5, 30], 1.0, 60.0), 42, 0);
+        assert!(!eng.has_injected_surface(), "无参构造不得注入决策面");
+        // 兜底面 = DesktopFloor：工作区底边（1040）为合法站立点。
+        assert!(eng.surface().is_valid_stand(Vec2::new(100.0, 1040.0)));
+        assert!(!eng.surface().is_valid_stand(Vec2::new(100.0, 500.0)));
+    }
+
+    #[test]
+    fn injected_surface_drives_decision_layer_target_clamp() {
+        // 注入「标题栏带 y=500」：决策层目标应被钳到该带，而非工作区底边 1040。
+        let mut eng = MotionEngine::new_with_surface(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            cfg([5, 30], 1.0, 3000.0),
+            42,
+            0,
+            Box::new(TitlebarSurface { band_y: 500.0, left: 0.0, right: 1920.0 }),
+        );
+        assert!(eng.has_injected_surface());
+        assert!(
+            eng.surface().is_valid_stand(Vec2::new(100.0, 500.0)),
+            "注入面在决策层生效：标题栏带合法"
+        );
+
+        assert!(eng.walk_to(Vec2::new(300.0, 900.0)), "注入面下 walk_to 仍可规划");
+        for i in 1..=200u64 {
+            let _ = eng.tick(i * 100);
+        }
+        assert!(
+            (eng.pos().y - 500.0).abs() < 1e-3,
+            "行走到注入站立面（标题栏）而非工作区底边：y={}",
+            eng.pos().y
+        );
+    }
+
+    #[test]
+    fn injected_surface_survives_monitor_change_rebuild() {
+        // on_monitors_changed 重建的是兜底 DesktopFloor；注入面不被覆盖（P2-16：
+        // 注入面自身随显示器刷新由装配方负责）。
+        let mut eng = MotionEngine::new_with_surface(
+            Vec2::new(960.0, 1040.0),
+            vec![mon_a()],
+            cfg([5, 30], 1.0, 60.0),
+            7,
+            0,
+            Box::new(TitlebarSurface { band_y: 500.0, left: 0.0, right: 1920.0 }),
+        );
+        eng.on_monitors_changed(vec![mon_a(), mon_b()], 1_000);
+        assert!(eng.has_injected_surface(), "显示器变更不得丢弃注入面");
+        assert!(eng.surface().is_valid_stand(Vec2::new(100.0, 500.0)));
     }
 }

@@ -110,6 +110,12 @@ pub struct PetPlatform {
     pub window: dp_platform::WinPlatformWindow,
     /// 平台入口（持有 `DisplayService`，供坐标换算 / 显示器变更后 `refresh`）。
     pub platform: dp_platform::WinPlatform,
+    /// S7-M1：低阶键盘钩子服务（`WH_KEYBOARD_LL` **只计数**）。
+    ///
+    /// 两个 gate 决定装 / 卸：`activity_sensing && !click_through`
+    /// （隐私红线 ④ 与 ⑤，`02 §5.6`）。感知线程读 `counters()` 取键击强度；
+    /// 隐私开关由 core-loop 的 1Hz 业务档经 `set_activity_sensing` 落地。
+    pub keyhook: std::sync::Arc<dp_platform::KeyHookService>,
 }
 
 /// 宠物窗口的**基准逻辑尺寸**（`Q-B`：逻辑 128×128，导出 2x 256×256）。
@@ -192,9 +198,14 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
         .set_topmost(TopmostMode::Always)
         .map_err(|e| e.to_string())?;
 
+    // S7-M1：键盘只计数钩子（`WH_KEYBOARD_LL`）。初始两 gate 取当前态
+    // （感知默认开、穿透取窗口当前态）；隐私值由 core-loop 的 1Hz 业务档落地。
+    let keyhook =
+        std::sync::Arc::new(dp_platform::KeyHookService::new(true, window.is_click_through()));
+
     // 先注册平台对象：下述托盘装配与监督线程均经 `app.state::<PetPlatform>()` / 跨线程
     // `try_state::<PetPlatform>()` 取用，故顺序不可反（必须先 manage）。
-    app.manage(PetPlatform { window, platform });
+    app.manage(PetPlatform { window, platform, keyhook: std::sync::Arc::clone(&keyhook) });
 
     // S3-M0：core-loop 运行时装配层（三档 tick + 五引擎装配 + 端口注入）。
     // 感知总线（单生产者语义：感知线程 offer、core-loop drain）与 bbox 句柄先注册，
@@ -277,8 +288,12 @@ fn attach_pet_window(app: &mut tauri::App) -> Result<(), String> {
                 win.window.is_hidden_for_fullscreen(),
             ));
             let svc_for_click_through = Arc::clone(&svc);
+            // S7-M1：穿透切换**同时** gate 键盘钩子（`02 §5.6` ⑤：穿透模式鼠标 + 键盘
+            // 钩子一并卸载）。窗口只接受单一 observer，故两服务在此链式下发。
+            let keyhook_for_click_through = Arc::clone(&keyhook);
             win.window.set_click_through_observer(Arc::new(move |on: bool| {
                 svc_for_click_through.set_click_through(on);
+                keyhook_for_click_through.set_click_through(on);
             }));
             svc
         };

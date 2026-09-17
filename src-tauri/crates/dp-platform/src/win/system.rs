@@ -327,6 +327,82 @@ mod imp {
 // 单元测试（负载差分纯函数；Win32 直调不做真机断言，真机矩阵归 B7）
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 输入强度累加（S7-M1，T-20 / `02 §5.6` 增量：键击 / 点击 / 移动强度）
+// ---------------------------------------------------------------------------
+
+/// 输入累计量（**绝对单调计数**；由装配层从各计数源汇总后注入，C3：本模块零时钟）。
+///
+/// - `keys`：键盘「按下」类事件累计（来源：[`super::keyhook::KeyCounters`]）；
+/// - `clicks`：鼠标按键「按下」累计（来源：`WH_MOUSE_LL` 回调累加器，单次成本 0）；
+/// - `move_px`：光标累计位移（物理像素；由装配层按相邻采样点距离累加）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputTotals {
+    /// 按键按下累计次数。
+    pub keys: u64,
+    /// 鼠标按键按下累计次数。
+    pub clicks: u64,
+    /// 光标累计位移（物理像素）。
+    pub move_px: f64,
+}
+
+// 输入强度类型本体在 [`crate::traits::InputIntensity`]（端口层共享定义，避免双真源）；
+// 语义边界：本类型**只承载速率**——忙碌档位（deep/busy/light/slack）判定归 S7-M4
+// （`dp-core::emotion::busyness`），阈值取自 `emotion.json.busyness`
+// （`kpsDeepThreshold` / `kpsBusyThreshold` / `clicksPerMinDeep` / `movePxPerMinDeep`）。
+pub use crate::traits::InputIntensity;
+
+/// 输入强度采样器：把「累计量差分」折算为速率（纯计算，零时钟、无 OS 调用）。
+///
+/// 口径：首次 [`InputIntensitySampler::sample`] 只建基线并返回 `None`；`dt ≤ 0`
+/// （时间未前进 / 墙钟回拨）同样返回 `None` 并重置基线；计数回退（计数器重建 /
+/// 溢出回绕）按**增量钳 0** 处理，永不产生负速率。
+#[derive(Debug, Default)]
+pub struct InputIntensitySampler {
+    prev_ms: Option<i64>,
+    prev_keys: u64,
+    prev_clicks: u64,
+    prev_move_px: f64,
+}
+
+impl InputIntensitySampler {
+    /// 构造空采样器（无基线；首次 `sample` 仅建基线）。
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 是否已建立基线。
+    #[must_use]
+    pub const fn has_baseline(&self) -> bool {
+        self.prev_ms.is_some()
+    }
+
+    /// 采样：`now_ms` 为注入的单调毫秒，`totals` 为各源的**绝对累计值**。
+    ///
+    /// 返回 `None` = 无可信区间（无基线 / `dt ≤ 0`）；此时仍会以本次入参重置基线。
+    pub fn sample(&mut self, now_ms: i64, totals: InputTotals) -> Option<InputIntensity> {
+        let prev_ms = self.prev_ms.replace(now_ms);
+        let d_keys = totals.keys.saturating_sub(std::mem::replace(&mut self.prev_keys, totals.keys));
+        let d_clicks =
+            totals.clicks.saturating_sub(std::mem::replace(&mut self.prev_clicks, totals.clicks));
+        let d_move = (totals.move_px - std::mem::replace(&mut self.prev_move_px, totals.move_px))
+            .max(0.0);
+
+        let prev_ms = prev_ms?;
+        let dt_ms = now_ms.checked_sub(prev_ms)?;
+        if dt_ms <= 0 {
+            return None;
+        }
+        let dt_min = dt_ms as f32 / 60_000.0;
+        Some(InputIntensity {
+            key_kps: d_keys as f32 / (dt_ms as f32 / 1_000.0),
+            clicks_per_min: d_clicks as f32 / dt_min,
+            move_px_per_min: d_move as f32 / dt_min,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +476,63 @@ mod tests {
     fn process_load_zero_wall_is_none() {
         assert!(process_load_from_deltas(1_000_000, std::time::Duration::ZERO, 1).is_none());
         assert!(process_load_from_deltas(0, std::time::Duration::from_millis(100), 1).is_none());
+    }
+
+    // -- S7-M1：输入强度采样（`02 §5.6`） --------------------------------------
+
+    fn totals(keys: u64, clicks: u64, move_px: f64) -> InputTotals {
+        InputTotals { keys, clicks, move_px }
+    }
+
+    #[test]
+    fn intensity_first_sample_only_builds_baseline() {
+        let mut s = InputIntensitySampler::new();
+        assert!(!s.has_baseline());
+        assert_eq!(s.sample(1_000, totals(5, 3, 100.0)), None, "首次只建基线");
+        assert!(s.has_baseline());
+    }
+
+    #[test]
+    fn intensity_rates_match_window_deltas() {
+        let mut s = InputIntensitySampler::new();
+        assert!(s.sample(0, totals(0, 0, 0.0)).is_none());
+        // 60s 窗口：300 键 / 60 次点击 / 6000px。
+        let got = s.sample(60_000, totals(300, 60, 6000.0)).expect("第二拍应有速率");
+        assert!((got.key_kps - 5.0).abs() < 1e-4, "300/60s = 5 键/秒：{got:?}");
+        assert!((got.clicks_per_min - 60.0).abs() < 1e-4, "{got:?}");
+        assert!((got.move_px_per_min - 6000.0).abs() < 1e-4, "{got:?}");
+    }
+
+    #[test]
+    fn intensity_is_window_local_not_cumulative() {
+        let mut s = InputIntensitySampler::new();
+        assert!(s.sample(0, totals(0, 0, 0.0)).is_none());
+        // 首窗：0 → 60 键 / 60 次点击 / 600px，跨 60s。
+        let first = s.sample(60_000, totals(60, 60, 600.0)).expect("首窗");
+        assert!((first.key_kps - 1.0).abs() < 1e-4, "{first:?}");
+        // 次窗累计量未增长（用户静止）→ 速率归零，而非沿用上一窗数值。
+        let second = s.sample(120_000, totals(60, 60, 600.0)).expect("次窗");
+        assert_eq!(second, InputIntensity::ZERO, "速率只反映本窗增量");
+    }
+
+    #[test]
+    fn intensity_zero_or_backward_dt_is_none_and_rebases() {
+        let mut s = InputIntensitySampler::new();
+        assert!(s.sample(10_000, totals(0, 0, 0.0)).is_none());
+        assert!(s.sample(10_000, totals(1, 1, 1.0)).is_none(), "dt=0 不可信");
+        assert!(s.sample(5_000, totals(2, 2, 2.0)).is_none(), "回拨不可信");
+        // 基线已被重置为最新一拍，恢复正常推进后即可产出速率。
+        let got = s.sample(15_000, totals(12, 12, 120.0)).expect("恢复后可采样");
+        assert!((got.key_kps - 1.0).abs() < 1e-4, "10s 内 10 键：{got:?}");
+    }
+
+    #[test]
+    fn intensity_never_goes_negative_on_counter_reset() {
+        let mut s = InputIntensitySampler::new();
+        assert!(s.sample(0, totals(100, 100, 1_000.0)).is_none());
+        // 计数器重建（回退）→ 增量钳 0，不得出现负速率。
+        let got = s.sample(60_000, totals(0, 0, 0.0)).expect("窗口仍有效");
+        assert_eq!(got, InputIntensity::ZERO);
     }
 
     #[test]

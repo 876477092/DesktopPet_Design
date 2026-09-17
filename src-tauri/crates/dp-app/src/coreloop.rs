@@ -44,7 +44,7 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -61,7 +61,7 @@ use dp_core::emotion::lines::{
     BubblePlanner, LinesLibrary, PlaceholderVars, PlannedBubble, render_placeholders,
 };
 use dp_core::emotion::{EmotionEngine, EmotionEvent, OfflineOutcome};
-use dp_core::event::{project_snapshot, wire_for_bubble, wire_for_events};
+use dp_core::event::{project_snapshot, wire_for_bubble, wire_for_events, wire_for_needs};
 #[cfg(test)]
 use dp_core::event::PetSnapshotV2;
 use dp_core::interaction::{InteractionKind, THROW_LANDING_CHAIN, act_of};
@@ -69,8 +69,10 @@ use dp_core::motion::physics::{MAX_TICK_DT_MS, SUB_STEP_MS};
 use dp_core::motion::{
     MotionEngine, MotionEvent, PhysicsEngine, PlatformGraph, PlatformInputs, StandSurface, Vec2,
 };
+use dp_core::needs::DispatchKind;
 use dp_core::perception::{
-    PerceptionBus, PerceptionEvent, SystemSample, SystemWallClock, WallClock,
+    ActivitySample, PerceptionBus, PerceptionEvent, ReminderChannel, ReminderConfig,
+    ReminderScheduler, SystemSample, SystemWallClock, WallClock,
 };
 use dp_core::save::{LoadOutcome, SaveStore};
 
@@ -97,6 +99,16 @@ const FX_HEART_BURST_COUNT: u32 = 12;
 
 /// 甩出落地尘土迸发数量（S3-M6 表现档；落地由 `landed_thrown` 触发，挂落地链起点）。
 const FX_DUST_BURST_COUNT: u32 = 16;
+
+/// 提醒演出动作 ID（`01 §6.3.2` P 类动作表：`ACT-P-03` 伸手指提醒）。
+///
+/// 单一真源说明：动作元数据（优先级 / 打断规则 / 演出标记）仍以 `actions.json` 为准，
+/// 本常量只是「提醒 → 动作」映射的键；目录缺该动作或 `disabled`（批次 C 资源未交付）
+/// 时 [`ActionRequest::from_cfg`] 返回 `None`，触发面安全降级为仅日志。
+const REMINDER_ACTION_ID: &str = "ACT-P-03";
+
+/// 活动感知采样间隔（毫秒；`02 §5.6`：键击/点击/移动强度 1Hz 级汇总）。
+const ACTIVITY_INTERVAL_MS: u64 = 1_000;
 
 /// 三部曲成功后取词的台词池（S4-M5：`runaway` 池含 AC-04「哼…原谅你啦，下不为例！」）。
 const RUNAWAY_POOL: &str = "runaway";
@@ -311,6 +323,34 @@ pub struct CoreCfg {
     pub save: Option<SaveStore>,
 }
 
+/// 共享站立面适配器（S7-M3 前置首件 / B12-① / P2-16）。
+///
+/// 作用：让 `MotionEngine` 的**决策层**与 core-loop 的**物理层**（
+/// `PhysicsEngine::tick` 的落地判定）读同一份 [`PlatformGraph`]——
+/// `PlatformGraph` 的节点集含每屏桌底（`DesktopBottom`，与 `DesktopFloor` 同语义）
+/// 并叠加任务栏 / 窗口标题栏，因此是决策面 `DesktopFloor` 的**超集**：
+/// 注入后「走上标题栏站立」在决策层生效，而 R2 降级（无标题栏）自动退化为桌底行走。
+///
+/// 位置：适配类型落在 `dp-app` 自有类型（E0117 规避既有口径：`PlatformGraph`
+/// 与 trait 均在 `dp-core`，本 crate 不能为其追加 trait 实现）。
+/// 恒等语义：`PlatformGraph` 的 `should_rebuild` / `rebuild` 仍由 core-loop 独家驱动，
+/// 本适配器只读。
+#[derive(Debug)]
+struct SharedSurface(Arc<RwLock<PlatformGraph>>);
+
+impl StandSurface for SharedSurface {
+    fn is_valid_stand(&self, p: Vec2) -> bool {
+        // 锁中毒（他线程 panic）→ 取回内层值继续（不 panic、不阻断运动）。
+        let graph = self.0.read().unwrap_or_else(|e| e.into_inner());
+        graph.is_valid_stand(p)
+    }
+
+    fn clamp_to_stand(&self, p: Vec2) -> Vec2 {
+        let graph = self.0.read().unwrap_or_else(|e| e.into_inner());
+        graph.clamp_to_stand(p)
+    }
+}
+
 /// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
 pub struct CoreLoopState {
     /// 权威位置（VDC；= 活跃引擎 `pos()` 的镜像）。
@@ -322,7 +362,11 @@ pub struct CoreLoopState {
     /// 物理引擎（Fall 相活跃；Roam 相停放为 `None`）。
     physics: Option<PhysicsEngine>,
     /// 平台图（`StandSurface` 提供者 + 窗口标题栏站立面）。
-    platform_graph: PlatformGraph,
+    ///
+    /// S7-M3 前置首件：改为 `Arc<RwLock<..>>` 共享——决策层经 [`SharedSurface`]
+    /// 注入 `MotionEngine`，物理层直接读同一份图，两侧永不脱节。
+    /// 重建仍按「整体替换 + 每 2s `rebuild`」既有口径（`§6-5`：无 `set_monitors`）。
+    platform_graph: Arc<RwLock<PlatformGraph>>,
     /// 动作仲裁器（S3-M0 仅落地缓冲 submit）。
     arbiter: ActionArbiter,
     /// 动作目录（`ACT-M-06` 元数据来源）。
@@ -341,6 +385,15 @@ pub struct CoreLoopState {
     interaction_cfg: InteractionCfg,
     /// 最近一次光标位置（VDC；重建 `MotionEngine` 后需重新注入）。
     cursor: Option<Vec2>,
+    /// S7-M1：最近一次活动感知采样（键击 / 点击 / 移动强度 + 前台进程类别哈希；
+    /// 隐私关闭时装配层**不产**该事件，此处保持默认「全 None」= 无信息）。
+    ///
+    /// 消费点：S7-M4 的 `busyness` 因子（本卡只交付采样与存储）。
+    activity: ActivitySample,
+    /// S7-M2：提醒调度器（久坐 / 喝水；`03 §3.3 B21 ②` 的消费方）。
+    reminders: ReminderScheduler,
+    /// `schedule.json.reminders.ackResetsTimer`（出厂默认；用户改动落在存档 B 段）。
+    reminder_ack_resets: bool,
     /// Drag 相光标（VDC；`begin_drag` 设置、run_loop 经 `drag_to` 逐 tick 跟新、
     /// `release_drag` 清空；钳制统一在 logic_tick Drag 臂完成）。
     drag_cursor: Option<Vec2>,
@@ -454,8 +507,18 @@ impl CoreLoopState {
             audio,
             save,
         } = cfg;
-        let motion = MotionEngine::new(pos, monitors.clone(), roam_cfg.clone(), seed_k, now_ms);
-        let platform_graph = PlatformGraph::new(monitors.clone(), now_ms);
+        let platform_graph = Arc::new(RwLock::new(PlatformGraph::new(monitors.clone(), now_ms)));
+        // S7-M3 前置首件（B12-① / P2-16）：把平台图注入决策层站立面——决策层据此
+        // 感知标题栏平台（「走上标题栏站立」在决策层生效）；无标题栏时图内仅桌底节点，
+        // 等价既有 `DesktopFloor` 行为（R2 降级口径不变）。
+        let motion = MotionEngine::new_with_surface(
+            pos,
+            monitors.clone(),
+            roam_cfg.clone(),
+            seed_k,
+            now_ms,
+            Box::new(SharedSurface(Arc::clone(&platform_graph))),
+        );
         let clamped = motion.pos();
         // 固化堆地址为 `'static`（装配期一次；见本方法文档的泄漏口径说明）。
         let cfg_ref: &'static EmotionConfig = Box::leak(Box::new(emotion));
@@ -520,6 +583,12 @@ impl CoreLoopState {
             dnd_pause_bubbles: true,
             activity_sensing: true,
             auto_roam: true,
+            activity: ActivitySample::default(),
+            reminders: ReminderScheduler::new(
+                ReminderConfig::new(true, 45, true, 45, 15, 180, true),
+                now_ms as i64,
+            ),
+            reminder_ack_resets: true,
         }
     }
 
@@ -564,7 +633,21 @@ impl CoreLoopState {
         };
         let patch = pending.patch.clone();
         // 内核侧：用「应用层已合并后的快照」整体覆盖（避免逐字段重复实现合并语义）。
+        let sensing_before = self.activity_sensing;
         self.apply_settings_snapshot(&state.snapshot());
+        // S7-M1：隐私一键关闭 → 卸载键盘钩子（`02 §5.6` ④「关闭后退化为纯时间模型」）。
+        // 按差异下发：`KeyHookService` 内部虽幂等，但差异判定可省一次锁与后端查询。
+        if self.activity_sensing != sensing_before {
+            if let Some(pet) = handle.try_state::<PetPlatform>() {
+                pet.keyhook.set_activity_sensing(self.activity_sensing);
+            }
+            eprintln!(
+                "[dp-app] core-loop 活动感知开关变更：activitySensing={}（键盘钩子随之装/卸）",
+                self.activity_sensing
+            );
+        }
+        // S7-M2：提醒偏好 → 调度器（幂等：配置未变则不重排 deadline）。
+        self.sync_reminders(&state.snapshot(), now_mono_ms as i64);
         // 托盘文案里的角色名同步（C2：名字经 `{name}` 模板渲染，不硬编码）。
         crate::tray_menu::set_pet_name(handle, &state.snapshot().name);
         // 存档 B 段（pet / settings）。
@@ -1131,8 +1214,25 @@ impl CoreLoopState {
                     self.presence_idle_ms = sample.presence_idle_ms;
                 }
                 PerceptionEvent::Fullscreen { .. } => {}
+                // S7-M1：活动感知采样（键击 / 点击 / 移动强度 + 前台进程类别哈希）。
+                // 隐私：载荷只含计数类量与哈希；感知关闭时装配层不产本事件。
+                PerceptionEvent::Activity(sample) => {
+                    self.activity = sample;
+                }
             }
         }
+    }
+
+    /// 最近一次活动感知采样（S7-M1；供 S7-M4 的 `busyness` 因子消费）。
+    #[must_use]
+    pub const fn activity(&self) -> ActivitySample {
+        self.activity
+    }
+
+    /// 摄入活动感知采样（供测试 / 未来第二数据源直注；生产路径经
+    /// [`Self::apply_perception`] 的 `Activity` 臂）。
+    pub fn set_activity(&mut self, sample: ActivitySample) {
+        self.activity = sample;
     }
 
     /// 应用显示器拓扑快照（设计补充 §3.2-②；变更时 `on_monitors_changed` + `PlatformGraph` 整体重建）。
@@ -1143,7 +1243,9 @@ impl CoreLoopState {
         self.monitors = monitors;
         self.motion.on_monitors_changed(self.monitors.clone(), now_ms);
         // PlatformGraph 无 set_monitors（§6-5）：整体重建。
-        self.platform_graph = PlatformGraph::new(self.monitors.clone(), now_ms);
+        // S7-M3 前置首件：`Arc` 句柄被决策层站立面共享，故**原地替换内容**而非换句柄。
+        *self.platform_graph.write().unwrap_or_else(|e| e.into_inner()) =
+            PlatformGraph::new(self.monitors.clone(), now_ms);
         let bounds = ports::bounds_of(&self.monitors, self.active_pos());
         if let Some(phys) = self.physics.as_mut() {
             phys.set_bounds(bounds);
@@ -1159,12 +1261,20 @@ impl CoreLoopState {
         self.last_logic_ms = now_ms;
 
         // ① PlatformGraph 2s 重建（deadline 链绝对锚定由引擎内部维护）。
-        if self.platform_graph.should_rebuild(now_ms) {
-            self.platform_graph.rebuild(now_ms, self.pending_inputs.clone());
+        {
+            let mut graph = self.platform_graph.write().unwrap_or_else(|e| e.into_inner());
+            if graph.should_rebuild(now_ms) {
+                let inputs = self.pending_inputs.clone();
+                graph.rebuild(now_ms, inputs);
+            }
         }
 
         // ② 站立面消失检查（仅 Roam 相；AC-08）：命中即换相重建 PhysicsEngine。
-        if self.phase == Phase::Roam && !self.platform_graph.is_valid_stand(self.pos) {
+        let on_surface = {
+            let graph = self.platform_graph.read().unwrap_or_else(|e| e.into_inner());
+            graph.is_valid_stand(self.pos)
+        };
+        if self.phase == Phase::Roam && !on_surface {
             let bounds = ports::bounds_of(&self.monitors, self.pos);
             self.physics =
                 Some(PhysicsEngine::new(self.pos, self.interaction_cfg.clone(), bounds));
@@ -1180,8 +1290,11 @@ impl CoreLoopState {
                 evs
             }
             Phase::Fall => {
+                // 共享站立面：物理落地判定读同一份 `PlatformGraph`（只读锁，
+                // 作用域内不与其他字段的可变借用相交）。
+                let graph = self.platform_graph.read().unwrap_or_else(|e| e.into_inner());
                 let evs = match self.physics.as_mut() {
-                    Some(phys) => phys.tick(now_ms, &self.platform_graph),
+                    Some(phys) => phys.tick(now_ms, &*graph),
                     None => Vec::new(),
                 };
                 self.pos = self.physics.as_ref().map_or(self.pos, |p| p.pos());
@@ -1335,9 +1448,113 @@ impl CoreLoopState {
         }
         self.dispatch_emotion_events(&outcome.events, wall_now_ms, app);
 
+        // ④' S7-M2：需求跨档 → `pet://needs`（`02 §7.6` 频率列 = 属性跨档时）。
+        self.emit_needs_event(app);
+
+        // ④'' S7-M2：提醒到点（`03 §3.3 B21 ②`：久坐 / 喝水 → `ACT-P-03` 触发面）。
+        self.reminder_tick(wall_now_ms, self.last_logic_ms);
+
+        // ④''' S7-M3：耦合矩阵速度输出 → 行走速度（C-12 精力 ×0.8 / C-11 档位饥饿 ×0.85）。
+        self.apply_speed_mul();
+
         // ⑤ 1Hz 全量快照（`pet://state`）：无论有无算法事件都发，供属性面板 /
         //    原因卡实时刷新（`02 §7.6` 频率列 = 1Hz）。
         self.emit_state_snapshot(app);
+    }
+
+    /// S7-M2：需求跨档 → `pet://needs`（唯一生产点 `dp_core::event::wire_for_needs`，C8）。
+    ///
+    /// 未跨档 / 尚未推进过 / 纯逻辑模式（`app = None`）→ 不产事件。
+    fn emit_needs_event(&self, app: Option<&AppHandle>) {
+        let Some(handle) = app else { return };
+        let Some(outcome) = self.emotion.last_needs() else { return };
+        if !outcome.band_changed {
+            return;
+        }
+        let wire = wire_for_needs(&outcome);
+        if let Err(err) = handle.emit(wire.event, &wire.payload) {
+            eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+        }
+    }
+
+    /// S7-M2：提醒偏好（存档 B 段 ⊕ `schedule.json` 默认）→ 调度器。
+    ///
+    /// **幂等**：配置与当前一致 → 不重排（否则 1Hz 业务档会每秒重置 deadline）。
+    pub fn sync_reminders(&mut self, snapshot: &bridge::SettingsSnapshot, now_ms: i64) {
+        let r = &snapshot.reminders;
+        let cfg = ReminderConfig::new(
+            r.sedentary_enabled,
+            r.sedentary_interval_min,
+            r.water_enabled,
+            r.water_interval_min,
+            r.interval_min_min,
+            r.interval_max_min,
+            self.reminder_ack_resets,
+        );
+        if *self.reminders.config() == cfg {
+            return;
+        }
+        self.reminders.set_config(cfg, now_ms);
+    }
+
+    /// S7-M2：提醒到点处置（`03 §3.3 B21 ②`）。
+    ///
+    /// 现状口径（重要）：`ACT-P-03` 属**资源批次 C**（`actions.json` `disabled=true`），
+    /// [`ActionRequest::from_cfg`] 对其返回 `None` → 本函数只记录「触发面已到点」，
+    /// 不提交动作。资源交付后本条链路**零改动**即可实播。
+    /// 提醒气泡文案（`lines.json` 无提醒池）归 S7-M8 台词库重写。
+    fn reminder_tick(&mut self, wall_now_ms: i64, mono_ms: u64) {
+        // FR-10-4：勿扰静默（调度器自身也判，双保险）。
+        self.reminders.set_do_not_disturb(self.dnd);
+        let Some(ev) = self.reminders.tick(wall_now_ms) else { return };
+        let channel = match ev.channel {
+            ReminderChannel::Sedentary => "sedentary",
+            ReminderChannel::Water => "water",
+        };
+        eprintln!("[dp-app] core-loop 提醒到点：{channel}（t={wall_now_ms}ms）");
+        let Some(cfg) = self.catalog.find(REMINDER_ACTION_ID) else {
+            eprintln!("[dp-app] 提醒动作 {REMINDER_ACTION_ID} 不在动作目录（降级仅记录）");
+            return;
+        };
+        let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
+            eprintln!(
+                "[dp-app] 提醒动作 {REMINDER_ACTION_ID} 未启用（批次 C 资源未交付）→ 触发面就绪，待资源"
+            );
+            return;
+        };
+        let verdict = self.arbiter.submit(request, mono_ms);
+        self.settle_play(verdict, REMINDER_ACTION_ID);
+    }
+
+    /// S7-M3：耦合矩阵速度输出 → 行走速度。
+    ///
+    /// 两个来源相乘（口径见 `needs::bands` 与 `needs::coupling` 文档）：
+    ///   - 耦合矩阵 `speed`（C-12：`energy < 20` → ×0.8）；
+    ///   - 需求分档 `speedMul`（C-11 档位口径：`satiety < 20` → ×0.85）。
+    fn apply_speed_mul(&mut self) {
+        let coupling = self.emotion.speed_mul();
+        let needs = self
+            .emotion
+            .needs()
+            .effects(self.emotion.needs_cfg(), &self.emotion.state.values)
+            .speed_mul;
+        self.motion.set_speed_mul(coupling * needs);
+    }
+
+    /// 派遣门禁（S7-M3 / AC-30 / AC-31）：**矩阵级 ∪ 分档级**并集判定（`true` = 允许）。
+    ///
+    /// 消费点说明：派遣动作本身归 S8-M1（活动状态机），本方法交付**判定口径**供其调用；
+    /// 矩阵与分档两处配置语义一致，取并集即「任一拒绝即拒绝」。
+    #[must_use]
+    pub fn dispatch_verdict(&self, kind: DispatchKind) -> bool {
+        if !self.emotion.dispatch_verdict(kind) {
+            return false;
+        }
+        !self
+            .emotion
+            .needs()
+            .effects(self.emotion.needs_cfg(), &self.emotion.state.values)
+            .denies_dispatch(kind)
     }
 
     /// 情绪算法事件落地（S4-M2 要点 1/3）。
@@ -1612,7 +1829,11 @@ impl CoreLoopState {
                 if self.phase != Phase::Drag {
                     return None;
                 }
-                if self.platform_graph.is_valid_stand(cursor) {
+                let landable = {
+                    let graph = self.platform_graph.read().unwrap_or_else(|e| e.into_inner());
+                    graph.is_valid_stand(cursor)
+                };
+                if landable {
                     self.pos = cursor;
                     self.reenter_roam(now_ms);
                     self.thrown_flight = false;
@@ -1636,12 +1857,14 @@ impl CoreLoopState {
     /// `thrown_flight`（结算方读后自行清零，避免隐藏状态转移）。
     fn reenter_roam(&mut self, now_ms: u64) {
         self.seed_k = advance_seed(self.seed_k, now_ms);
-        self.motion = MotionEngine::new(
+        // S7-M3 前置首件：重建时同样注入共享平台图（决策层口径与首次装配一致）。
+        self.motion = MotionEngine::new_with_surface(
             self.pos,
             self.monitors.clone(),
             self.roam_cfg.clone(),
             self.seed_k,
             now_ms,
+            Box::new(SharedSurface(Arc::clone(&self.platform_graph))),
         );
         self.motion.set_cursor(self.cursor);
         self.pos = self.motion.pos();
@@ -1964,7 +2187,7 @@ pub fn spawn(
         eprintln!("[dp-app] core-loop 播放指令通道已接入（出队起播/停播/链推进）");
     }
     // 感知采样线程（单线程三档分档；`offer` 单一生产者语义，不得多线程 offer）。
-    let _perception = spawn_perception(app.clone(), Arc::clone(&bus));
+    let _perception = spawn_perception(app.clone(), Arc::clone(&bus), sink.clone());
 
     // S3-M3：手势消费端（队列 drain → 手势机 → 意图日志+计数；仅本线程驱动）。
     let consumer = InteractionConsumer::new(sink, state.gesture_cfg());
@@ -2375,9 +2598,13 @@ fn run_loop(
 }
 
 /// 启动感知采样线程（同线程内三档 deadline 分档，各档 `bus.offer(...)`）。
-fn spawn_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) -> JoinHandle<()> {
+fn spawn_perception(
+    app: AppHandle,
+    bus: Arc<PerceptionBus<PerceptionEvent>>,
+    sink: Arc<ChannelSink>,
+) -> JoinHandle<()> {
     let builder = std::thread::Builder::new().name("dp-perception".to_string());
-    match builder.spawn(move || run_perception(app, bus)) {
+    match builder.spawn(move || run_perception(app, bus, sink)) {
         Ok(handle) => handle,
         Err(err) => {
             eprintln!("[dp-app] 感知线程启动失败，降级为空采样：{err}");
@@ -2387,15 +2614,22 @@ fn spawn_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) ->
 }
 
 /// 感知循环体：单线程三档 deadline 分档（**不得多线程 offer**，保 `PerceptionBus` 单生产者语义）。
-fn run_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) {
+fn run_perception(
+    app: AppHandle,
+    bus: Arc<PerceptionBus<PerceptionEvent>>,
+    sink: Arc<ChannelSink>,
+) {
     let start = Instant::now();
     let mut next_cursor = 0u64;
     let mut next_windows = 0u64;
     let mut next_system = 0u64;
+    // S7-M1：活动感知 1Hz 档（键击 / 点击 / 移动强度 + 前台进程类别哈希 + 前台全屏）。
+    let mut next_activity = 0u64;
     let mut cpu = CpuLoadSampler::new();
+    let mut activity = dp_platform::InputIntensitySampler::new();
 
     loop {
-        let target = next_cursor.min(next_windows).min(next_system);
+        let target = next_cursor.min(next_windows).min(next_system).min(next_activity);
         sleep_until(start, target);
 
         let Some(pet) = app.try_state::<PetPlatform>() else {
@@ -2425,6 +2659,35 @@ fn run_perception(app: AppHandle, bus: Arc<PerceptionBus<PerceptionEvent>>) {
                 presence_idle_ms: last_input_idle_ms(),
             };
             bus.offer(PerceptionEvent::System(sample));
+        }
+        if now >= next_activity {
+            next_activity = advance_deadline(next_activity, now, ACTIVITY_INTERVAL_MS);
+            // S7-M1 隐私红线 ④：感知关闭 → **根本不采样**（连前台进程查询都不做），
+            // 退化为纯时间模型；此时 core-loop 侧的 `preset_idle_ms` 亦恒取 0（恒在场）。
+            let Some(pet) = app.try_state::<PetPlatform>() else {
+                continue;
+            };
+            if !pet.keyhook.is_activity_sensing() {
+                continue;
+            }
+            let totals = dp_platform::InputTotals {
+                keys: pet.keyhook.counters().total(),
+                clicks: sink.clicks(),
+                move_px: sink.move_px() as f64,
+            };
+            if let Some(intensity) = activity.sample(now as i64, totals) {
+                let sample = ActivitySample {
+                    key_kps: Some(intensity.key_kps),
+                    clicks_per_min: Some(intensity.clicks_per_min),
+                    move_px_per_min: Some(intensity.move_px_per_min),
+                    // 隐私：平台层只交出 FNV-1a64 类别哈希，明文进程名不出函数。
+                    foreground_hash: dp_platform::foreground_process_hash(),
+                    // 全屏：全屏隐藏态 → 确定 `true`；否则「未知」（不复用 0.5Hz 窗控结果，
+                    // 避免在本档引入第二次全屏查询）。
+                    fullscreen: pet.window.is_hidden_for_fullscreen().then_some(true),
+                };
+                bus.offer(PerceptionEvent::Activity(sample));
+            }
         }
     }
 }

@@ -244,14 +244,18 @@ fn qa_bus_overflow_boundary_exact_cap_and_cap_plus_one() {
 
 #[test]
 fn qa_segment_of_hour_required_boundaries() {
-    // （hour, 期望段）——含任务指定的 5/11/17/23/4/22 六点。
+    // （hour, 期望段）——**S7-M1 起为 6 段**（早晨/上午/午间/下午/傍晚/深夜，与
+    // `emotion.json.rhythm.segments[].id` 同口径）；原 4 段的 `Daytime`/`Evening`
+    // 分别细分：11 → 午间、17 → 傍晚、22 → 傍晚（傍晚仍为 [17,23) 左闭右开）。
     let cases = [
         (5u8, TimeSegment::Morning),
-        (11, TimeSegment::Daytime),
-        (17, TimeSegment::Evening),
+        (9, TimeSegment::Forenoon),
+        (11, TimeSegment::Noon),
+        (13, TimeSegment::Afternoon),
+        (17, TimeSegment::Dusk),
         (23, TimeSegment::Night), // 23 必须归 Night（傍晚为 [17,23) 左闭右开）
         (4, TimeSegment::Night),
-        (22, TimeSegment::Evening),
+        (22, TimeSegment::Dusk),
     ];
     for (hour, expect) in cases {
         assert_eq!(segment_of_hour(hour), expect, "hour={hour} 归段错误");

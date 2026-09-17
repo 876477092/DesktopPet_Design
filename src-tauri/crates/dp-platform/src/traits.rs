@@ -308,3 +308,59 @@ pub trait HitSource: Send {
     /// 判定本地坐标 `local` 在剪辑 `clip`、相位 `phase` 下是否命中。
     fn test(&self, local: Vec2, clip: &str, phase: f32) -> HitResult;
 }
+
+// ---------------------------------------------------------------------------
+// S7-M1：活动感知端口（FR-6-3 增量 / `02 §5.6`）
+// ---------------------------------------------------------------------------
+
+/// 活动感知端口（S7-M1，T-20）。
+///
+/// 抽象粒度 = 「一次**采样**」与「一次**隐私开关切换**」；实装在 `dp-app`
+/// （由于它需要同时持有鼠标钩子 sink 与键盘钩子服务，见「端口范式」：trait 在
+/// `dp-platform`、实装在 `dp-app`）。
+///
+/// ## 隐私契约（`01 §6.8` FR-8-5 / `02 §5.6`，实现方**必须**满足）
+///
+///   1. [`Self::foreground_hash`] **只返回哈希**——进程名明文不得跨出实现所在模块，
+///      不得进日志、不得进存档；
+///   2. [`Self::set_activity_sensing`] 置 `false` 时，实现方必须**卸载键盘钩子**并
+///      停止全部活动采样；此后 [`Self::foreground_hash`] / [`Self::intensity`] 返回
+///      `None`（调用方据此退化为**纯时间模型**：`presence` 恒在场、`P_Cap` 取 `capFree`）；
+///   3. 本端口**不含任何**「内容型」取值口（无按键值、无窗口标题、无文本）——这是
+///      接口层面的隐私保证，而非仅靠实现纪律。
+pub trait ActivitySensing: Send + Sync {
+    /// 前台窗口所属进程的**类别哈希**（FNV-1a 64；`None` = 不可用 / 感知已关闭）。
+    fn foreground_hash(&self) -> Option<u64>;
+
+    /// 键鼠空闲时长（毫秒；`GetLastInputInfo` 口径；`None` = 不可用）。
+    fn idle_ms(&self) -> Option<u64>;
+
+    /// 自上次调用以来的输入强度（速率口径；`None` = 窗口不可信 / 感知已关闭）。
+    ///
+    /// `now_ms` 由调用方注入（C3：平台层同样不裸读墙钟，节拍由上层装配给定）。
+    fn intensity(&mut self, now_ms: i64) -> Option<InputIntensity>;
+
+    /// 活动感知是否开启（`false` = 隐私关闭：调用方应视为「无感知信息」）。
+    fn is_activity_sensing(&self) -> bool;
+
+    /// 置活动感知开关（隐私一键关闭）。实现方负责卸载 / 重装键盘钩子。
+    fn set_activity_sensing(&self, on: bool);
+}
+
+/// 输入强度（速率口径；`dp-platform` 侧定义，`dp-core::perception::ActivitySample`
+/// 为其线上对等类型，装配层按字段直转）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct InputIntensity {
+    /// 键击强度（键/秒）。
+    pub key_kps: f32,
+    /// 点击强度（次/分钟）。
+    pub clicks_per_min: f32,
+    /// 鼠标移动强度（物理像素/分钟）。
+    pub move_px_per_min: f32,
+}
+
+impl InputIntensity {
+    /// 全零强度（所有源不可用时的显式取值）。
+    pub const ZERO: InputIntensity =
+        InputIntensity { key_kps: 0.0, clicks_per_min: 0.0, move_px_per_min: 0.0 };
+}

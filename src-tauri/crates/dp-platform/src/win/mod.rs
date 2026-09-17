@@ -15,6 +15,9 @@ pub mod autostart;
 pub mod dialog;
 // S3-M1（T-08 段 · 上 / `02 §5 K-2`）：全局低阶鼠标钩子（`WH_MOUSE_LL`）· 穿透兜底与幂等装卸。
 pub mod hook;
+// S7-M1（T-20 / `02 §5.6`）：全局低阶键盘钩子（`WH_KEYBOARD_LL`）· **只计数** + 隐私/穿透双 gate
+// 幂等装卸（零新增依赖 / 零新增 feature）。
+pub mod keyhook;
 // S4-M1（T-11 段 · 上 / FR-1-10 / F10）：会话状态检测（锁屏 / 远程桌面）→ 情绪 P 暂停。
 // C9：新增 `Win32_System_RemoteDesktop` feature（已登记 `Cargo.toml` 根清单），零网络。
 pub mod session;
@@ -23,6 +26,9 @@ pub mod tray;
 // S6-M2（T-16 段 · 下 / 渲染自愈）：托盘气泡通知——`Shell_NotifyIconW` NIF_INFO 临时
 // 图标气泡（自愈失败提示）。复用已启用的 `Win32_UI_Shell`，零新增 feature、零新增依赖。
 pub mod tray_balloon;
+// S7-M1（T-20 / FR-6-3 增量 / `02 §5.6`）：前台进程类别感知——文件名→小写→FNV-1a64，
+// 明文不出函数（隐私红线）。复用既有 feature，零新增依赖、零网络（C9）。
+pub mod proc;
 pub mod window;
 // S2-M7（T-07 / FR-6-3）：系统状态感知实装——电量 / CPU 负载差分 / 键鼠空闲采样。
 pub mod system;
@@ -38,10 +44,14 @@ pub use dialog::DialogOutcome;
 pub use session::{query_session_state, SessionState, SessionWatcher};
 // S3-M1：低阶鼠标钩子端口与幂等服务（回调类型与 `CursorEventsHook` 同构：平台定义、app 注入）。
 pub use hook::{HitTest, HookEvent, HookService, HookSink, MouseButton};
+// S7-M1：键盘只计数钩子（计数器 / 后端端口 / 双 gate 服务）。
+pub use keyhook::{KeyCounters, KeyHookBackend, KeyHookService};
 pub use tray::{
     action_for_menu_id, fmt_label, icon_for_state, menu_spec, TrayAction, TrayIconState,
     TrayMenuState, TrayMenuItem,
 };
+// S7-M1：前台进程类别哈希（唯一出参 = u64；进程名明文不出该函数）。
+pub use proc::{fnv1a64, foreground_process_hash};
 pub use window::{
     foreground_fullscreen_monitor, topmost_plan, FullscreenWatch, TopmostPlan, WatchAction,
     WinPlatformWindow, ZOrder, RESTORE_DELAY_MS,

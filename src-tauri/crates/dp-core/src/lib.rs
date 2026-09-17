@@ -54,6 +54,10 @@ pub mod event;
 // 手势状态机与轨迹识别（gesture）、意图路由与 ACT 码映射（router）。
 pub mod interaction;
 pub mod motion;
+// S7-M2（T-18 段 · 上 / `01 FR-12` / `02 §5 K-11`）：生存需求六维系统——`needs/`
+// （自然变化 + 事件扣减 + 分档 + 冷却记账）与 `needs/bands`（五档与表现聚合）。
+// 边界：六维数值真源仍是 `state::PetValues`（存档段 A）；本模块不另存副本。
+pub mod needs;
 // S2-M7（T-07）：感知服务内核侧类型与端口（骨架接线，实现随 S2-M7 填充）。
 pub mod perception;
 // S5-M1（T-14 段 · 上）：存档——v2 Schema（`SaveFileV2`，`02 §5 K-7` 全表）、

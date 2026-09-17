@@ -18,8 +18,9 @@
 pub mod model;
 
 pub use model::{
-    ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, DegradeCfg, DegradeCpuCfg,
-    DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig, ScheduleConfig, SettingsConfig,
+    ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, CouplingCfg, DegradeCfg,
+    DegradeCpuCfg, DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig, ScheduleConfig,
+    SettingsConfig,
 };
 
 use std::path::Path;
@@ -138,7 +139,7 @@ impl ConfigService {
         );
 
         validate_actions(&actions)?;
-        check_coupling_cycles(&needs)?;
+        check_coupling_cycles(&needs.coupling)?;
 
         Ok((
             ConfigBundle { settings, character, actions, emotion, needs, animation, schedule },
@@ -286,7 +287,11 @@ fn when_source_dim(when: &str) -> Option<String> {
 /// 图的节点 = 快照维度（satiety/cleanliness/energy/mood/affinity）与 target 原名；
 /// 边 = `when 源维度 → target`（规则施加修正），及 `target → target_influence 维度`
 /// （修正回写快照）。存在环即返回 `Err`。
-pub fn check_coupling_cycles(needs: &NeedsConfig) -> Result<(), ConfigError> {
+///
+/// 签名收敛（S7-M3）：入参由 `&NeedsConfig` 收敛为 `&CouplingCfg`——使
+/// `needs::coupling::CouplingSolver::build` 能**复用同一实现**做自守式环检查
+/// （单一真源，不做第二份拓扑算法）。
+pub fn check_coupling_cycles(coupling: &CouplingCfg) -> Result<(), ConfigError> {
     // 邻接表：节点名 → 后继集合。
     let mut edges: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
@@ -294,7 +299,7 @@ pub fn check_coupling_cycles(needs: &NeedsConfig) -> Result<(), ConfigError> {
         edges.entry(from.to_string()).or_default().insert(to.to_string());
     };
 
-    for rule in &needs.coupling.rules {
+    for rule in &coupling.rules {
         let Some(source) = when_source_dim(&rule.when) else {
             continue; // 无法解析的条件跳过（不误报）
         };
@@ -584,7 +589,7 @@ mod tests {
     #[test]
     fn default_coupling_rules_have_no_cycle() {
         let needs = NeedsConfig::default();
-        check_coupling_cycles(&needs).expect("默认 C-01~C-16 必须无环");
+        check_coupling_cycles(&needs.coupling).expect("默认 C-01~C-16 必须无环");
     }
 
     #[test]

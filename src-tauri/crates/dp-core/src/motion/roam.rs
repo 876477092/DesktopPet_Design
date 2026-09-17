@@ -147,7 +147,11 @@ impl MonitorGeom {
 ///
 /// S2-M4 兜底实现 = [`DesktopFloor`]（工作区底边行走）；S2-M6 的
 /// PlatformGraph（窗口标题栏平台）将实现同一端口——接口保持最小、不再扩充。
-pub trait StandSurface {
+///
+/// `Debug` 约束（S7-M3 前置首件新增）：[`crate::motion::MotionEngine`] 需以
+/// `Box<dyn StandSurface>` 持有注入站立面，而该引擎 `#[derive(Debug)]`；
+/// 加 `Debug` 超 trait 是让注入面可与引擎一同打印的最小代价（不扩方法面）。
+pub trait StandSurface: core::fmt::Debug {
     /// 点是否为合法站立点。
     fn is_valid_stand(&self, p: Vec2) -> bool;
 

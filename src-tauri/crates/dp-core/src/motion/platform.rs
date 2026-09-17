@@ -91,6 +91,10 @@ pub const REBUILD_INTERVAL_MS: u64 = 2000;
 
 /// 平台图（`02 §5` K-3）：站立平台节点集合 + 绝对锚定的重建节拍，
 /// 实现 [`StandSurface`] 端口（S2-M5 物理落地判定经同一端口，自动兼容）。
+///
+/// `Debug`（S7-M3 前置首件）：`StandSurface` 端口新增 `Debug` 超 trait，本类型
+/// 作为其注入实现需可打印。
+#[derive(Debug)]
 pub struct PlatformGraph {
     /// 平台节点（rebuild 后按 top 升序稳定排序，同 top 按 left）。
     platforms: Vec<Platform>,
