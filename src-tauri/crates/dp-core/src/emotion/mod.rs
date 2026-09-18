@@ -57,6 +57,7 @@ pub mod presence;
 pub mod rhythm;
 pub mod rough;
 pub mod solver;
+pub mod speech;
 pub mod sys_env;
 
 pub use adapt::{AdaptEvent, AdaptationState, DailySample};
@@ -85,6 +86,7 @@ pub use lines::{
     LinePick, LineSelector, LinesConfig, LinesError, LinesLibrary, POOL_KEYS, PlaceholderVars,
     PlannedBubble, SelectorCfg, clamp_dwell_ms, render_placeholders,
 };
+pub use speech::{InjectPosition, SpeechRewriter};
 pub use sys_env::{NoSysEnv, SysEnv};
 
 /// 阶段档位数（L0~L5，`02 §5.7 levels` 六档）。

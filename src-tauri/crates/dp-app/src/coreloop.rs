@@ -53,7 +53,8 @@ use dp_core::anim::{
 };
 use dp_core::config::{ConfigBundle, ConfigService};
 use dp_core::config::model::{
-    ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig, RoamCfg,
+    CatchphraseCfg, ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig,
+    RoamCfg,
 };
 use dp_core::emotion::coax::CoaxStep;
 use dp_core::emotion::solver::InteractionPolicy;
@@ -70,7 +71,7 @@ use dp_core::motion::physics::{MAX_TICK_DT_MS, SUB_STEP_MS};
 use dp_core::motion::{
     MotionEngine, MotionEvent, PhysicsEngine, PlatformGraph, PlatformInputs, StandSurface, Vec2,
 };
-use dp_core::needs::DispatchKind;
+use dp_core::needs::{DispatchKind, NeedsActionTrigger};
 use dp_platform::win::tray::TrayIconState;
 use dp_core::perception::{
     ActivitySample, PerceptionBus, PerceptionEvent, ReminderChannel, ReminderConfig,
@@ -330,6 +331,8 @@ pub struct CoreCfg {
     ///
     /// 用户改名（FR-7-1）经设置页写入存档后由上层重新注入；本卡只取配置默认名。
     pub character_default_name: String,
+    /// 口头禅配置（`character.json.catchphrase`；`None` = 未装配，气泡退回 S4-M5 基线）。
+    pub character_catchphrase: Option<CatchphraseCfg>,
     /// 台词库（`resources/config/lines.json`；缺失时为空库，只少气泡不崩）。
     pub lines: LinesLibrary,
     /// 音效总线（S4-M6；`None` = 纯逻辑模式 / 音频未装配：全部播放入口退化为 no-op）。
@@ -411,6 +414,8 @@ pub struct CoreLoopState {
     activity: ActivitySample,
     /// S7-M2：提醒调度器（久坐 / 喝水；`03 §3.3 B21 ②` 的消费方）。
     reminders: ReminderScheduler,
+    /// S7-M9：生存动作触发调度器（分档轮询 + 间隔闸门；`02 §5.11`，AC-21/22 触发面）。
+    needs_trigger: NeedsActionTrigger,
     /// `schedule.json.reminders.ackResetsTimer`（出厂默认；用户改动落在存档 B 段）。
     reminder_ack_resets: bool,
     /// Drag 相光标（VDC；`begin_drag` 设置、run_loop 经 `drag_to` 逐 tick 跟新、
@@ -531,6 +536,7 @@ impl CoreLoopState {
             emotion,
             needs,
             character_default_name,
+            character_catchphrase,
             lines,
             audio,
             save,
@@ -580,7 +586,12 @@ impl CoreLoopState {
         // （内核不持有配置引用，避免生命周期纠缠；只搬运 Copy 的策略结构）。
         emotion.set_interaction_policy(interaction_policy_of(&interaction_cfg));
         // S4-M5：气泡计划器的冷却 / 间隔参数全部取自 `lines.json.selector`（C7）。
-        let bubble = BubblePlanner::from_library(&lines);
+        let mut bubble = BubblePlanner::from_library(&lines);
+        // S7-M8：装配口头禅改写（token / 权重 / 禁用池取自 `character.json.catchphrase`；
+        // `None` = 未装配，退回 S4-M5 基线）。
+        if let Some(cp_cfg) = &character_catchphrase {
+            bubble = bubble.with_catchphrase(cp_cfg);
+        }
         // S4-M5：`{name}` 变量取配置默认名（C2：代码内零角色名字面量）。
         let vars = PlaceholderVars::new().with_name(character_default_name);
         Self {
@@ -628,6 +639,7 @@ impl CoreLoopState {
                 ReminderConfig::new(true, 45, true, 45, 15, 180, true),
                 now_ms as i64,
             ),
+            needs_trigger: NeedsActionTrigger::new(),
             reminder_ack_resets: true,
         }
     }
@@ -654,6 +666,14 @@ impl CoreLoopState {
         if !snapshot.name.is_empty() {
             self.vars = self.vars.clone().with_name(snapshot.name.clone());
         }
+        // S7-M8：口头禅开关与频率档位 → 内核改写闸门（装配期 / 热更新均走这里；
+        // AC-27：设 0 后不出现；档位字符串与存档 / 配置同真源，L-03）。
+        self.bubble.set_catchphrase_enabled(snapshot.catchphrase_enabled);
+        self.bubble.set_catchphrase_frequency(
+            dp_core::emotion::lines::CatchphraseFrequency::from_cfg_name(
+                &snapshot.catchphrase_frequency,
+            ),
+        );
     }
 
     /// 落地 `schedule.json` 的勿扰行为位（S5-M4 装配期一次；未做热更新——该文件是
@@ -1062,11 +1082,17 @@ impl CoreLoopState {
             }
             CoreInput::TrayFeed => {
                 eprintln!("[dp-app] core-loop 收到托盘「喂食」：等效一次喂食");
-                self.emotion.tray_feed(now_ms as i64)
+                let events = self.emotion.tray_feed(now_ms as i64);
+                // S7-M9：喂食事务端点动作（AC-22 触发面；未启用自动跳过）。
+                self.settle_feed_transaction(now_ms);
+                events
             }
             CoreInput::TrayBath => {
                 eprintln!("[dp-app] core-loop 收到托盘「洗澡」：等效一次洗澡");
-                self.emotion.tray_bath(now_ms as i64)
+                let events = self.emotion.tray_bath(now_ms as i64);
+                // S7-M9：洗澡事务端点动作（AC-22 触发面；未启用自动跳过）。
+                self.settle_bath_transaction(now_ms);
+                events
             }
             // S5-M4：重置数据 / 导入存档 / 退出需要 `AppHandle`（重启进程 / 强制落盘后退出），
             // 由 [`Self::handle_admin_input`] 在 drain 处先行消化；走到这里说明调用方
@@ -1586,7 +1612,10 @@ impl CoreLoopState {
         // ④''' S7-M3：耦合矩阵速度输出 → 行走速度（C-12 精力 ×0.8 / C-11 档位饥饿 ×0.85）。
         self.apply_speed_mul();
 
-        // ④'''' S7-M6：托盘图标 / 菜单位同步（仅变化时调，避免每拍重建菜单）。
+        // ④'''' S7-M9：生存动作分档轮询（`02 §5.11`；AC-21/22 触发面，未启用自动跳过）。
+        self.needs_action_tick(wall_now_ms, app);
+
+        // ④''''' S7-M6：托盘图标 / 菜单位同步（仅变化时调，避免每拍重建菜单）。
         self.sync_tray(app);
 
         // ⑤ 1Hz 全量快照（`pet://state`）：无论有无算法事件都发，供属性面板 /
@@ -1656,6 +1685,82 @@ impl CoreLoopState {
         };
         let verdict = self.arbiter.submit(request, mono_ms);
         self.settle_play(verdict, REMINDER_ACTION_ID);
+    }
+
+    /// S7-M9：生存动作分档轮询（`02 §5.11`；AC-21/22 触发面）。
+    ///
+    /// 口径同提醒链路：`actions.json` 的 `disabled`（资源批次 B 未交付）→
+    /// [`ActionRequest::from_cfg`] 返回 `None`，只记「触发面到点」；资源交付后
+    /// **零改动实播**。求助类动作（讨食 / 求洗澡）同时产求助气泡（`01 §6.16.3`，
+    /// 3min 间隔由 [`BubblePlanner`] 内建；勿扰静默口径同 S5-M4）。
+    fn needs_action_tick(&mut self, now_ms: i64, app: Option<&AppHandle>) {
+        let effects = self
+            .emotion
+            .needs()
+            .effects(self.emotion.needs_cfg(), &self.emotion.state.values);
+        let intents = self.needs_trigger.poll(&effects, now_ms);
+        for intent in intents {
+            self.submit_needs_id(&intent.action_id, now_ms.max(0) as u64);
+            if let Some(pool) = intent.bubble_pool {
+                self.emit_help_bubble(&pool, now_ms, app);
+            }
+        }
+    }
+
+    /// S7-M9：求助气泡（讨食 / 求洗澡；冷却未过 → 不弹；勿扰静默口径同 S5-M4）。
+    fn emit_help_bubble(&mut self, pool: &str, now_ms: i64, app: Option<&AppHandle>) {
+        if self.dnd && self.dnd_pause_bubbles {
+            return;
+        }
+        let Some(plan) = self.bubble.bubble_for_pool(&self.lines, pool, &self.vars, now_ms, true)
+        else {
+            return;
+        };
+        let wire = wire_for_bubble(&plan);
+        let Some(handle) = app else { return };
+        if let Err(err) = handle.emit(wire.event, &wire.payload) {
+            eprintln!("[dp-app] core-loop 广播 {} 降级：{err}", wire.event);
+        }
+    }
+
+    /// S7-M9：按 ID 提交生存动作（`disabled` / 目录缺失 → 降级记录，不 panic）。
+    fn submit_needs_id(&mut self, action_id: &str, mono_ms: u64) {
+        let Some(cfg) = self.catalog.find(action_id) else {
+            eprintln!("[dp-app] 生存动作 {action_id} 不在动作目录（降级仅记录）");
+            return;
+        };
+        let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
+            eprintln!(
+                "[dp-app] 生存动作 {action_id} 未启用（批次 B 资源未交付）→ 触发面就绪，待资源"
+            );
+            return;
+        };
+        let verdict = self.arbiter.submit(request, mono_ms);
+        self.settle_play(verdict, action_id);
+    }
+
+    /// S7-M9：喂食事务端点动作（AC-22：喂食开始 → ACT-N-02；完成后饱食 ≥ 满档 → ACT-N-03）。
+    ///
+    /// 调用点：`apply_core_input(TrayFeed)` 消费**之后**（饱食度已更新，读真实终值）。
+    fn settle_feed_transaction(&mut self, now_ms: u64) {
+        self.submit_needs_id(NeedsActionTrigger::feed_started(), now_ms);
+        let satiety = self.emotion.state.values.satiety;
+        if let Some(action) = NeedsActionTrigger::feed_completed(satiety, self.emotion.needs_cfg())
+        {
+            self.submit_needs_id(action, now_ms);
+        }
+    }
+
+    /// S7-M9：洗澡事务端点动作（AC-22：洗澡开始 → ACT-N-07、结束 → ACT-N-08）。
+    ///
+    /// 调用点：`apply_core_input(TrayBath)` 消费**之后**。演出时长编排（8~12s）归 S8；
+    /// 本卡提交端点动作，仲裁器按优先级排队（N-08 在 N-07 演出结束后起播）。
+    fn settle_bath_transaction(&mut self, now_ms: u64) {
+        self.submit_needs_id(NeedsActionTrigger::bath_started(self.emotion.needs_cfg()), now_ms);
+        self.submit_needs_id(
+            NeedsActionTrigger::bath_completed(self.emotion.needs_cfg()),
+            now_ms,
+        );
     }
 
     /// S7-M3：耦合矩阵速度输出 → 行走速度。
@@ -2382,6 +2487,7 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         emotion: bundle.emotion.clone(),
         needs: bundle.needs.clone(),
         character_default_name: bundle.character.default_name.clone(),
+        character_catchphrase: Some(bundle.character.catchphrase.clone()),
         lines,
         audio,
         save,
@@ -3013,6 +3119,7 @@ mod tests {
             emotion: EmotionConfig::default(),
             needs: NeedsConfig::default(),
             character_default_name: name_cp(),
+            character_catchphrase: None,
             lines: test_lines(),
             audio: None,
             // S5-M1 起 `CoreCfg` 追加存档门面；测试取 `None` = 不载档不落盘（纯逻辑模式）。
@@ -4149,6 +4256,84 @@ mod tests {
         wall.advance_ms(1_000);
         state.business_tick_present(&wall);
         assert_eq!(state.pending_mood_delta(), 0.0);
+    }
+
+    // -- S7-M9：生存动作触发面接入（AC-21/22） ----------------------------------
+
+    /// 真实 needs.json 分档解析（S7-M9 应用层测试夹具；数值口径 = 随包配置）。
+    fn real_needs_cfg() -> dp_core::config::model::NeedsConfig {
+        let text = std::fs::read_to_string(resources_config_dir().join("needs.json"))
+            .expect("needs.json 可读");
+        serde_json::from_str(&text).expect("needs.json 可解析")
+    }
+
+    /// 真实目录 + 真实分档（资源批次 B 未交付，N 系列 `disabled=true`）：
+    /// 分档轮询与喂食 / 洗澡事务端点**不 panic、不提交**——触发面就绪，待资源
+    /// （`02 §10.1` R3：交付后零改动实播）。
+    #[test]
+    fn needs_actions_armed_but_disabled_skip_submission() {
+        let cfg = CoreCfg {
+            catalog: ActionCatalog::load(&resources_config_dir()).expect("真实目录可加载"),
+            needs: real_needs_cfg(),
+            ..core_cfg(toss_catalog())
+        };
+        let mut state = CoreLoopState::new(Vec2::new(960.0, 1040.0), vec![mon_a()], cfg, 7, 0);
+
+        // ① 分档轮询：Satiety=30（peckish）→ ACT-N-01 触发面到点；disabled → 不提交。
+        state.emotion.state.values.satiety = 30.0;
+        state.emotion.state.values.cleanliness = 80.0;
+        state.needs_action_tick(1_000, None);
+        assert!(state.arbiter.current().is_none(), "disabled 不得起播");
+        assert_eq!(state.arbiter.queue_len(), 0, "disabled 不得入队");
+
+        // ② 喂食事务端点：N-02 / N-03 disabled → 不提交。
+        let _ = state.apply_core_input(CoreInput::TrayFeed, 1_000);
+        assert!(state.arbiter.current().is_none(), "喂食端点不得起播");
+
+        // ③ 洗澡事务端点：N-07 / N-08 disabled → 不提交。
+        let _ = state.apply_core_input(CoreInput::TrayBath, 1_000);
+        assert!(state.arbiter.current().is_none(), "洗澡端点不得起播");
+    }
+
+    /// 解除 disabled（模拟资源批次 B 交付）→ 同一轮询 / 事务路径**确有提交**
+    /// （AC-21：讨食 N-01 起播；喂食完成且饱食 ≥ 满档 → N-02/N-03 提交）。
+    #[test]
+    fn needs_actions_submit_when_enabled() {
+        let catalog = ActionCatalog::load(&resources_config_dir()).expect("真实目录可加载");
+        let enabled = ActionCatalog::from_actions(
+            catalog
+                .all()
+                .iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    if c.id.starts_with("ACT-N-0") {
+                        c.disabled = false;
+                    }
+                    c
+                })
+                .collect(),
+        );
+        let cfg = CoreCfg {
+            catalog: enabled,
+            needs: real_needs_cfg(),
+            ..core_cfg(toss_catalog())
+        };
+        let mut state = CoreLoopState::new(Vec2::new(960.0, 1040.0), vec![mon_a()], cfg, 7, 0);
+
+        // ① 讨食轮询 → N-01 起播（fresh 仲裁器 → Play）。
+        state.emotion.state.values.satiety = 30.0;
+        state.emotion.state.values.cleanliness = 80.0;
+        state.needs_action_tick(1_000, None);
+        let current = state.arbiter.current().expect("解除 disabled 后应起播");
+        assert_eq!(current.request.id, "ACT-N-01", "讨食应起播");
+
+        // ② 喂食事务端点（饱食 ≥ 满档）→ N-02 开始 + N-03 满足，至少一个提交。
+        state.emotion.state.values.satiety = 80.0;
+        let _ = state.apply_core_input(CoreInput::TrayFeed, 2_000);
+        assert!(
+            state.arbiter.queue_len() > 0 || state.arbiter.current().is_some(),
+            "N-02/N-03 应至少提交一个"
+        );
     }
 
     /// 快照契约（`02 §4.3`）：1Hz 投影字段齐备且数值与内核同源。

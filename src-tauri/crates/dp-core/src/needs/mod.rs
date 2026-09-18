@@ -24,13 +24,18 @@
 //! `clean_slow_until_ms` 的比较是「注入时刻 vs 存档时间戳」，不读真实时间。
 //!
 //! 边界：**不含**耦合矩阵求值（归 [`coupling`]，S7-M3）；**不含**洗澡流程状态机
-//! （`bath` 段演出与动作接入归 S7-M9，本模块只做冷却时间戳记账）；**不含**任何动作
-//! 提交（N 系列接入归 S7-M9）。
+//! （时长演出编排归 S8，本模块只做冷却时间戳记账）；动作**触发调度**在 [`trigger`]
+//! （S7-M9 交付：分档轮询 + 喂食/洗澡事务端点，实播与否由 `actions.json.disabled` 门控）。
 
 pub mod bands;
 pub mod coupling;
+pub mod trigger;
 
 pub use bands::{BandEffects, CleanBand, SatietyBand};
+pub use trigger::{
+    DEFAULT_BAND_INTERVAL_SEC, FEED_DONE_SATISFIED_ACTION_ID, FEED_START_ACTION_ID,
+    NeedActionIntent, NeedsActionTrigger,
+};
 pub use coupling::{
     CouplingError, CouplingOutput, CouplingSolver, DispatchDeny, DispatchVerdict,
 };

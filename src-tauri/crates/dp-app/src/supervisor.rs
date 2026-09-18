@@ -720,9 +720,8 @@ mod tests {
 
     #[test]
     fn watchdog_no_publish_is_not_anomaly() {
-        let mut s = WatchdogState::default();
+        let mut s = WatchdogState { miss: 2, ..Default::default() };
         // 播放器未推帧（无图集/暂停）：sent_delta == 0 → 永远不触发，且清空累积 miss。
-        s.miss = 2;
         for _ in 0..10 {
             assert_eq!(watchdog_step(0, 0, &mut s), WatchdogStep::None);
         }
@@ -745,9 +744,7 @@ mod tests {
 
     #[test]
     fn watchdog_receipt_resume_clears_fail_counter() {
-        let mut s = WatchdogState::default();
-        s.miss = 2;
-        s.heal_fail = 1; // 此前已自愈过一次
+        let mut s = WatchdogState { miss: 2, heal_fail: 1, ..Default::default() }; // 此前已自愈过一次
         // 回执恢复 → miss 与 heal_fail 全部清零（自愈成功）。
         assert_eq!(watchdog_step(5, 5, &mut s), WatchdogStep::None);
         assert_eq!(s.miss, 0);

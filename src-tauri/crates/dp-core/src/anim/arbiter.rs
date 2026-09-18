@@ -1107,6 +1107,69 @@ mod tests {
         assert_eq!(capped.next_interval_sec(), 900);
     }
 
+    /// S7-M9：needs→动作 触发映射接入仲裁器（`02 §5.11`；AC-21/22 触发面）。
+    ///
+    /// 真实 `needs.json` 分档 + 真实目录：档位候选 → [`crate::needs::NeedsActionTrigger`]
+    /// → `ActionRequest::from_cfg` → `arbiter.submit`，验证：
+    ///   ① AC-21 讨食（satiety<40 → ACT-N-01 + 求助气泡）；出厂 `disabled=true`
+    ///     （资源批次 B 未交付）→ `from_cfg` 自动跳过（`02 §10.1` R3）；解除后起播；
+    ///   ② AC-22 喂食完成且饱食 ≥ 满档 → ACT-N-03；
+    ///   ③ AC-22 很脏（<15）→ ACT-N-06；洗澡结束 → ACT-N-08。
+    #[test]
+    fn needs_trigger_to_arbiter_integration_ac21_ac22() {
+        use crate::needs::{BandEffects, NeedsActionTrigger};
+
+        let catalog = crate::anim::ActionCatalog::load(&resources_config_dir()).expect("目录可加载");
+        let needs: crate::config::model::NeedsConfig = {
+            let text = std::fs::read_to_string(resources_config_dir().join("needs.json"))
+                .expect("needs.json 可读");
+            serde_json::from_str(&text).expect("needs.json 可解析")
+        };
+        let mut trigger = NeedsActionTrigger::new();
+        let mut arb = ActionArbiter::new();
+
+        // ① AC-21：Satiety=30（peckish）→ ACT-N-01 讨食 + 求助气泡；出厂 disabled 自动跳过。
+        let intents = trigger.poll(&BandEffects::from_cfg(&needs, 30.0, 80.0), 0);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].action_id, "ACT-N-01");
+        assert_eq!(intents[0].bubble_pool.as_deref(), Some("begFood"));
+        let n01 = catalog.find("ACT-N-01").expect("目录应含 ACT-N-01");
+        assert!(n01.disabled, "批次 B 资源未交付 → disabled 自动跳过");
+        assert!(ActionRequest::from_cfg(n01, ActionSource::Ambient).is_none(), "R3：disabled 跳过");
+        // 解除 disabled（模拟资源交付）→ 提交 → 起播。
+        let mut n01_on = n01.clone();
+        n01_on.disabled = false;
+        let req = ActionRequest::from_cfg(&n01_on, ActionSource::Ambient).expect("解除后应可转换");
+        assert!(matches!(ArbProbe::submit(&mut arb, req, 0), Arbitration::Play), "讨食应起播");
+
+        // ② AC-22：满档无分档候选；喂食完成且饱食 ≥ 满档（70）→ ACT-N-03。
+        assert!(trigger.poll(&BandEffects::from_cfg(&needs, 80.0, 80.0), 1_000).is_empty());
+        let done = NeedsActionTrigger::feed_completed(80.0, &needs).expect("饱食≥70 应触发");
+        assert_eq!(done, "ACT-N-03");
+        let mut n03_on = catalog.find(done).expect("ACT-N-03 应在目录").clone();
+        n03_on.disabled = false;
+        let req = ActionRequest::from_cfg(&n03_on, ActionSource::Ambient).expect("解除后应可转换");
+        match ArbProbe::submit(&mut arb, req, 2_000) {
+            Arbitration::Queued { .. } | Arbitration::DeferToLoopEnd => {}
+            other => panic!("讨食（循环）进行中，吃饱满足应入队/延后：{other:?}"),
+        }
+
+        // ③ AC-22：Cleanliness=10（filthy）→ ACT-N-06 求洗澡；洗澡结束 → ACT-N-08。
+        let intents = trigger.poll(&BandEffects::from_cfg(&needs, 80.0, 10.0), 3_000);
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].action_id, "ACT-N-06");
+        assert_eq!(intents[0].bubble_pool.as_deref(), Some("begBath"));
+        let bath_end = NeedsActionTrigger::bath_completed(&needs);
+        assert_eq!(bath_end, "ACT-N-08");
+        let mut n08_on = catalog.find(bath_end).expect("ACT-N-08 应在目录").clone();
+        n08_on.disabled = false;
+        let req = ActionRequest::from_cfg(&n08_on, ActionSource::Ambient).expect("解除后应可转换");
+        match ArbProbe::submit(&mut arb, req, 4_000) {
+            Arbitration::Queued { .. } | Arbitration::DeferToLoopEnd => {}
+            other => panic!("洗澡结束动作应入队/延后：{other:?}"),
+        }
+    }
+
     // -- 空仲裁器防御 -----------------------------------------------------------
 
     #[test]

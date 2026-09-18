@@ -1,4 +1,5 @@
-//! `emotion::lines`：台词库抽取、冷却、占位符渲染与气泡计划（**S4-M5**，`02 §5.8` / §7.6）。
+//! `emotion::lines`：台词库抽取、冷却、占位符渲染与气泡计划（**S4-M5**，`02 §5.8` / §7.6；
+//! **S7-M8** 接入口头禅改写与台词库重写）。
 //!
 //! ## 本卡职责（`03 §2 S4-M5`）
 //!
@@ -9,16 +10,18 @@
 //!      原样保留**（诚实降级，绝不硬编码角色名 —— C2）；
 //!   4. **气泡计划**：`PlannedBubble`（`pet://bubble` 载荷的语义中继），含求助气泡
 //!      3min 间隔 + 拒绝翻倍 ≤15min 冷却（`01 §6.16.3` 气泡规则增量，收口 `03 §3.3` B16-①②）；
-//!   5. **口头禅闸门接口预留**：`CatchphraseFrequency` 为**枚举档位**（L-03，作废 `"1:3"`
-//!      字符串比例），闸门 `CatchphraseGate` 本卡只交付接口与滚动窗口判定，
-//!      **实际注入时机归 S7-M8**。
+//!   5. **口头禅闸门**：`CatchphraseFrequency` 为**枚举档位**（L-03，作废 `"1:3"`
+//!      字符串比例），闸门 `CatchphraseGate` 交付滚动窗口判定 + R3 冷却。
 //!
-//! ## 与 S7-M8 的切割（禁止顺手改动）
+//! ## S7-M8 接入（`03 §2 S7-M8`）
 //!
-//!   - 口头禅**改写**（把无口头禅句改写成含口头禅句、位置偏置 `positionBias`）归 S7-M8；
-//!     本卡只提供「本句是否允许携带口头禅」的判定闸门与枚举档位解析。
-//!   - 台词库**重写**（13 池全量内容打磨 + 命名接入设置页）归 S7-M8；本卡按
-//!     `01 §6.16.3` 示例落**骨架内容**（每池 6 条）并把池键冻结。
+//!   - **改写注入**：`BubblePlanner` 装配 [`CatchphraseState`]（闸门 + [`speech::SpeechRewriter`]）
+//!     后，气泡文案按 R1/R2/R3/R5 口径改写：闸门放行 → 按 `positionBias` 注入；
+//!     池内烘培含口头禅句 → 记入窗口，闸门拒绝时**换同池无口头禅变体**（降频改写）；
+//!     禁用池（离家 / 暴怒等）→ **永不注入**（AC-27 禁用场景）；
+//!   - **台词库重写**：`lines.json` 13 池全量内容打磨（每池 ≥6 条，分布约束见 `validate`）；
+//!   - **运行时设置**：`set_catchphrase_enabled` / `set_catchphrase_frequency` 供
+//!     core-loop 在装配期与热更新时同步存档设置。
 //!
 //! ## 时间纪律（C3）与配置纪律（C7）
 //!
@@ -32,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::config::model::{CatchphraseCfg, CatchphraseFrequencyCfg, EmotionLevelCfg, LinePoolsCfg};
+use crate::emotion::speech::SpeechRewriter;
 
 // ---------------------------------------------------------------------------
 // 常量（池键为冻结契约，`character.json.linePools.keys` 是唯一真源）
@@ -597,7 +601,7 @@ fn hash_index(pool: &str, now_ms: i64, n: usize) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// 口头禅闸门（L-03 枚举档位；**接口预留，实际注入归 S7-M8**）
+// 口头禅闸门（L-03 枚举档位；S4-M5 交付判定，S7-M8 接入改写）
 // ---------------------------------------------------------------------------
 
 /// 口头禅频率档位（L-03：`off` / `low` / `standard` / `high`）。
@@ -664,8 +668,8 @@ impl CatchphraseFrequency {
 /// 口头禅闸门（R1 频率上限 + R3 冷却）。
 ///
 /// **S4-M5 交付边界**：本卡只交付「本句是否允许携带口头禅」的判定接口；
-/// 真正把无口头禅句**改写**成含口头禅句（含 `positionBias` 位置偏置与
-/// `maxPerSentence` 单句上限）归 **S7-M8**（`01 §6.16.2`）。
+/// 把无口头禅句**改写**成含口头禅句（`positionBias` 位置偏置 / `maxPerSentence`
+/// 单句上限）在 [`speech::SpeechRewriter`]（**S7-M8**，`01 §6.16.2`）。
 #[derive(Debug, Clone)]
 pub struct CatchphraseGate {
     enabled: bool,
@@ -744,16 +748,30 @@ impl CatchphraseGate {
             Some(last) => now_ms - last >= (self.min_interval_sec as i64).saturating_mul(1_000),
         };
         let allow = self.enabled && self.window.iter().all(|used| !*used) && cooldown_ok;
-        // 记入滚动窗口（保留最近 width 句）。
-        self.window.push(allow);
+        self.record_sentence(allow, now_ms, freq);
+        allow
+    }
+
+    /// 记录「本句是否含口头禅」（S7-M8：供**烘培含口头禅句**与**禁用池句**走同一窗口）。
+    ///
+    /// 语义与 [`Self::should_inject`] 的记窗完全一致，只是**不产出放行判定**：
+    /// 台词已含口头禅（无需注入）或禁用池句（永不注入）也要计入 R1 滚动窗口——
+    /// 「每 N 句最多 1 句」按**实际出现**统计（`01 §6.16.4` AC-26）。
+    /// `contains = true` 同时刷新 R3 间隔基准（含口头禅句之间同样需 ≥`minIntervalSec`）。
+    pub fn record_sentence(&mut self, contains: bool, now_ms: i64, freq: &CatchphraseFrequencyCfg) {
+        let width = self.frequency.window(freq) as usize;
+        if width == 0 {
+            self.window.clear();
+            return;
+        }
+        self.window.push(contains);
         if self.window.len() > width {
             let excess = self.window.len() - width;
             self.window.drain(0..excess);
         }
-        if allow {
+        if contains {
             self.last_grant_ms = Some(now_ms);
         }
-        allow
     }
 }
 
@@ -900,12 +918,72 @@ impl HelpCooldown {
     }
 }
 
-/// 气泡计划器：台词抽取 + 冷却 + 求助退避（S4-M5）。
+/// 口头禅改写状态（S7-M8：闸门 + 改写器 + 禁用池，供 [`BubblePlanner`] 装配）。
+///
+/// `None`（未装配）时 [`BubblePlanner`] 行为退回 S4-M5 基线（只抽不写）。
+#[derive(Debug, Clone)]
+pub struct CatchphraseState {
+    gate: CatchphraseGate,
+    rewriter: SpeechRewriter,
+    freq: CatchphraseFrequencyCfg,
+    forbid_pools: Vec<String>,
+}
+
+impl CatchphraseState {
+    /// 由 `character.json.catchphrase` 构造（token / 权重 / 禁用池全部配置驱动，C7）。
+    #[must_use]
+    pub fn from_cfg(cfg: &CatchphraseCfg) -> Self {
+        Self {
+            gate: CatchphraseGate::from_cfg(cfg),
+            rewriter: SpeechRewriter::from_cfg(cfg),
+            freq: cfg.frequency.clone(),
+            forbid_pools: cfg.forbid_pools.clone(),
+        }
+    }
+
+    /// 开关（设置页 FR-7-10 → 存档 → core-loop 运行时注入；AC-27 设 0 后不出现）。
+    pub fn set_enabled(&mut self, on: bool) {
+        self.gate.set_enabled(on);
+    }
+
+    /// 切档（设置页频率档位 → core-loop 运行时注入；枚举档位，L-03）。
+    pub fn set_frequency(&mut self, freq: CatchphraseFrequency) {
+        self.gate.set_frequency(freq);
+    }
+
+    /// 当前是否启用。
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.gate.is_enabled()
+    }
+
+    /// 当前档位。
+    #[must_use]
+    pub fn frequency(&self) -> CatchphraseFrequency {
+        self.gate.frequency()
+    }
+
+    /// 口头禅 token（诊断 / 单测）。
+    #[must_use]
+    pub fn token(&self) -> &str {
+        self.rewriter.token()
+    }
+
+    /// 池是否属禁用场景（`character.json.catchphrase.forbidPools`；AC-27 禁用清单）。
+    #[must_use]
+    pub fn is_forbidden_pool(&self, pool: &str) -> bool {
+        self.forbid_pools.iter().any(|p| p == pool)
+    }
+}
+
+/// 气泡计划器：台词抽取 + 冷却 + 求助退避（S4-M5）+ 口头禅改写（S7-M8）。
 #[derive(Debug, Clone)]
 pub struct BubblePlanner {
     selector: LineSelector,
     help: HelpCooldown,
     bubble_actions: BTreeMap<String, String>,
+    /// 口头禅改写状态（`None` = 未装配，退回 S4-M5 基线）。
+    catchphrase: Option<CatchphraseState>,
 }
 
 impl Default for BubblePlanner {
@@ -914,6 +992,7 @@ impl Default for BubblePlanner {
             selector: LineSelector::default(),
             help: HelpCooldown::new(180, 2, 900),
             bubble_actions: BTreeMap::new(),
+            catchphrase: None,
         }
     }
 }
@@ -926,6 +1005,34 @@ impl BubblePlanner {
             selector: LineSelector::from_library(lib),
             help: HelpCooldown::from_library(lib),
             bubble_actions: lib.bubble_actions.clone(),
+            catchphrase: None,
+        }
+    }
+
+    /// 装配口头禅改写（S7-M8；token / 权重 / 禁用池取自 `character.json.catchphrase`）。
+    #[must_use]
+    pub fn with_catchphrase(mut self, cfg: &CatchphraseCfg) -> Self {
+        self.catchphrase = Some(CatchphraseState::from_cfg(cfg));
+        self
+    }
+
+    /// 只读：口头禅改写状态（诊断 / 单测；未装配 → `None`）。
+    #[must_use]
+    pub fn catchphrase(&self) -> Option<&CatchphraseState> {
+        self.catchphrase.as_ref()
+    }
+
+    /// 口头禅开关（core-loop 装配期 / 热更新注入；未装配 → no-op）。
+    pub fn set_catchphrase_enabled(&mut self, on: bool) {
+        if let Some(st) = self.catchphrase.as_mut() {
+            st.set_enabled(on);
+        }
+    }
+
+    /// 口头禅频率档位（core-loop 装配期 / 热更新注入；未装配 → no-op）。
+    pub fn set_catchphrase_frequency(&mut self, freq: CatchphraseFrequency) {
+        if let Some(st) = self.catchphrase.as_mut() {
+            st.set_frequency(freq);
         }
     }
 
@@ -958,6 +1065,9 @@ impl BubblePlanner {
     ///
     /// 类别由 [`BubbleKind::for_pool`] 派生；求助类（`begFood` / `begBath`）额外受
     /// [`HelpCooldown`] 约束，并携带对应快捷按钮（`feed`/`later` 或 `bath`/`later`）。
+    ///
+    /// S7-M8：文案产出后经 [`Self::apply_catchphrase`] 走口头禅改写（闸门 / 禁用池 /
+    /// 降频变体回退，AC-26/27）。
     pub fn bubble_for_pool(
         &mut self,
         lib: &LinesLibrary,
@@ -971,10 +1081,11 @@ impl BubblePlanner {
             return None;
         }
         let pick = self.selector.pick(lib, pool, now_ms)?;
-        let text = render_placeholders(pick.text, vars);
         if kind == BubbleKind::Help {
             self.help.on_shown(now_ms);
         }
+        let text = render_placeholders(pick.text, vars);
+        let text = self.apply_catchphrase(lib, pool, pick.index, text, vars, now_ms);
         let actions = match (kind, pool) {
             (BubbleKind::Help, "begBath") => self.actions_for(&HELP_ACTIONS_BATH, vars),
             (BubbleKind::Help, _) => self.actions_for(&HELP_ACTIONS_FOOD, vars),
@@ -990,6 +1101,54 @@ impl BubblePlanner {
             actions,
             high_contrast: false,
         })
+    }
+
+    /// S7-M8：口头禅改写（R1 闸门 / R2 单句上限 / R3 冷却 / R5 位置偏置；AC-26/27）。
+    ///
+    /// `text` 为**已渲染占位符**的文案（调用方先渲染再交改写）。决策顺序
+    /// （与 `01 §6.16.2` R1~R5 一致）：
+    ///   1. 未装配口头禅 → 原样返回；
+    ///   2. **禁用池**（`forbidPools`：离家宣言 / 暴怒等）→ 永不注入（AC-27 禁用场景）；
+    ///      防御性再查：池内若仍含 token（validate 应拦）→ 换无口头禅变体；
+    ///   3. **池内烘培含口头禅句** → 记入闸门窗口；闸门放行则保留，拒绝则**降频改写**
+    ///      为同池无口头禅变体（R1「触发降频时自动切无口头禅变体」）；
+    ///   4. **无口头禅句** → 闸门放行则按位置偏置注入，否则原样。
+    fn apply_catchphrase(
+        &mut self,
+        lib: &LinesLibrary,
+        pool: &str,
+        pick_index: usize,
+        text: String,
+        vars: &PlaceholderVars,
+        now_ms: i64,
+    ) -> String {
+        let Some(st) = self.catchphrase.as_mut() else {
+            return text;
+        };
+        if st.is_forbidden_pool(pool) {
+            // 禁用场景：永不注入。validate 保证池内零 token，防御性再查一次。
+            let contains = st.rewriter.contains_token(&text);
+            st.gate.record_sentence(contains, now_ms, &st.freq);
+            return if contains {
+                plain_variant(lib, pool, pick_index, vars, st.rewriter.token()).unwrap_or(text)
+            } else {
+                text
+            };
+        }
+        if st.rewriter.contains_token(&text) {
+            // 烘培含口头禅句：放行保留（记入窗口），拒绝则降频换无口头禅变体（也记入窗口）。
+            let allow = st.gate.should_inject(now_ms, &st.freq);
+            return if allow {
+                text
+            } else {
+                plain_variant(lib, pool, pick_index, vars, st.rewriter.token()).unwrap_or(text)
+            };
+        }
+        if st.gate.should_inject(now_ms, &st.freq) {
+            st.rewriter.inject(&text, now_ms)
+        } else {
+            text
+        }
     }
 
     /// 由冷落档位产出气泡：**池键取自 `emotion.json.levels[level].linePool`**（配置驱动）。
@@ -1015,6 +1174,33 @@ impl BubblePlanner {
             _ => {}
         }
     }
+}
+
+/// S7-M8：同池「无口头禅变体」回退（R1 降频改写）。
+///
+/// 从 `pick_index` 起**顺序顺延**扫描同池其余句（确定性，可单测），返回第一句
+/// **渲染后不含口头禅 token** 的文案；全池皆含（validate 应拦，防御）→ `None`，
+/// 调用方诚实降级为原句。
+fn plain_variant(
+    lib: &LinesLibrary,
+    pool: &str,
+    pick_index: usize,
+    vars: &PlaceholderVars,
+    token: &str,
+) -> Option<String> {
+    let lines = lib.pool(pool)?;
+    let n = lines.len();
+    if n == 0 {
+        return None;
+    }
+    for offset in 1..=n {
+        let idx = (pick_index + offset) % n;
+        let candidate = render_placeholders(&lines[idx], vars);
+        if !candidate.contains(token) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// 停留时长钳到 `[3000,5000]`（`02 §5 K-5`；与前端 `clampDwellMs` 同口径）。
@@ -1328,6 +1514,177 @@ mod tests {
         disabled.set_enabled(false);
         assert!(!disabled.is_enabled());
         assert!(!disabled.should_inject(s(0), &freq));
+    }
+
+    /// S7-M8：`record_sentence` 把烘培含口头禅句计入 R1 窗口，并刷新 R3 基准。
+    #[test]
+    fn catchphrase_gate_record_sentence_counts_baked_and_refreshes_cooldown() {
+        let cfg = character();
+        let freq = cfg.catchphrase.frequency.clone();
+        let s = |n: i64| n * 1_000;
+        let mut gate = CatchphraseGate::from_cfg(&cfg.catchphrase);
+
+        // 烘培含口头禅句（无需注入）也要占窗口。
+        gate.record_sentence(true, s(0), &freq);
+        assert!(!gate.should_inject(s(30), &freq), "R1：烘培句计入窗口，紧跟句不放行");
+        // 两句普通句把窗口滑出（[T,F,F]）。
+        gate.record_sentence(false, s(60), &freq);
+        gate.record_sentence(false, s(90), &freq);
+        let min_interval = cfg.catchphrase.min_interval_sec as i64;
+        assert!(
+            !gate.should_inject((min_interval - 1) * 1_000, &freq),
+            "R3：窗口虽滑出，但距烘培句不足 minIntervalSec"
+        );
+        assert!(gate.should_inject(min_interval * 1_000, &freq), "R3：恰达间隔放行");
+    }
+
+    /// S7-M8 / AC-26：标准档下每 3 句 ≤1 句含口头禅（跨池轮播，30s 步长）。
+    #[test]
+    fn planner_with_catchphrase_obeys_three_sentence_window_ac26() {
+        let cfg = character();
+        let lib = library();
+        let mut planner = BubblePlanner::from_library(&lib).with_catchphrase(&cfg.catchphrase);
+        let pools = ["happy", "bored", "curious", "sleepy", "excited"];
+        let mut contains = Vec::new();
+        let mut t = 0i64;
+        for i in 0..9 {
+            let pool = pools[i % pools.len()];
+            let b = planner
+                .bubble_for_pool(&lib, pool, &vars(), t, false)
+                .expect("气泡应产出");
+            contains.push(b.text.contains(cfg.catchphrase.token.as_str()));
+            t += 30_000;
+        }
+        // 标准档窗口 3（S4-M5 闸门口径）：放行后紧跟 3 句不放行（窗口滑出）→ 第 5 句再放行，
+        // 故序列为 T,F,F,F,T,F,F,F,T——任意 3 句连续窗口内 ≤1 句含口头禅（AC-26）。
+        for (i, &c) in contains.iter().enumerate() {
+            assert_eq!(c, i % 4 == 0, "放行序列不符：{contains:?}");
+        }
+        for w in contains.windows(3) {
+            assert!(
+                w.iter().filter(|&&c| c).count() <= 1,
+                "AC-26：每 3 句 ≤1 句含口头禅：{contains:?}"
+            );
+        }
+    }
+
+    /// S7-M8 / AC-27：设 0（关闭）后完全不出现（含烘培句被降频改写为无口头禅变体）。
+    #[test]
+    fn planner_off_frequency_never_shows_token_ac27() {
+        let cfg = character();
+        let lib = library();
+        let mut planner = BubblePlanner::from_library(&lib).with_catchphrase(&cfg.catchphrase);
+        planner.set_catchphrase_frequency(CatchphraseFrequency::Off);
+        // 用非求助池轮播（求助池另有 180s Help 冷却，与口头禅断言无关）。
+        let pools = ["happy", "idle", "bored", "aggrieved", "sleepy"];
+        let mut t = 0i64;
+        for i in 0..24 {
+            let pool = pools[i % pools.len()];
+            let b = planner
+                .bubble_for_pool(&lib, pool, &vars(), t, false)
+                .expect("气泡应产出");
+            assert!(
+                !b.text.contains(cfg.catchphrase.token.as_str()),
+                "AC-27：off 档不得出现口头禅（第 {i} 句：{}）",
+                b.text
+            );
+            t += 30_000;
+        }
+    }
+
+    /// S7-M8 / AC-27：禁用池（离家 / 暴怒）在高频档下也永不注入。
+    #[test]
+    fn planner_forbid_pool_never_injects() {
+        let cfg = character();
+        let lib = library();
+        let mut planner = BubblePlanner::from_library(&lib).with_catchphrase(&cfg.catchphrase);
+        planner.set_catchphrase_frequency(CatchphraseFrequency::High);
+        let mut t = 0i64;
+        for pool in ["angry", "runaway"] {
+            for _ in 0..6 {
+                let b = planner
+                    .bubble_for_pool(&lib, pool, &vars(), t, false)
+                    .expect("禁用池气泡应产出");
+                assert!(
+                    !b.text.contains(cfg.catchphrase.token.as_str()),
+                    "禁用场景不得注入：{}",
+                    b.text
+                );
+                t += 30_000;
+            }
+        }
+    }
+
+    /// S7-M8：降频时烘培含口头禅句被改写为同池无口头禅变体（确定性）。
+    #[test]
+    fn planner_downgrades_baked_token_line_to_plain_variant() {
+        let mut cfg = LinesConfig::default();
+        cfg.pools.insert(
+            "custom".to_string(),
+            vec![
+                "心心烘培句一".to_string(),
+                "心心烘培句二".to_string(),
+                "普通变体一".to_string(),
+                "普通变体二".to_string(),
+                "普通变体三".to_string(),
+            ],
+        );
+        let lib = LinesLibrary::from_config(cfg);
+        let cp = CatchphraseCfg::default();
+        let mut planner = BubblePlanner::from_library(&lib).with_catchphrase(&cp);
+        planner.set_catchphrase_frequency(CatchphraseFrequency::Off);
+        for t in [0i64, 30_000, 60_000, 90_000] {
+            let b = planner
+                .bubble_for_pool(&lib, "custom", &PlaceholderVars::new(), t, false)
+                .expect("气泡应产出");
+            assert!(
+                !b.text.contains(cp.token.as_str()),
+                "off 档下烘培句必须降频为无口头禅变体：{}",
+                b.text
+            );
+            assert!(
+                ["普通变体一", "普通变体二", "普通变体三"].contains(&b.text.as_str()),
+                "应落在无口头禅变体上：{}",
+                b.text
+            );
+        }
+    }
+
+    /// S7-M8：运行时开关与切档生效（core-loop 装配期 / 热更新注入路径）。
+    #[test]
+    fn planner_runtime_setters_apply() {
+        let cfg = character();
+        let lib = library();
+        let mut planner = BubblePlanner::from_library(&lib).with_catchphrase(&cfg.catchphrase);
+        assert!(planner.catchphrase().is_some());
+        assert_eq!(planner.catchphrase().expect("已装配").frequency(), CatchphraseFrequency::Standard);
+        // 关闭开关 → 不注入。
+        planner.set_catchphrase_enabled(false);
+        assert!(!planner.catchphrase().expect("已装配").is_enabled());
+        for t in 0..12 {
+            let b = planner
+                .bubble_for_pool(&lib, "happy", &vars(), t * 30_000, false)
+                .expect("气泡应产出");
+            assert!(!b.text.contains(cfg.catchphrase.token.as_str()), "关闭后不注入");
+        }
+        // 重新打开 + 切高频 → 窗口 2。
+        planner.set_catchphrase_enabled(true);
+        planner.set_catchphrase_frequency(CatchphraseFrequency::High);
+        assert_eq!(planner.catchphrase().expect("已装配").frequency(), CatchphraseFrequency::High);
+        let mut contains = Vec::new();
+        // 时钟续接：首循环 happy 最后一次使用在 330s，二循环从 360s 起（同池冷却 20s 已过）。
+        let mut t = 360_000i64;
+        for i in 0..8 {
+            let pool = ["happy", "bored", "curious"][i % 3];
+            let b = planner
+                .bubble_for_pool(&lib, pool, &vars(), t, false)
+                .expect("气泡应产出");
+            contains.push(b.text.contains(cfg.catchphrase.token.as_str()));
+            t += 30_000;
+        }
+        for w in contains.windows(2) {
+            assert!(w.iter().filter(|&&c| c).count() <= 1, "高频=每 2 句 ≤1 句：{contains:?}");
+        }
     }
 
     #[test]
