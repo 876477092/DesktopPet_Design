@@ -1,6 +1,6 @@
 //! 配置中心：`ConfigService::load_all` —— 外置 JSON 的加载、合并与校验。
 //!
-//! 份数：**七份**（S1-M5 六份 + S5-M5 新增 `schedule.json`）。
+//! 份数：**八份**（S1-M5 六份 + S5-M5 新增 `schedule.json` + S8-M1 新增 `activities.json`）。
 //!
 //! 时序锚点：`02 §6.1`（`load_all` 配置加载 + 默认合并）；R19 兜底（`02 行 2434`）：
 //! 加载失败 → 内置默认启动，不崩。字段缺省由 serde `default` 补齐并记 warning
@@ -18,9 +18,9 @@
 pub mod model;
 
 pub use model::{
-    ActionCfg, ActionsConfig, AnimationConfig, CharacterConfig, CouplingCfg, DegradeCfg,
-    DegradeCpuCfg, DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig, ScheduleConfig,
-    SettingsConfig,
+    ActionCfg, ActionsConfig, ActivitiesConfig, AnimationConfig, CharacterConfig, CouplingCfg,
+    DegradeCfg, DegradeCpuCfg, DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig,
+    ScheduleConfig, SettingsConfig,
 };
 
 use std::path::Path;
@@ -53,7 +53,7 @@ pub enum ConfigError {
     },
 }
 
-/// 配置的捆绑结果（S5-M5 起 **七份**：新增 `schedule.json`）。
+/// 配置的捆绑结果（S8-M1 起 **八份**：新增 `activities.json`）。
 #[derive(Debug, Clone, Default)]
 pub struct ConfigBundle {
     /// settings.json。
@@ -70,6 +70,8 @@ pub struct ConfigBundle {
     pub animation: AnimationConfig,
     /// schedule.json（`01 FR-10`；S5-M5 交付）。
     pub schedule: ScheduleConfig,
+    /// activities.json（`02 §5.16`；S8-M1 交付）。
+    pub activities: ActivitiesConfig,
 }
 
 impl ConfigBundle {
@@ -137,12 +139,27 @@ impl ConfigService {
             SCHEDULE_TOP_FIELDS,
             &mut warnings,
         );
+        let activities = load_one::<ActivitiesConfig>(
+            config_dir,
+            "activities.json",
+            ACTIVITIES_TOP_FIELDS,
+            &mut warnings,
+        );
 
         validate_actions(&actions)?;
         check_coupling_cycles(&needs.coupling)?;
 
         Ok((
-            ConfigBundle { settings, character, actions, emotion, needs, animation, schedule },
+            ConfigBundle {
+                settings,
+                character,
+                actions,
+                emotion,
+                needs,
+                animation,
+                schedule,
+                activities,
+            },
             warnings,
         ))
     }
@@ -179,6 +196,8 @@ pub const ANIMATION_TOP_FIELDS: &[&str] = &[
 ];
 /// schedule.json 顶层字段（S5-M5：`01 FR-10` 提醒默认间隔 + 勿扰默认行为）。
 pub const SCHEDULE_TOP_FIELDS: &[&str] = &["version", "reminders", "doNotDisturb"];
+/// activities.json 顶层字段（S8-M1：`02 §5.16` 活动全局 + 岗位/课程/旅游目录）。
+pub const ACTIVITIES_TOP_FIELDS: &[&str] = &["version", "activity"];
 
 // ---------------------------------------------------------------------------
 // 内部实现
@@ -395,6 +414,7 @@ mod tests {
             "needs.json",
             "animation.json",
             "schedule.json",
+            "activities.json",
         ] {
             let src = resources_config_dir().join(file);
             let dst = dir.join(file);
@@ -497,7 +517,7 @@ mod tests {
         let dir = temp_dir("missing-files");
         let (bundle, warnings) =
             ConfigService::load_all(&dir).expect("空目录应降级默认而非报错");
-        assert_eq!(warnings.len(), 7, "七份缺失文件各记一条告警：{warnings:?}");
+        assert_eq!(warnings.len(), 8, "八份缺失文件各记一条告警：{warnings:?}");
         assert_eq!(bundle.emotion.thresholds.l4, 60);
         assert_eq!(bundle.settings.interaction.gravity_px_per_sec2, 2400.0);
         assert_eq!(bundle.needs.coupling.rules.len(), 16);
@@ -641,6 +661,7 @@ mod tests {
     fn schema_files_match_config_files() {
         for base in [
             "settings", "character", "actions", "emotion", "needs", "animation", "schedule",
+            "activities",
         ] {
             let cfg = resources_config_dir().join(format!("{base}.json"));
             let schema = resources_schema_dir().join(format!("{base}.schema.json"));

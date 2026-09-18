@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use dp_core::config::model::{
-    ActionsConfig, AnimationConfig, CharacterConfig, EmotionConfig, NeedsConfig, ScheduleConfig,
-    SettingsConfig,
+    ActionsConfig, ActivitiesConfig, AnimationConfig, CharacterConfig, EmotionConfig,
+    NeedsConfig, ScheduleConfig, SettingsConfig,
 };
 use dp_core::emotion::lines::LinesConfig;
 use schemars::schema::RootSchema;
@@ -31,7 +31,7 @@ use schemars::schema::RootSchema;
 /// 注：`lines.json` 的模型住在 `dp-core::emotion::lines`（台词库是**内容资产**，
 /// 由 `LinesLibrary` 自行加载与交叉校验），不在 `config::model` 的数值配置之列，
 /// 故此处单独取用；schema 产物仍落在同一目录，`gen-schema` 一并校验（`02 §7.7-5`）。
-const SCHEMA_TARGETS: [(&str, fn() -> RootSchema); 8] = [
+const SCHEMA_TARGETS: [(&str, fn() -> RootSchema); 9] = [
     ("settings", || schemars::schema_for!(SettingsConfig)),
     ("character", || schemars::schema_for!(CharacterConfig)),
     ("actions", || schemars::schema_for!(ActionsConfig)),
@@ -41,6 +41,8 @@ const SCHEMA_TARGETS: [(&str, fn() -> RootSchema); 8] = [
     ("lines", || schemars::schema_for!(LinesConfig)),
     // S5-M5：`schedule.json`（提醒默认间隔 + 勿扰默认行为）纳入 schema 校验。
     ("schedule", || schemars::schema_for!(ScheduleConfig)),
+    // S8-M1：`activities.json`（外出活动全局 + 岗位/课程/旅游目录）纳入 schema 校验。
+    ("activities", || schemars::schema_for!(ActivitiesConfig)),
 ];
 
 /// 解析 `--out <dir>` 参数；缺省时定位工程根下的 `resources/schema`。

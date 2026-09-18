@@ -1,0 +1,157 @@
+{
+  "version": 1,
+  "activity": {
+    "maxConcurrent": 1,
+    "tickSource": "wallClock",
+    "maxDurationMin": 240,
+    "quietHours": { "from": "23:00", "to": "05:00", "deferSettlement": "auto" },
+    "quietSettlement": {
+      "mute": true,
+      "style": "night",
+      "noPenalty": true,
+      "deferUntilHour": 7,
+      "replay": "simple",
+      "suppressPostcard": true
+    },
+    "recallPenalty": { "rewardRatio": 0.5, "mood": -4, "neglectAdd": 6, "roughStep": 0.15 },
+    "dailyJobLimit": 3,
+    "coinDailyCap": 350,
+    "economyScale": { "casual": 1.5, "standard": 1.0, "diligent": 0.7 },
+    "jobs": [
+      {
+        "id": "W-01",
+        "name": "咖啡店店员",
+        "icon": "assets/activity/job_cafe.png",
+        "wagePerMinute": 1.2,
+        "durationOptions": [15, 30, 60],
+        "unlock": { "affinityLevel": 0, "skills": {} },
+        "cost": { "energy": 12, "cleanliness": 12 },
+        "modifiers": [
+          { "when": "mood>=80", "rewardMultiplier": 1.15 },
+          { "when": "cleanliness<15", "rewardMultiplier": 0.6 },
+          { "when": "timeSegment==morning", "rewardMultiplier": 1.2 },
+          { "when": "satiety<20", "rewardMultiplier": 0.7 }
+        ],
+        "events": [
+          {
+            "id": "WACT-E-01",
+            "weight": 20,
+            "condition": "mood>=70",
+            "effects": { "rewardMultiplier": 1.3, "mood": 5 },
+            "lineKey": "job.we01"
+          },
+          {
+            "id": "WACT-E-02",
+            "weight": 12,
+            "condition": "",
+            "effects": { "rewardMultiplier": 0.0, "mood": -6, "cleanliness": -5 },
+            "lineKey": "job.we02"
+          }
+        ],
+        "actionIds": { "depart": "ACT-N-09", "return": "ACT-N-10", "deskLoop": "", "postcard": "" },
+        "sound": { "depart": "act_depart", "return": "act_return_job" }
+      },
+      {
+        "id": "W-02",
+        "name": "图书馆管理员助理",
+        "icon": "assets/activity/job_library.png",
+        "wagePerMinute": 1.0,
+        "durationOptions": [15, 30, 60],
+        "unlock": { "affinityLevel": 0, "skills": {} },
+        "cost": { "energy": 8, "cleanliness": 6 },
+        "modifiers": [
+          { "when": "mood>=80", "rewardMultiplier": 1.15 },
+          { "when": "cleanliness<15", "rewardMultiplier": 0.6 },
+          { "when": "satiety<20", "rewardMultiplier": 0.7 }
+        ],
+        "events": [
+          {
+            "id": "WACT-E-01",
+            "weight": 20,
+            "condition": "mood>=70",
+            "effects": { "rewardMultiplier": 1.3, "mood": 5 },
+            "lineKey": "job.we01"
+          }
+        ],
+        "actionIds": { "depart": "ACT-N-09", "return": "ACT-N-10", "deskLoop": "", "postcard": "" },
+        "sound": { "depart": "act_depart", "return": "act_return_job" }
+      },
+      {
+        "id": "W-03",
+        "name": "花店帮工",
+        "icon": "assets/activity/job_florist.png",
+        "wagePerMinute": 1.1,
+        "durationOptions": [15, 30, 60],
+        "unlock": { "affinityLevel": 0, "skills": { "etiquette": 2 } },
+        "cost": { "energy": 10, "cleanliness": 14 },
+        "modifiers": [
+          { "when": "mood>=80", "rewardMultiplier": 1.15 },
+          { "when": "cleanliness<15", "rewardMultiplier": 0.6 },
+          { "when": "satiety<20", "rewardMultiplier": 0.7 }
+        ],
+        "events": [],
+        "actionIds": { "depart": "ACT-N-09", "return": "ACT-N-10", "deskLoop": "", "postcard": "" },
+        "sound": { "depart": "act_depart", "return": "act_return_job" }
+      }
+    ],
+    "courses": [
+      {
+        "id": "CRS-01",
+        "name": "礼仪课",
+        "tuition": 30,
+        "durationOptions": [30, 60],
+        "skillType": "etiquette",
+        "cost": { "energy": 8, "cleanliness": 2 },
+        "pointFormula": "floor(durationMin/30 * (0.85+0.3*diligence) * (mood>=70 ? 1.1 : 0.9))",
+        "minPoints": 1,
+        "levelUpCost": "10*level",
+        "requireItem": "book_etiquette",
+        "actionIds": { "depart": "ACT-N-09", "return": "", "deskLoop": "ACT-N-11", "postcard": "" },
+        "sound": { "depart": null, "return": null }
+      }
+    ],
+    "trips": [
+      {
+        "id": "TR-01",
+        "name": "海边",
+        "durationMin": 120,
+        "cost": { "coin": 120, "ticketItem": "ticket_travel" },
+        "unlock": { "affinityLevel": 0, "skills": {} },
+        "postcardIntervalMin": 40,
+        "rewards": {
+          "photo": "photo_sea_01",
+          "souvenir": "item_shell",
+          "mood": 25,
+          "affinityExp": 40,
+          "cleanliness": -15
+        },
+        "weatherTable": [
+          {
+            "id": "TACT-E-01",
+            "weight": 55,
+            "condition": "",
+            "effects": { "rewardMultiplier": 1.1 },
+            "lineKey": "trip.weatherSun"
+          },
+          {
+            "id": "TACT-E-02",
+            "weight": 20,
+            "condition": "",
+            "effects": { "rewardMultiplier": 0.9, "cleanliness": -10 },
+            "lineKey": "trip.weatherRain"
+          },
+          {
+            "id": "TACT-E-06",
+            "weight": 30,
+            "condition": "",
+            "effects": { "mood": 3 },
+            "lineKey": "trip.missYou"
+          }
+        ],
+        "actionIds": { "depart": "ACT-N-12", "return": "ACT-N-14", "deskLoop": "", "postcard": "ACT-N-13" },
+        "sound": { "depart": "travel_depart", "return": "travel_return" }
+      }
+    ],
+    "postcard": { "sizePx": [160, 220], "position": "bottom-right", "draggable": true, "closable": true }
+  }
+}

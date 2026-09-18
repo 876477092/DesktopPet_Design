@@ -1,0 +1,909 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ActivitiesConfig",
+  "description": "`activities.json` 根：外出活动全局参数 + 岗位 / 课程 / 旅游目录。\n\n出处：`02 §5.16`（关键片段）+ `01 §6.13.3/6.13.4/6.13.5`（岗位 / 课程 / 目的地全表）。",
+  "type": "object",
+  "properties": {
+    "activity": {
+      "description": "活动全局参数（含三类目录）。",
+      "default": {
+        "coinDailyCap": 350,
+        "courses": [],
+        "dailyJobLimit": 3,
+        "economyScale": {
+          "casual": 1.5,
+          "diligent": 0.699999988079071,
+          "standard": 1.0
+        },
+        "jobs": [],
+        "maxConcurrent": 1,
+        "maxDurationMin": 240,
+        "postcard": {
+          "closable": true,
+          "draggable": true,
+          "position": "bottom-right",
+          "sizePx": [
+            160,
+            220
+          ]
+        },
+        "quietHours": {
+          "deferSettlement": "auto",
+          "from": "23:00",
+          "to": "05:00"
+        },
+        "quietSettlement": {
+          "deferUntilHour": 7,
+          "mute": true,
+          "noPenalty": true,
+          "replay": "simple",
+          "style": "night",
+          "suppressPostcard": true
+        },
+        "recallPenalty": {
+          "mood": -4.0,
+          "neglectAdd": 6.0,
+          "rewardRatio": 0.5,
+          "roughStep": 0.15000000596046448
+        },
+        "tickSource": "wallClock",
+        "trips": []
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ActivityGlobalCfg"
+        }
+      ]
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ActionRefCfg": {
+      "description": "演出动作引用（`02 §5.16` `actionIds`）。",
+      "type": "object",
+      "properties": {
+        "depart": {
+          "description": "出发演出动作。",
+          "default": "",
+          "type": "string"
+        },
+        "deskLoop": {
+          "description": "学习桌面循环动作。",
+          "default": "",
+          "type": "string"
+        },
+        "postcard": {
+          "description": "旅游明信片动作。",
+          "default": "",
+          "type": "string"
+        },
+        "return": {
+          "description": "回归演出动作。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ActivityEventCfg": {
+      "description": "随机事件（`02 §5.16` `events[]` / `weatherTable[]`）。",
+      "type": "object",
+      "properties": {
+        "condition": {
+          "description": "触发条件表达式（可为空 = 无条件）。",
+          "default": "",
+          "type": "string"
+        },
+        "effects": {
+          "description": "效果（收益乘子 / 数值变化）。",
+          "default": {
+            "cleanliness": null,
+            "durationAddMin": null,
+            "energy": null,
+            "itemId": null,
+            "mood": null,
+            "rewardMultiplier": null,
+            "skillPoints": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/EventEffectsCfg"
+            }
+          ]
+        },
+        "id": {
+          "description": "事件 ID（`WACT-E-01` / `TACT-E-01`…）。",
+          "default": "",
+          "type": "string"
+        },
+        "lineKey": {
+          "description": "台词键（`job.we01`…）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "weight": {
+          "description": "抽取权重。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ActivityGlobalCfg": {
+      "description": "活动全局参数（`02 §5.16` `activity` 段）。",
+      "type": "object",
+      "properties": {
+        "coinDailyCap": {
+          "description": "心币日入账上限（QI-05 定版 350；入账侧硬顶，消费随 S8-M5）。",
+          "default": 350,
+          "type": "integer",
+          "format": "int64"
+        },
+        "courses": {
+          "description": "课程目录（`01 §6.13.4`）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/CourseCfg"
+          }
+        },
+        "dailyJobLimit": {
+          "description": "打工日限（次）。",
+          "default": 3,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "economyScale": {
+          "description": "三档经济倍率（S8-M5 起消费）。",
+          "default": {
+            "casual": 1.5,
+            "diligent": 0.699999988079071,
+            "standard": 1.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/EconomyScaleCfg"
+            }
+          ]
+        },
+        "jobs": {
+          "description": "打工岗位目录（`01 §6.13.3`）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/JobCfg"
+          }
+        },
+        "maxConcurrent": {
+          "description": "同时进行活动数上限（唯一性：恒 1）。",
+          "default": 1,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "maxDurationMin": {
+          "description": "单次活动最长时长（分钟；超过该时长的档位不提供）。",
+          "default": 240,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "postcard": {
+          "description": "明信片挂件全局配置（D-2：画在宠物窗口内，只驻留 1 张）。",
+          "default": {
+            "closable": true,
+            "draggable": true,
+            "position": "bottom-right",
+            "sizePx": [
+              160,
+              220
+            ]
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/PostcardCfg"
+            }
+          ]
+        },
+        "quietHours": {
+          "description": "安静时段（23:00-05:00 不派遣）。",
+          "default": {
+            "deferSettlement": "auto",
+            "from": "23:00",
+            "to": "05:00"
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/QuietHoursCfg"
+            }
+          ]
+        },
+        "quietSettlement": {
+          "description": "深夜回归结算策略（D-1）。",
+          "default": {
+            "deferUntilHour": 7,
+            "mute": true,
+            "noPenalty": true,
+            "replay": "simple",
+            "style": "night",
+            "suppressPostcard": true
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/QuietSettlementCfg"
+            }
+          ]
+        },
+        "recallPenalty": {
+          "description": "提前召回惩罚（`01 §6.13.1`）。",
+          "default": {
+            "mood": -4.0,
+            "neglectAdd": 6.0,
+            "rewardRatio": 0.5,
+            "roughStep": 0.15000000596046448
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/RecallPenaltyCfg"
+            }
+          ]
+        },
+        "tickSource": {
+          "description": "计时源（恒 `\"wallClock\"`）。",
+          "default": "wallClock",
+          "type": "string"
+        },
+        "trips": {
+          "description": "旅游目的地目录（`01 §6.13.5`）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/TripCfg"
+          }
+        }
+      }
+    },
+    "CostCfg": {
+      "description": "出发消耗（`02 §5.16` `cost`）。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度消耗。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "energy": {
+          "description": "精力消耗。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "CourseCfg": {
+      "description": "课程（`01 §6.13.4` + `02 §5.16` `courses[]`）。",
+      "type": "object",
+      "properties": {
+        "actionIds": {
+          "description": "演出动作引用（出发 `ACT-N-09` / 桌面循环 `ACT-N-11`）。",
+          "default": {
+            "depart": "",
+            "deskLoop": "",
+            "postcard": "",
+            "return": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ActionRefCfg"
+            }
+          ]
+        },
+        "cost": {
+          "description": "出发消耗。",
+          "default": {
+            "cleanliness": 0.0,
+            "energy": 0.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CostCfg"
+            }
+          ]
+        },
+        "durationOptions": {
+          "description": "时长档位（分钟）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        },
+        "id": {
+          "description": "课程 ID（`CRS-01`…）。",
+          "default": "",
+          "type": "string"
+        },
+        "levelUpCost": {
+          "description": "升级所需技能点（`10*level`）。",
+          "default": "",
+          "type": "string"
+        },
+        "minPoints": {
+          "description": "最低技能点（1）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "name": {
+          "description": "课程名。",
+          "default": "",
+          "type": "string"
+        },
+        "pointFormula": {
+          "description": "技能点公式（`02 §5.16`：`floor(durationMin/30 * (0.85+0.3*diligence) * (mood>=70 ? 1.1 : 0.9))`）。",
+          "default": "",
+          "type": "string"
+        },
+        "requireItem": {
+          "description": "必需道具（如 `book_etiquette`；S8-M5 背包检查）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "skillType": {
+          "description": "技能类型（etiquette / cooking / talent / knowledge / fitness）。",
+          "default": "",
+          "type": "string"
+        },
+        "tuition": {
+          "description": "学费（心币；S8-M5 起扣款）。",
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "EconomyScaleCfg": {
+      "description": "三档经济倍率（`02 §5.16`：casual 1.5 / standard 1.0 / diligent 0.7）。",
+      "type": "object",
+      "properties": {
+        "casual": {
+          "description": "休闲档。",
+          "default": 1.5,
+          "type": "number",
+          "format": "float"
+        },
+        "diligent": {
+          "description": "勤奋档。",
+          "default": 0.699999988079071,
+          "type": "number",
+          "format": "float"
+        },
+        "standard": {
+          "description": "标准档。",
+          "default": 1.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "EventEffectsCfg": {
+      "description": "事件效果（`02 §5.16` `effects`）。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "durationAddMin": {
+          "description": "时长加成（分钟；`WACT-E-04` 加班 +10）。",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "energy": {
+          "description": "精力变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "itemId": {
+          "description": "产出道具（`WACT-E-03` 粉丝送礼）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mood": {
+          "description": "心情变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "rewardMultiplier": {
+          "description": "收益乘子。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "skillPoints": {
+          "description": "技能点加成。",
+          "default": null,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "JobCfg": {
+      "description": "打工岗位（`01 §6.13.3` + `02 §5.16` `jobs[]`）。",
+      "type": "object",
+      "properties": {
+        "actionIds": {
+          "description": "演出动作引用（`ACT-N-09` 出发 / `ACT-N-10` 回归）。",
+          "default": {
+            "depart": "",
+            "deskLoop": "",
+            "postcard": "",
+            "return": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ActionRefCfg"
+            }
+          ]
+        },
+        "cost": {
+          "description": "出发消耗（精力 / 清洁度）。",
+          "default": {
+            "cleanliness": 0.0,
+            "energy": 0.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/CostCfg"
+            }
+          ]
+        },
+        "durationOptions": {
+          "description": "时长档位（分钟；如 [15, 30, 60]）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        },
+        "events": {
+          "description": "打工随机事件表（`01 §6.13.3` WACT-E-*）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ActivityEventCfg"
+          }
+        },
+        "icon": {
+          "description": "图标资源（`assets/activity/job_*.png`）。",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "岗位 ID（`W-01`…）。",
+          "default": "",
+          "type": "string"
+        },
+        "modifiers": {
+          "description": "收益修正乘子（mood≥80 ×1.15 等）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ModifierCfg"
+          }
+        },
+        "name": {
+          "description": "岗位名（中文展示名）。",
+          "default": "",
+          "type": "string"
+        },
+        "sound": {
+          "description": "音效引用。",
+          "default": {
+            "depart": null,
+            "return": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/SoundRefCfg"
+            }
+          ]
+        },
+        "unlock": {
+          "description": "解锁条件（亲密度等级 / 技能；经济侧 S8-M5 消费）。",
+          "default": {
+            "affinityLevel": 0,
+            "skills": {}
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/UnlockCfg"
+            }
+          ]
+        },
+        "wagePerMinute": {
+          "description": "时薪（心币 / 分钟）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "ModifierCfg": {
+      "description": "收益修正乘子（`02 §5.16` `modifiers[]`：`when` 条件表达式 + 乘子）。",
+      "type": "object",
+      "properties": {
+        "rewardMultiplier": {
+          "description": "收益乘子。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "when": {
+          "description": "条件表达式（`mood>=80` / `cleanliness<15` / `timeSegment==morning`）。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "PostcardCfg": {
+      "description": "明信片挂件（`02 §5.16` `postcard`；D-2：画在宠物窗口内，只驻留 1 张）。",
+      "type": "object",
+      "properties": {
+        "closable": {
+          "description": "可关闭。",
+          "default": true,
+          "type": "boolean"
+        },
+        "draggable": {
+          "description": "可拖动。",
+          "default": true,
+          "type": "boolean"
+        },
+        "position": {
+          "description": "默认位置（`bottom-right` / `top-right` / `top-left` / `bottom-left`）。",
+          "default": "bottom-right",
+          "type": "string"
+        },
+        "sizePx": {
+          "description": "挂件尺寸（逻辑像素宽 × 高）。",
+          "default": [
+            160,
+            220
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "maxItems": 2,
+          "minItems": 2
+        }
+      }
+    },
+    "QuietHoursCfg": {
+      "description": "安静时段（`02 §5.16`：23:00-05:00）。",
+      "type": "object",
+      "properties": {
+        "deferSettlement": {
+          "description": "延后结算策略（恒 `\"auto\"`）。",
+          "default": "auto",
+          "type": "string"
+        },
+        "from": {
+          "description": "起始本地时刻（HH:MM）。",
+          "default": "23:00",
+          "type": "string"
+        },
+        "to": {
+          "description": "结束本地时刻（HH:MM）。",
+          "default": "05:00",
+          "type": "string"
+        }
+      }
+    },
+    "QuietSettlementCfg": {
+      "description": "深夜结算策略（D-1，`02 §5.16` `quietSettlement`）。",
+      "type": "object",
+      "properties": {
+        "deferUntilHour": {
+          "description": "延后补播小时（次日 07:00）。",
+          "default": 7,
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0.0
+        },
+        "mute": {
+          "description": "回归演出静音。",
+          "default": true,
+          "type": "boolean"
+        },
+        "noPenalty": {
+          "description": "深夜回归零惩罚。",
+          "default": true,
+          "type": "boolean"
+        },
+        "replay": {
+          "description": "补播版本（`simple` = 简版回归演出）。",
+          "default": "simple",
+          "type": "string"
+        },
+        "style": {
+          "description": "结算弹窗夜间样式。",
+          "default": "night",
+          "type": "string"
+        },
+        "suppressPostcard": {
+          "description": "该时段不推明信片。",
+          "default": true,
+          "type": "boolean"
+        }
+      }
+    },
+    "RecallPenaltyCfg": {
+      "description": "提前召回惩罚（`01 §6.13.1`：收益 ×0.5；Mood−4；P+6；rough+0.15）。",
+      "type": "object",
+      "properties": {
+        "mood": {
+          "description": "Mood 惩罚（-4）。",
+          "default": -4.0,
+          "type": "number",
+          "format": "float"
+        },
+        "neglectAdd": {
+          "description": "冷落压力惩罚（+6）。",
+          "default": 6.0,
+          "type": "number",
+          "format": "float"
+        },
+        "rewardRatio": {
+          "description": "收益比例（0.5）。",
+          "default": 0.5,
+          "type": "number",
+          "format": "float"
+        },
+        "roughStep": {
+          "description": "粗暴因子增量（+0.15）。",
+          "default": 0.15000000596046448,
+          "type": "number",
+          "format": "float"
+        }
+      }
+    },
+    "SoundRefCfg": {
+      "description": "音效引用（`02 §5.16` `sound`）。",
+      "type": "object",
+      "properties": {
+        "depart": {
+          "description": "出发音效。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "return": {
+          "description": "回归音效。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TripCfg": {
+      "description": "旅游目的地（`01 §6.13.5` + `02 §5.16` `trips[]`）。",
+      "type": "object",
+      "properties": {
+        "actionIds": {
+          "description": "演出动作引用（出发 `ACT-N-12` / 明信片 `ACT-N-13` / 回归 `ACT-N-14`）。",
+          "default": {
+            "depart": "",
+            "deskLoop": "",
+            "postcard": "",
+            "return": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ActionRefCfg"
+            }
+          ]
+        },
+        "cost": {
+          "description": "费用（心币 + 旅行券；S8-M5 起扣款）。",
+          "default": {
+            "coin": 0,
+            "ticketItem": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/TripCostCfg"
+            }
+          ]
+        },
+        "durationMin": {
+          "description": "时长（分钟；固定档）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "id": {
+          "description": "目的地 ID（`TR-01`…）。",
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "description": "目的地名。",
+          "default": "",
+          "type": "string"
+        },
+        "postcardIntervalMin": {
+          "description": "明信片间隔（分钟）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "rewards": {
+          "description": "产出（照片 / 纪念品 / Mood / 亲密度 / 清洁度）。",
+          "default": {
+            "affinityExp": 0.0,
+            "cleanliness": 0.0,
+            "mood": 0.0,
+            "photo": "",
+            "souvenir": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/TripRewardCfg"
+            }
+          ]
+        },
+        "unlock": {
+          "description": "解锁条件。",
+          "default": {
+            "affinityLevel": 0,
+            "skills": {}
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/UnlockCfg"
+            }
+          ]
+        },
+        "weatherTable": {
+          "description": "天气 / 随机事件表（`01 §6.13.5` TACT-E-*）。",
+          "default": [],
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ActivityEventCfg"
+          }
+        }
+      }
+    },
+    "TripCostCfg": {
+      "description": "旅游费用（`02 §5.16` `cost`）。",
+      "type": "object",
+      "properties": {
+        "coin": {
+          "description": "心币费用。",
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        },
+        "ticketItem": {
+          "description": "旅行券道具 ID。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "TripRewardCfg": {
+      "description": "旅游产出（`02 §5.16` `rewards`）。",
+      "type": "object",
+      "properties": {
+        "affinityExp": {
+          "description": "亲密度经验。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "cleanliness": {
+          "description": "清洁度变化（负 = 消耗）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "mood": {
+          "description": "Mood 收益。",
+          "default": 0.0,
+          "type": "number",
+          "format": "float"
+        },
+        "photo": {
+          "description": "照片道具 ID。",
+          "default": "",
+          "type": "string"
+        },
+        "souvenir": {
+          "description": "纪念品道具 ID。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "UnlockCfg": {
+      "description": "解锁条件（`02 §5.16`：亲密度等级 + 技能等级）。",
+      "type": "object",
+      "properties": {
+        "affinityLevel": {
+          "description": "所需亲密度等级（0 = 无要求）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "skills": {
+          "description": "所需技能等级（key = 技能类型；S8-M5 技能系统消费）。",
+          "default": {},
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      }
+    }
+  }
+}

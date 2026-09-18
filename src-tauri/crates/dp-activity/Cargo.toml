@@ -11,5 +11,11 @@ publish = false
 name = "dp_activity"
 path = "src/lib.rs"
 
-# S1-M1 骨架：不预先引入依赖，随模块落地时按 `02 §2.5` 增补。
+# S8-M1（2026-09-13 补登 P3-1）：空 crate 补声明 `dp-core`（依赖按接口实际使用增补；
+# 若 S7-M1 时段扩展致接口漂移，以本卡开工时点接口为准）。
 [dependencies]
+dp-core = { path = "../dp-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

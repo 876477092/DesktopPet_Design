@@ -2610,6 +2610,403 @@ pub struct HelpRequestCfg {
 }
 
 // ---------------------------------------------------------------------------
+// activities.json —— 外出活动配置（S8-M1，T-21 段 · 1/4；`02 §5.16`）
+// ---------------------------------------------------------------------------
+
+/// `activities.json` 根：外出活动全局参数 + 岗位 / 课程 / 旅游目录。
+///
+/// 出处：`02 §5.16`（关键片段）+ `01 §6.13.3/6.13.4/6.13.5`（岗位 / 课程 / 目的地全表）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ActivitiesConfig {
+    /// 配置版本。
+    pub version: u32,
+    /// 活动全局参数（含三类目录）。
+    pub activity: ActivityGlobalCfg,
+}
+
+impl Default for ActivitiesConfig {
+    fn default() -> Self {
+        Self { version: 1, activity: ActivityGlobalCfg::default() }
+    }
+}
+
+/// 活动全局参数（`02 §5.16` `activity` 段）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ActivityGlobalCfg {
+    /// 同时进行活动数上限（唯一性：恒 1）。
+    pub max_concurrent: u32,
+    /// 计时源（恒 `"wallClock"`）。
+    pub tick_source: String,
+    /// 单次活动最长时长（分钟；超过该时长的档位不提供）。
+    pub max_duration_min: u32,
+    /// 安静时段（23:00-05:00 不派遣）。
+    pub quiet_hours: QuietHoursCfg,
+    /// 深夜回归结算策略（D-1）。
+    pub quiet_settlement: QuietSettlementCfg,
+    /// 提前召回惩罚（`01 §6.13.1`）。
+    pub recall_penalty: RecallPenaltyCfg,
+    /// 打工日限（次）。
+    pub daily_job_limit: u32,
+    /// 心币日入账上限（QI-05 定版 350；入账侧硬顶，消费随 S8-M5）。
+    pub coin_daily_cap: i64,
+    /// 三档经济倍率（S8-M5 起消费）。
+    pub economy_scale: EconomyScaleCfg,
+    /// 打工岗位目录（`01 §6.13.3`）。
+    pub jobs: Vec<JobCfg>,
+    /// 课程目录（`01 §6.13.4`）。
+    pub courses: Vec<CourseCfg>,
+    /// 旅游目的地目录（`01 §6.13.5`）。
+    pub trips: Vec<TripCfg>,
+    /// 明信片挂件全局配置（D-2：画在宠物窗口内，只驻留 1 张）。
+    pub postcard: PostcardCfg,
+}
+
+impl Default for ActivityGlobalCfg {
+    fn default() -> Self {
+        Self {
+            max_concurrent: 1,
+            tick_source: "wallClock".to_string(),
+            max_duration_min: 240,
+            quiet_hours: QuietHoursCfg::default(),
+            quiet_settlement: QuietSettlementCfg::default(),
+            recall_penalty: RecallPenaltyCfg::default(),
+            daily_job_limit: 3,
+            coin_daily_cap: 350,
+            economy_scale: EconomyScaleCfg::default(),
+            jobs: Vec::new(),
+            courses: Vec::new(),
+            trips: Vec::new(),
+            postcard: PostcardCfg::default(),
+        }
+    }
+}
+
+/// 安静时段（`02 §5.16`：23:00-05:00）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QuietHoursCfg {
+    /// 起始本地时刻（HH:MM）。
+    pub from: String,
+    /// 结束本地时刻（HH:MM）。
+    pub to: String,
+    /// 延后结算策略（恒 `"auto"`）。
+    pub defer_settlement: String,
+}
+
+impl Default for QuietHoursCfg {
+    fn default() -> Self {
+        Self { from: "23:00".to_string(), to: "05:00".to_string(), defer_settlement: "auto".to_string() }
+    }
+}
+
+/// 深夜结算策略（D-1，`02 §5.16` `quietSettlement`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QuietSettlementCfg {
+    /// 回归演出静音。
+    pub mute: bool,
+    /// 结算弹窗夜间样式。
+    pub style: String,
+    /// 深夜回归零惩罚。
+    pub no_penalty: bool,
+    /// 延后补播小时（次日 07:00）。
+    pub defer_until_hour: u8,
+    /// 补播版本（`simple` = 简版回归演出）。
+    pub replay: String,
+    /// 该时段不推明信片。
+    pub suppress_postcard: bool,
+}
+
+impl Default for QuietSettlementCfg {
+    fn default() -> Self {
+        Self {
+            mute: true,
+            style: "night".to_string(),
+            no_penalty: true,
+            defer_until_hour: 7,
+            replay: "simple".to_string(),
+            suppress_postcard: true,
+        }
+    }
+}
+
+/// 提前召回惩罚（`01 §6.13.1`：收益 ×0.5；Mood−4；P+6；rough+0.15）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct RecallPenaltyCfg {
+    /// 收益比例（0.5）。
+    pub reward_ratio: f32,
+    /// Mood 惩罚（-4）。
+    pub mood: f32,
+    /// 冷落压力惩罚（+6）。
+    pub neglect_add: f32,
+    /// 粗暴因子增量（+0.15）。
+    pub rough_step: f32,
+}
+
+impl Default for RecallPenaltyCfg {
+    fn default() -> Self {
+        Self { reward_ratio: 0.5, mood: -4.0, neglect_add: 6.0, rough_step: 0.15 }
+    }
+}
+
+/// 三档经济倍率（`02 §5.16`：casual 1.5 / standard 1.0 / diligent 0.7）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct EconomyScaleCfg {
+    /// 休闲档。
+    pub casual: f32,
+    /// 标准档。
+    pub standard: f32,
+    /// 勤奋档。
+    pub diligent: f32,
+}
+
+impl Default for EconomyScaleCfg {
+    fn default() -> Self {
+        Self { casual: 1.5, standard: 1.0, diligent: 0.7 }
+    }
+}
+
+/// 打工岗位（`01 §6.13.3` + `02 §5.16` `jobs[]`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct JobCfg {
+    /// 岗位 ID（`W-01`…）。
+    pub id: String,
+    /// 岗位名（中文展示名）。
+    pub name: String,
+    /// 图标资源（`assets/activity/job_*.png`）。
+    pub icon: String,
+    /// 时薪（心币 / 分钟）。
+    pub wage_per_minute: f32,
+    /// 时长档位（分钟；如 [15, 30, 60]）。
+    pub duration_options: Vec<u32>,
+    /// 解锁条件（亲密度等级 / 技能；经济侧 S8-M5 消费）。
+    pub unlock: UnlockCfg,
+    /// 出发消耗（精力 / 清洁度）。
+    pub cost: CostCfg,
+    /// 收益修正乘子（mood≥80 ×1.15 等）。
+    pub modifiers: Vec<ModifierCfg>,
+    /// 打工随机事件表（`01 §6.13.3` WACT-E-*）。
+    pub events: Vec<ActivityEventCfg>,
+    /// 演出动作引用（`ACT-N-09` 出发 / `ACT-N-10` 回归）。
+    pub action_ids: ActionRefCfg,
+    /// 音效引用。
+    pub sound: SoundRefCfg,
+}
+
+/// 课程（`01 §6.13.4` + `02 §5.16` `courses[]`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CourseCfg {
+    /// 课程 ID（`CRS-01`…）。
+    pub id: String,
+    /// 课程名。
+    pub name: String,
+    /// 学费（心币；S8-M5 起扣款）。
+    pub tuition: i64,
+    /// 时长档位（分钟）。
+    pub duration_options: Vec<u32>,
+    /// 技能类型（etiquette / cooking / talent / knowledge / fitness）。
+    pub skill_type: String,
+    /// 出发消耗。
+    pub cost: CostCfg,
+    /// 技能点公式（`02 §5.16`：`floor(durationMin/30 * (0.85+0.3*diligence) * (mood>=70 ? 1.1 : 0.9))`）。
+    pub point_formula: String,
+    /// 最低技能点（1）。
+    pub min_points: u32,
+    /// 升级所需技能点（`10*level`）。
+    pub level_up_cost: String,
+    /// 必需道具（如 `book_etiquette`；S8-M5 背包检查）。
+    pub require_item: Option<String>,
+    /// 演出动作引用（出发 `ACT-N-09` / 桌面循环 `ACT-N-11`）。
+    pub action_ids: ActionRefCfg,
+}
+
+/// 旅游目的地（`01 §6.13.5` + `02 §5.16` `trips[]`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TripCfg {
+    /// 目的地 ID（`TR-01`…）。
+    pub id: String,
+    /// 目的地名。
+    pub name: String,
+    /// 时长（分钟；固定档）。
+    pub duration_min: u32,
+    /// 费用（心币 + 旅行券；S8-M5 起扣款）。
+    pub cost: TripCostCfg,
+    /// 解锁条件。
+    pub unlock: UnlockCfg,
+    /// 明信片间隔（分钟）。
+    pub postcard_interval_min: u32,
+    /// 产出（照片 / 纪念品 / Mood / 亲密度 / 清洁度）。
+    pub rewards: TripRewardCfg,
+    /// 天气 / 随机事件表（`01 §6.13.5` TACT-E-*）。
+    pub weather_table: Vec<ActivityEventCfg>,
+    /// 演出动作引用（出发 `ACT-N-12` / 明信片 `ACT-N-13` / 回归 `ACT-N-14`）。
+    pub action_ids: ActionRefCfg,
+}
+
+/// 解锁条件（`02 §5.16`：亲密度等级 + 技能等级）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct UnlockCfg {
+    /// 所需亲密度等级（0 = 无要求）。
+    pub affinity_level: u32,
+    /// 所需技能等级（key = 技能类型；S8-M5 技能系统消费）。
+    pub skills: std::collections::BTreeMap<String, u32>,
+}
+
+/// 出发消耗（`02 §5.16` `cost`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CostCfg {
+    /// 精力消耗。
+    pub energy: f32,
+    /// 清洁度消耗。
+    pub cleanliness: f32,
+}
+
+/// 收益修正乘子（`02 §5.16` `modifiers[]`：`when` 条件表达式 + 乘子）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ModifierCfg {
+    /// 条件表达式（`mood>=80` / `cleanliness<15` / `timeSegment==morning`）。
+    pub when: String,
+    /// 收益乘子。
+    pub reward_multiplier: f32,
+}
+
+/// 随机事件（`02 §5.16` `events[]` / `weatherTable[]`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ActivityEventCfg {
+    /// 事件 ID（`WACT-E-01` / `TACT-E-01`…）。
+    pub id: String,
+    /// 抽取权重。
+    pub weight: u32,
+    /// 触发条件表达式（可为空 = 无条件）。
+    pub condition: String,
+    /// 效果（收益乘子 / 数值变化）。
+    pub effects: EventEffectsCfg,
+    /// 台词键（`job.we01`…）。
+    pub line_key: Option<String>,
+}
+
+/// 事件效果（`02 §5.16` `effects`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct EventEffectsCfg {
+    /// 收益乘子。
+    pub reward_multiplier: Option<f32>,
+    /// 心情变化。
+    pub mood: Option<f32>,
+    /// 清洁度变化。
+    pub cleanliness: Option<f32>,
+    /// 精力变化。
+    pub energy: Option<f32>,
+    /// 时长加成（分钟；`WACT-E-04` 加班 +10）。
+    pub duration_add_min: Option<u32>,
+    /// 技能点加成。
+    pub skill_points: Option<u32>,
+    /// 产出道具（`WACT-E-03` 粉丝送礼）。
+    pub item_id: Option<String>,
+}
+
+/// 演出动作引用（`02 §5.16` `actionIds`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ActionRefCfg {
+    /// 出发演出动作。
+    pub depart: String,
+    /// 回归演出动作。
+    #[serde(default)]
+    pub r#return: String,
+    /// 学习桌面循环动作。
+    pub desk_loop: String,
+    /// 旅游明信片动作。
+    pub postcard: String,
+}
+
+/// 音效引用（`02 §5.16` `sound`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SoundRefCfg {
+    /// 出发音效。
+    pub depart: Option<String>,
+    /// 回归音效。
+    pub r#return: Option<String>,
+}
+
+/// 旅游费用（`02 §5.16` `cost`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TripCostCfg {
+    /// 心币费用。
+    pub coin: i64,
+    /// 旅行券道具 ID。
+    pub ticket_item: String,
+}
+
+/// 旅游产出（`02 §5.16` `rewards`）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TripRewardCfg {
+    /// 照片道具 ID。
+    pub photo: String,
+    /// 纪念品道具 ID。
+    pub souvenir: String,
+    /// Mood 收益。
+    pub mood: f32,
+    /// 亲密度经验。
+    pub affinity_exp: f32,
+    /// 清洁度变化（负 = 消耗）。
+    pub cleanliness: f32,
+}
+
+/// 明信片挂件（`02 §5.16` `postcard`；D-2：画在宠物窗口内，只驻留 1 张）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PostcardCfg {
+    /// 挂件尺寸（逻辑像素宽 × 高）。
+    pub size_px: [u32; 2],
+    /// 默认位置（`bottom-right` / `top-right` / `top-left` / `bottom-left`）。
+    pub position: String,
+    /// 可拖动。
+    pub draggable: bool,
+    /// 可关闭。
+    pub closable: bool,
+}
+
+impl Default for PostcardCfg {
+    fn default() -> Self {
+        Self { size_px: [160, 220], position: "bottom-right".to_string(), draggable: true, closable: true }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 单元测试（S2-M4 QA 补充：RoamCfg 向后兼容验收项）
 // ---------------------------------------------------------------------------
 

@@ -49,6 +49,7 @@ const BASE_NAMES = [
   'animation',
   'lines',
   'schedule',
+  'activities',
 ];
 
 const configDir = join(repoRoot, 'resources', 'config');

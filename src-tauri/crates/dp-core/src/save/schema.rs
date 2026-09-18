@@ -11,7 +11,7 @@
 //!   A. 内核承接段（S5-M1 起真实读写）   v / values / emotion.{neglect,sensitivity,state} / meta
 //!   B. 配置承接段（S5-M3/M4/M5 已接管）  pet.name / pet.catchphrase / settings.*
 //!   C. 占位段（S7-M2 / S7-M4 接管）      emotion.{personality,personalityRolled,adapt,rough} / needs
-//!   D. 占位段（S8-M5/M6/M7 接管）        economy / inventory / album / decor / photoWidget
+//!   D. 占位段（S8-M1 起接管 activity）    economy / inventory / album / decor / photoWidget
 //!                                        / skills / activity / activityCounter / counters
 //! ```
 //!
@@ -20,10 +20,15 @@
 //! `privacy` / `performance`）。划分口径：`settings.json` = 出厂默认 + 取值域（安装目录只读），
 //! 存档 B 段 = 用户改动后的有效值；`pet.name` 空串 = 未改名（取 `character.json.defaultName`）。
 //!
-//! C / D 两段在本卡**只冻结「字段名 + 默认值 + 往返不丢」三件事**，类型不发明领域语义：
+//! C / D 段在本卡**只冻结「字段名 + 默认值 + 往返不丢」三件事**，类型不发明领域语义：
 //! 用 `serde_json::Value` 承载（与 `crate::event::PetSnapshotV2.activity` 的既有先例同口径）。
 //! 理由：若在此凭空为经济 / 活动 / 背包造 Rust 类型，S8 落地时必然返工，且会把「空壳类型」
 //! 伪装成已完成契约。默认值逐项取自 `02 §5 K-7` 全表，已由 `default_save.json` 固化为模板。
+//!
+//! **S8-M1 口径**：`activity` 段由 `dp-activity::ActivitySave`（`phase` + `instance`）
+//! 序列化承载（**依赖方向 dp-activity → dp-core，故强类型住在活动 crate，本段保持
+//! `serde_json::Value` 冻结**）；dp-app 在恢复 / 落盘时互转。活动实例时间戳一律为
+//! UTC epoch 毫秒绝对量（`02 §5 K-12`：离线 / 跨时区不受影响）。
 //!
 //! ## 时间纪律（C3）
 //!
@@ -110,7 +115,8 @@ pub struct SaveFileV2 {
     pub photo_widget: serde_json::Value,
     /// 技能（占位段 D；归 S8/S9）。
     pub skills: serde_json::Value,
-    /// 外出活动实例（占位段 D；归 S8-M1，恒 `null` 或活动对象）。
+    /// 外出活动实例（段 D；S8-M1 起承载 `dp-activity::ActivitySave` 的 JSON：
+    /// `{ phase, instance }`；恒 `null` = 无进行中活动）。
     pub activity: serde_json::Value,
     /// 活动计数（占位段 D；归 S8-M1）。
     pub activity_counter: serde_json::Value,
@@ -917,6 +923,44 @@ mod tests {
         assert_eq!(save.economy["coin"], 1234);
         assert_eq!(save.decor[0]["id"], "d1");
         assert_eq!(save.counters.daily_tasks[0]["progress"], 2);
+    }
+
+    /// S8-M1：D 段 `activity` 承载 `dp-activity::ActivitySave` 的 JSON 形状
+    /// （`{ phase, instance }`）往返不丢——dp-core 不反向依赖 dp-activity，
+    /// 以冻结的 JSON 字面量验证「字段名 + 往返」契约（`02 §5 K-7` D 段三件事）。
+    #[test]
+    fn activity_segment_round_trips_save_json_shape() {
+        let mut save = SaveFileV2::default();
+        let running = serde_json::json!({
+            "phase": "running",
+            "instance": {
+                "id": 1700000000000_i64,
+                "kind": "work",
+                "defId": "W-01",
+                "startMs": 1700000000000_i64,
+                "endMs": 1700001800000_i64,
+                "plannedMs": 1800000,
+                "seed": 123456789,
+                "originVdc": [0.6, 0.8],
+                "postcardsSent": 0,
+                "postcardsDue": [],
+                "rolledEvents": [],
+                "recallTicket": false,
+                "deferredSettle": false
+            }
+        });
+        save.activity = running;
+        let json = serde_json::to_value(&save).expect("可序列化");
+        assert_eq!(json["activity"]["phase"], "running");
+        assert_eq!(json["activity"]["instance"]["defId"], "W-01");
+        assert_eq!(json["activity"]["instance"]["endMs"], 1700001800000_i64, "endMs 绝对量");
+        // 往返无损（Value 承载不改变形状）。
+        let back: SaveFileV2 = serde_json::from_value(json).expect("可反序列化");
+        assert_eq!(back.activity["instance"]["kind"], "work");
+        assert_eq!(back.activity["instance"]["plannedMs"], 1800000);
+        // 无进行中活动 → null。
+        let idle = SaveFileV2::default();
+        assert!(idle.activity.is_null());
     }
 
     #[test]
