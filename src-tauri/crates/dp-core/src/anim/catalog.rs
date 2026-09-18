@@ -150,13 +150,14 @@ mod tests {
     #[test]
     fn batch_a_has_29_enabled_and_24_disabled() {
         let catalog = ActionCatalog::load(&resources_config_dir()).expect("默认配置应可加载");
-        assert_eq!(catalog.enabled().count(), 29, "批次 A 应为 29 条启用动作");
-        assert_eq!(catalog.all().iter().filter(|a| a.disabled).count(), 24, "未交付应为 24 条");
-        // 启用动作全部落在批次 A 类别（move/idle/interact/emotion）。
+        // S8-M4：批次 C 活动 8 条（ACT-N-09~16）已启用 → 37 启用 / 16 禁用。
+        assert_eq!(catalog.enabled().count(), 37, "S8-M4 后应为 37 条启用动作（批次 A 29 + 活动 8）");
+        assert_eq!(catalog.all().iter().filter(|a| a.disabled).count(), 16, "未交付应为 16 条（B 8 + S/P 8）");
+        // 启用动作类别 = 批次 A（move/idle/interact/emotion）+ 批次 C 活动（activity）。
         for action in catalog.enabled() {
             assert!(
-                matches!(action.category.as_str(), "move" | "idle" | "interact" | "emotion"),
-                "启用动作 {} 类别应为批次 A：{}",
+                matches!(action.category.as_str(), "move" | "idle" | "interact" | "emotion" | "activity"),
+                "启用动作 {} 类别应为批次 A/活动：{}",
                 action.id,
                 action.category
             );
@@ -208,13 +209,13 @@ mod tests {
         assert!(item.looping);
         assert!(item.mirror, "ACT-M-01 元数据 mirror=true");
 
-        // 全量图集注入 → 29 条播放项（disabled 一律不派生）。
+        // 全量图集注入 → 37 条播放项（disabled 一律不派生；S8-M4 批次 C 活动 8 条启用）。
         let all: Vec<&str> = catalog.all().iter().map(|a| a.id.as_str()).collect();
         let counts = &move |id: &str| -> Option<u32> {
             if all.contains(&id) { Some(8) } else { None }
         };
         let items = catalog.play_items(counts, 2_000);
-        assert_eq!(items.len(), 29, "批次 A 全量派生应为 29 条");
+        assert_eq!(items.len(), 37, "S8-M4 后全量派生应为 37 条（29 + 活动 8）");
         assert!(
             items.iter().all(|i| catalog.is_enabled(&i.action_id)),
             "播放项不得包含 disabled 动作"

@@ -38,7 +38,12 @@ pub const JOB_WAGE_BASE: f32 = 1.0;
 ///
 /// `def` 为三类配置之一（`JobCfg` / `CourseCfg` / `TripCfg`）；`ratio` 为已完成
 /// 比例（正常 1.0；提前召回 = `elapsed/planned` 截断 [0,1]）；`kind` 为召回类别。
+///
+/// 参数较多（8）系**分派入口显式化**：`job/course/trip` 三配置与 `inputs/ratio/
+/// recall_kind` 均由 `ActivityRuntime::confirm_reported` 单点组装，打包结构体
+/// 会引入无收益中间层；以 `#[allow]` 保留可读分派签名。
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn settle(
     kind: ActivityKind,
     job: Option<&JobCfg>,

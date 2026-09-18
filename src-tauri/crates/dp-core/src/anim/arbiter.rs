@@ -9,8 +9,9 @@
 //!     打断与差 1 循环段解除）都记录冷却锚点，窗口内的合格请求进队列等待
 //!     [`ActionArbiter::poll`] 活性提升；
 //!   - **R-A 演出类不可打断**（`02 §5.11`）：`performance=true`（ACT-N-02/07/09/
-//!     10/12/14）→ 运行期 `min_interrupt_priority = 255`；不可打断的 current
-//!     对任何请求返回 [`Arbitration::Suppressed`]（不进队列）；
+//!     10/12/14，S8-M4 起 N-09/10/12/14 随批次 C 启用）→ 运行期
+//!     `min_interrupt_priority = 255`；不可打断的 current 对任何请求返回
+//!     [`Arbitration::Suppressed`]（不进队列）；
 //!   - **R-B 情绪压制求助类**（`01 §6.3.1` v1.1）：current 优先级 ≥ 请求的
 //!     `suppressed_by_emotion_priority`（N-01/05/06 = 7）→ 直接 [`Arbitration::Dropped`]
 //!     （她生气时不会撒娇讨食）；
@@ -358,6 +359,16 @@ impl ActionArbiter {
         self.current.as_ref()
     }
 
+    /// 当前在播或队列中是否存在指定动作 ID（调用方「每拍循环演出」幂等守卫，
+    /// S8-M4：学习桌面循环 `ACT-N-11` 防重复提交堆积）。
+    #[must_use]
+    pub fn has_action(&self, id: &str) -> bool {
+        if self.current.as_ref().is_some_and(|a| a.request.id == id) {
+            return true;
+        }
+        self.queue.iter().any(|p| p.request.id == id)
+    }
+
     /// 是否正处于演出类动作播放中（R-A：演出期间暂停 P 累积）。
     ///
     /// 接口预留：S7-M3 接入 `TickEnv.performing`，本阶段只暴露查询。
@@ -546,6 +557,52 @@ mod tests {
             source: ActionSource::Interaction,
             suppressed_by_emotion_priority: 0,
         }
+    }
+
+    /// S8-M4：`has_action` 查询（在播 / 排队幂等守卫）。
+    #[test]
+    fn has_action_covers_current_and_queue() {
+        let mut arb = ActionArbiter::new();
+        assert!(!arb.has_action("ACT-N-11"), "空仲裁器不命中");
+        // 无 current → 直接起播 → 在播命中。
+        let verdict = arb.submit(req("ACT-N-11", 6), 0);
+        assert!(matches!(verdict, Arbitration::Play));
+        assert!(arb.has_action("ACT-N-11"));
+        // 更高优先级打断（差 ≥2，可打断）→ 打断者起播、被替换者**丢弃**（仲裁语义：
+        // 打断不保留被替换者；学习循环经 submit 重新提交 + 入队恢复，不依赖保留）。
+        let intr = ActionRequest {
+            id: "ACT-N-09".to_string(),
+            priority: 9,
+            interruptible: true,
+            min_interrupt_priority: 0,
+            performance: false,
+            fade_ms: 200,
+            looping: false,
+            loop_range: None,
+            source: ActionSource::Activity,
+            suppressed_by_emotion_priority: 0,
+        };
+        let v2 = arb.submit(intr, 0);
+        assert!(matches!(v2, Arbitration::Interrupt { .. }));
+        assert!(arb.has_action("ACT-N-09"), "打断者在播应命中");
+        assert!(!arb.has_action("ACT-N-11"), "被替换者按打断语义丢弃");
+        // 低优先级请求（差 <2）→ 入队 → 排队项命中（学习循环幂等守卫覆盖队列）。
+        let low = ActionRequest {
+            id: "ACT-N-04".to_string(),
+            priority: 4,
+            interruptible: true,
+            min_interrupt_priority: 0,
+            performance: false,
+            fade_ms: 200,
+            looping: false,
+            loop_range: None,
+            source: ActionSource::Ambient,
+            suppressed_by_emotion_priority: 0,
+        };
+        let v3 = arb.submit(low, 0);
+        assert!(matches!(v3, Arbitration::Queued { .. } | Arbitration::Dropped));
+        assert!(arb.has_action("ACT-N-04"), "排队项应命中");
+        assert!(!arb.has_action("ACT-N-13"), "未出现动作不命中");
     }
 
     /// 工程根：dp-core 位于 crates/dp-core，上溯三级（无盘符字面量，C1）。

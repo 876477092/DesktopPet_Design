@@ -3,6 +3,7 @@ import { resizeCanvasToWindow } from './shared/coords';
 import {
   invokeCommand,
   listenEvent,
+  parseActivitySnapshot,
   parseBubbleCmd,
   parseCoaxCmd,
   parseMenuCmd,
@@ -10,6 +11,7 @@ import {
   parseRenderFrameCmd,
 } from './shared/ipc';
 import { PET_EVENT } from './shared/types';
+import { ActivityCard, PostcardWidget } from './renderer/activityWidgets';
 import { AtlasCache } from './renderer/AtlasCache';
 import { BubbleLayer } from './renderer/BubbleLayer';
 import { DomBubbleView, DomMenuView, DomOverlayView, DomParticleView } from './renderer/DomLayers';
@@ -152,6 +154,15 @@ async function bootstrapPetWindow(): Promise<void> {
   const overlay = new OverlayLayer(overlayView, {
     onReasonCardRequest: () => console.info('[pet] 请求情绪原因卡（T-26 接入）'),
   });
+
+  // S8-M3：活动卡 + 明信片挂件（数据源为 1Hz `pet://state` 快照的活动段；
+  // 召回按钮经 `pet_recall` 命令投递，C8 零新增事件）。
+  const activityCard = new ActivityCard(overlayRoot, () => {
+    void invokeCommand('pet_recall').catch((err: unknown) =>
+      console.warn('[pet] pet_recall 调用降级：', err),
+    );
+  });
+  const postcards = new PostcardWidget(overlayRoot);
   const particles = new ParticleLayer(particleView);
   const menu = new MenuLayer(menuView, {
     onCommand: (id) => {
@@ -225,6 +236,22 @@ async function bootstrapPetWindow(): Promise<void> {
     menu.open({ x: cmd.localX, y: cmd.localY });
   });
 
+  // pet://state 被动订阅（02 §7.6 已登记；S8-M3 活动段消费）——活动卡 / 明信片挂件。
+  // 载荷为 `PetSnapshotV2`，只取 `activity` 段解析；解析失败 warn 跳过（02 §7.4）。
+  const unlistenState = await listenEvent<unknown>(PET_EVENT.STATE, (payload) => {
+    const activity =
+      payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+        ? (payload as Record<string, unknown>).activity
+        : null;
+    const snap = parseActivitySnapshot(activity);
+    if (snap === null) {
+      console.warn('[pet] pet://state 活动段解析失败，跳过');
+      return;
+    }
+    activityCard.setSnapshot(snap);
+    postcards.setSnapshot(snap);
+  });
+
   // pet://coax 被动订阅（S4-M3，02 §7.6 已登记）——道歉三部曲进度环 + 离家态。
   // 上游 CoaxFlow 已完成中断回退（回退 50%）等全部结算，本层**只显示**（防双份真相）。
   const unlistenCoax = await listenEvent<unknown>(PET_EVENT.COAX, (payload) => {
@@ -238,6 +265,7 @@ async function bootstrapPetWindow(): Promise<void> {
 
   window.addEventListener('beforeunload', () => {
     unlistenFrame();
+    unlistenState();
     unlistenBubble();
     unlistenFx();
     unlistenMenu();

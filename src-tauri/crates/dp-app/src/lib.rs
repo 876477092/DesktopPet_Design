@@ -90,7 +90,10 @@ pub fn run() {
             commands::save_status,
             commands::save_command,
             // S6-M2：前端帧绘制回执（渲染看门狗计数源，`02 §5 K-8`）。
-            bridge::frame_receipt
+            bridge::frame_receipt,
+            // S8-M1/M3：活动派遣 / 召回（前端活动卡按钮；`01 §6.13`）。
+            commands::pet_dispatch,
+            commands::pet_recall
         ]);
 
     // 仅 Windows 落平台窗口层（本项目仅 Windows 目标）。

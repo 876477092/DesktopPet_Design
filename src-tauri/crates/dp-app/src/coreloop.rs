@@ -384,13 +384,17 @@ impl StandSurface for SharedSurface {
     }
 }
 
-/// S8-M1：活动演出槽位（`actionIds.depart / return`；S8-M4 演出接线）。
+/// S8-M1/M4：活动演出槽位（`actionIds`；S8-M4 演出接线全量启用）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActivitySlot {
     /// 出发演出（ACT-N-09 / ACT-N-12）。
     Depart,
     /// 回归演出（ACT-N-10 / ACT-N-14）。
     Return,
+    /// 学习桌面循环演出（ACT-N-11，S8-M4）。
+    DeskLoop,
+    /// 旅游明信片演出（ACT-N-13，S8-M4）。
+    Postcard,
 }
 
 /// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
@@ -1798,20 +1802,26 @@ impl CoreLoopState {
         for outcome in out {
             match outcome {
                 ActivityOutcome::PostcardDue { instance, at_ms } => {
-                    // S8-M3：明信片挂件（本卡先落存档计数 + 日志；挂件事件通道归 S8-M3）。
+                    // S8-M3/M4：明信片落存档计数 + 挂件 UI（快照驱动）+ 寄明信片演出
+                    //（`actionIds.postcard` → ACT-N-13；不可打断短演出，播毕链尾推进）。
                     eprintln!(
                         "[dp-app] 旅游明信片到期：{}（第 {} 张 @{at_ms}）",
                         instance.def_id, instance.postcards_sent
                     );
+                    self.submit_activity_play(ActivitySlot::Postcard);
                     self.request_save();
                 }
                 ActivityOutcome::TimeUp(inst) => {
                     // 到期 → 回归演出（S8-M4 启用后播；未启用降级 → 下一拍直接结算）。
+                    // 学习桌面循环演出（ACT-N-11 looping）到期时先停播收尾，再走回归。
                     eprintln!(
                         "[dp-app] 活动 {}（{}）到期，进入回归演出",
                         inst.def_id,
                         inst.kind.label()
                     );
+                    if inst.kind == ActivityKind::Study {
+                        self.stop_study_loop(now_ms as u64);
+                    }
                     self.submit_activity_play(ActivitySlot::Return);
                     self.request_save();
                 }
@@ -1827,8 +1837,46 @@ impl CoreLoopState {
                 _ => {}
             }
         }
+        // S8-M4：学习桌面循环演出（Running 期间循环播 `desk_loop` → ACT-N-11；
+        // `has_action` 幂等守卫——已播/已排队不重复提交，防队列堆积）。
+        if self.activity_runtime.phase() == ActivityPhase::Running
+            && self
+                .activity_runtime
+                .current()
+                .is_some_and(|i| i.kind == ActivityKind::Study)
+        {
+            self.submit_study_loop();
+        }
         // 演出闭环（不依赖播放完成回调的精确时序：1Hz 轮询 + drain_finished 推进队列）。
         self.step_activity_performance(now_ms);
+    }
+
+    /// 学习桌面循环演出提交（`desk_loop` → ACT-N-11；幂等守卫见 `has_action`）。
+    fn submit_study_loop(&mut self) {
+        let Some(action_id) = self.activity_play_id(ActivitySlot::DeskLoop) else {
+            return;
+        };
+        if action_id.is_empty() || self.arbiter.has_action(&action_id) {
+            return;
+        }
+        self.submit_play_by_id(&action_id, ActionSource::Activity);
+    }
+
+    /// 学习循环演出停播（到期收尾：仅当 current 恰为 `desk_loop` 循环动作时停播
+    /// 并推进仲裁链；被用户交互打断后 current 已非学习动作 → no-op，不误停）。
+    fn stop_study_loop(&mut self, now_ms: u64) {
+        let Some(action_id) = self.activity_play_id(ActivitySlot::DeskLoop) else {
+            return;
+        };
+        if action_id.is_empty()
+            || !self
+                .arbiter
+                .current()
+                .is_some_and(|a| a.request.id == action_id)
+        {
+            return;
+        }
+        self.stop_looping_current(now_ms);
     }
 
     /// 演出闭环：Preparing（出发演出播毕 / 未启用）→ `confirm_departed`；
@@ -1864,20 +1912,27 @@ impl CoreLoopState {
         let Some(action_id) = self.activity_play_id(slot) else {
             return;
         };
+        self.submit_play_by_id(&action_id, ActionSource::Activity);
+    }
+
+    /// 通用演出提交（目录缺失 / `disabled`（批次 C 未交付）→ 降级记录，不 panic；
+    /// 演出闭环由 [`Self::step_activity_performance`] 兜底推进；S8-M4 起活动演出
+    /// 源为 [`ActionSource::Activity`]（仲裁器分源口径，`02 §4.3` 冻结词汇））。
+    fn submit_play_by_id(&mut self, action_id: &str, source: ActionSource) {
         if action_id.is_empty() {
             return;
         }
-        let Some(cfg) = self.catalog.find(&action_id) else {
+        let Some(cfg) = self.catalog.find(action_id) else {
             eprintln!("[dp-app] 活动演出动作 {action_id} 不在目录（降级不提交）");
             return;
         };
-        let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
+        let Some(request) = ActionRequest::from_cfg(cfg, source) else {
             eprintln!("[dp-app] 活动演出动作 {action_id} 未启用（批次 C 未交付）→ 降级");
             return;
         };
         let now = self.wall.now_ms().max(0) as u64;
         let verdict = self.arbiter.submit(request, now);
-        self.settle_play(verdict, &action_id);
+        self.settle_play(verdict, action_id);
     }
 
     /// 槽位动作 ID（当前实例 `actionIds`；无实例 → `None`）。
@@ -1886,6 +1941,8 @@ impl CoreLoopState {
         Some(match slot {
             ActivitySlot::Depart => ids.depart.clone(),
             ActivitySlot::Return => ids.r#return.clone(),
+            ActivitySlot::DeskLoop => ids.desk_loop.clone(),
+            ActivitySlot::Postcard => ids.postcard.clone(),
         })
     }
 
@@ -1940,6 +1997,11 @@ impl CoreLoopState {
                 );
                 self.apply_reward(&reward, now);
                 self.activity_runtime.clear();
+                // S8-M4：结算后 Energy<40 → 疲惫喘气演出（ACT-N-16 looping，
+                // `01 §6.13`；低能量打工/学习收尾表现）。
+                if self.emotion.state.values.energy < 40.0 {
+                    self.submit_play_by_id("ACT-N-16", ActionSource::Activity);
+                }
                 self.request_save();
             }
             Err(err) => eprintln!("[dp-app] 活动结算失败（保持 Returning 待重试）：{err}"),
@@ -3641,6 +3703,119 @@ mod tests {
         state.business_tick_present(wall.as_ref());
         let idle = state.activity_snapshot_json().expect("空闲快照");
         assert_eq!(idle["running"], false);
+    }
+
+    // -----------------------------------------------------------------------
+    // S8-M4：批次 C 活动演出接入（出发演出实播 / 学习桌面循环 / 疲惫喘气）
+    // -----------------------------------------------------------------------
+
+    /// S8-M4：单动作启用目录（活动演出测试专用；字段对齐 `actions.json` 口径）。
+    fn one_action_catalog(id: &str, name: &str, priority: u32, looping: bool, performance: bool) -> ActionCatalog {
+        ActionCatalog::from_actions(vec![ActionCfg {
+            id: id.to_string(),
+            name: name.to_string(),
+            category: "activity".to_string(),
+            priority,
+            interruptible: !performance,
+            looping,
+            fps: 12,
+            fade_ms: 200,
+            disabled: false,
+            ..ActionCfg::default()
+        }])
+    }
+
+    /// 派遣打工 → 出发演出实播（ACT-N-09 in-flight）；播毕回报 → 推进 Running。
+    #[test]
+    fn activity_dispatch_plays_departure_action_and_advances() {
+        let catalog = one_action_catalog("ACT-N-09", "打工准备", 7, false, true);
+        let (mut state, wall) = activity_state(catalog, T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Preparing);
+        assert!(
+            state.arbiter.current().is_some_and(|a| a.request.id == "ACT-N-09"),
+            "出发演出应已提交在播（批次 C 启用）"
+        );
+        // 演出在播 → 下一拍仍停留 Preparing（不提前推进）。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Preparing);
+        // 模拟播放完成回报（播放器经 drain_finished 的语义同构：on_action_finished）。
+        let _ = state.arbiter.on_action_finished(T0 as u64 + 1_000);
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+    }
+
+    /// 结算后 Energy<40 → 疲惫喘气演出（ACT-N-16；`01 §6.13`）。
+    #[test]
+    fn activity_settle_low_energy_plays_tired_pant() {
+        let catalog = one_action_catalog("ACT-N-16", "疲惫喘气", 4, true, false);
+        let (mut state, wall) = activity_state(catalog, T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        // 出发演出不在目录 → 降级，下一拍 Running。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // 低能量场景（打工后疲惫）。
+        state.emotion.state.values.energy = 30.0;
+        wall.set_now_ms(T0 + 30 * 60_000 + 1_000);
+        state.business_tick_present(wall.as_ref());
+        // 回归演出不在目录 → 同拍结算；Energy<40 → ACT-N-16 已提交。
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Idle);
+        assert!(
+            state.arbiter.current().is_some_and(|a| a.request.id == "ACT-N-16"),
+            "结算后低能量应播疲惫喘气"
+        );
+    }
+
+    /// 学习桌面循环：Running 期间循环播 ACT-N-11（幂等不堆积）；到期停播收尾。
+    #[test]
+    fn activity_study_plays_desk_loop_and_stops_on_timeup() {
+        let catalog = one_action_catalog("ACT-N-11", "学习", 6, true, false);
+        let (mut state, wall) = activity_state(catalog, T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "study".into(),
+                def_id: "CRS-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        // 出发演出不在目录 → 降级，下一拍 Running。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // Running & study → 下一拍提交 ACT-N-11（学习循环在播）。
+        state.business_tick_present(wall.as_ref());
+        assert!(
+            state.arbiter.current().is_some_and(|a| a.request.id == "ACT-N-11"),
+            "学习循环应已提交在播"
+        );
+        // 幂等守卫：下一拍不重复提交（current 仍为 ACT-N-11，不堆积队列）。
+        state.business_tick_present(wall.as_ref());
+        assert!(
+            state.arbiter.current().is_some_and(|a| a.request.id == "ACT-N-11"),
+            "学习循环持续在播"
+        );
+        // 到期：学习循环停播收尾 → 无回归动作 → 同拍结算 Idle。
+        wall.set_now_ms(T0 + 30 * 60_000 + 1_000);
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Idle);
+        assert!(
+            !state.arbiter.current().is_some_and(|a| a.request.id == "ACT-N-11"),
+            "学习循环到期应停播"
+        );
     }
 
     /// S3-M4 拖拽/甩出目录（ACT-M-06 + ACT-T-06/07/08；元数据逐字段对齐

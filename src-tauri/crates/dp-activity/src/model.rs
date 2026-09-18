@@ -161,7 +161,7 @@ impl ActivityInstance {
 }
 
 /// 已抽取的随机事件（持久化记录，离线回归时不重复计）。
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ActivityEventRoll {
     /// 事件 ID（`WACT-E-01` / `TACT-E-01`…）。
@@ -170,12 +170,6 @@ pub struct ActivityEventRoll {
     pub at_ms: i64,
     /// 事件权重（配置值，供审计）。
     pub weight: u32,
-}
-
-impl Default for ActivityEventRoll {
-    fn default() -> Self {
-        Self { event_id: String::new(), at_ms: 0, weight: 0 }
-    }
 }
 
 /// 召回类别（决定收益比例与惩罚口径；`02 §5.14` 异常表）。

@@ -479,10 +479,11 @@ mod tests {
         assert!(bundle.schedule.do_not_disturb.keep_idle_anim);
         assert!(bundle.schedule.do_not_disturb.mute_audio);
 
-        // actions：53 条全量；批次 A 29 条启用、B/C 24 条禁用。
+        // actions：53 条全量；批次 A 29 条启用；批次 B（N-01~08）8 条禁用；
+        // 批次 C：活动 8 条（N-09~16，S8-M4 已启用）、彩蛋/感知 8 条（S/P）禁用。
         assert_eq!(bundle.actions().len(), 53);
-        assert_eq!(bundle.enabled_actions().count(), 29);
-        assert_eq!(bundle.actions().iter().filter(|a| a.disabled).count(), 24);
+        assert_eq!(bundle.enabled_actions().count(), 37);
+        assert_eq!(bundle.actions().iter().filter(|a| a.disabled).count(), 16);
         // R-A 演出类：ACT-N-02/07/09/10/12/14。
         let performances: Vec<&str> = bundle
             .actions()

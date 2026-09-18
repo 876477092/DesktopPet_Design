@@ -124,6 +124,56 @@ pub fn pet_emotion_command(app: AppHandle, command: EmotionCommand) -> Result<()
 }
 
 // ---------------------------------------------------------------------------
+// S8-M1/M3：活动命令（前端活动卡「出发 / 召回」按钮；`01 §6.13`）
+// ---------------------------------------------------------------------------
+
+/// 派遣外出活动（前端 `invoke('pet_dispatch', { kind, defId, durationMin })`）。
+///
+/// 只做**投递**：`CoreInput::ActivityDispatch` 交给 core-loop 逻辑档，前置校验
+/// （唯一性 / AC-36 / RV-07/03/01 / 安静时段）在 core-loop 以**当时内核快照**执行；
+/// 被拒时前端经 1Hz `pet://state` 快照的 `activity.phase` 保持 `idle` 感知。
+///
+/// # Errors
+/// 入站通道尚未装配（纯逻辑模式 / core-loop 未起）时返回中文可读错误串。
+#[tauri::command]
+pub fn pet_dispatch(
+    app: AppHandle,
+    kind: String,
+    def_id: String,
+    duration_min: u32,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法派遣活动".to_string())?;
+    channel.push(crate::bridge::CoreInput::ActivityDispatch {
+        kind,
+        def_id,
+        duration_min,
+    });
+    Ok(())
+}
+
+/// 提前召回进行中的活动（前端 `invoke('pet_recall')`）。
+///
+/// 只做**投递**：`CoreInput::ActivityRecall` 交给 core-loop（Running → Returning，
+/// 收益按已完成比例 ×0.5 + P+6 + rough+0.15，`02 §5.14`）。
+///
+/// # Errors
+/// 入站通道尚未装配时返回中文可读错误串。
+#[tauri::command]
+pub fn pet_recall(app: AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法召回活动".to_string())?;
+    channel.push(crate::bridge::CoreInput::ActivityRecall);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // S5-M4：设置命令（设置页 ⇄ 应用层设置状态；`01 FR-7` / `02 §7.6 pet://config`）
 // ---------------------------------------------------------------------------
 

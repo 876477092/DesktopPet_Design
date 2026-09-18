@@ -13,6 +13,7 @@ import {
   BUBBLE_DWELL_MIN_MS,
   FRAME_CMD_VERSION,
   parseBubbleCmd,
+  parseActivitySnapshot,
   parseRenderFrameCmd,
 } from './ipc';
 
@@ -199,5 +200,67 @@ describe('parseBubbleCmd（BubbleCmd v1 前向兼容解析，S3-M5）', () => {
     const cmd = parseBubbleCmd({ text: '' });
     expect(cmd).not.toBeNull();
     expect(cmd?.text).toBe('');
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// S8-M3：parseActivitySnapshot（`pet://state` 活动段）
+// ---------------------------------------------------------------------------
+
+describe('parseActivitySnapshot', () => {
+  it('解析完整活动段（running + instance）', () => {
+    const snap = parseActivitySnapshot({
+      phase: 'running',
+      running: true,
+      instance: {
+        kind: 'work',
+        defId: 'W-01',
+        progressRatio: 0.5,
+        remainingMs: 900_000,
+        postcardsSent: 0,
+        deferredSettle: false,
+      },
+    });
+    expect(snap).not.toBeNull();
+    expect(snap!.phase).toBe('running');
+    expect(snap!.running).toBe(true);
+    expect(snap!.instance!.defId).toBe('W-01');
+    expect(snap!.instance!.progressRatio).toBe(0.5);
+    expect(snap!.instance!.remainingMs).toBe(900_000);
+  });
+
+  it('旅游快照明信片计数透传', () => {
+    const snap = parseActivitySnapshot({
+      phase: 'running',
+      running: true,
+      instance: {
+        kind: 'travel',
+        defId: 'TR-01',
+        progressRatio: 0.3,
+        remainingMs: 5_000_000,
+        postcardsSent: 2,
+        deferredSettle: false,
+      },
+    });
+    expect(snap!.instance!.postcardsSent).toBe(2);
+  });
+
+  it('空闲态 instance 为 null', () => {
+    const snap = parseActivitySnapshot({ phase: 'idle', running: false, instance: null });
+    expect(snap!.running).toBe(false);
+    expect(snap!.instance).toBeNull();
+  });
+
+  it('非法阶段回退 idle；非法 instance 回退 null', () => {
+    const snap = parseActivitySnapshot({ phase: 'flying', running: true, instance: 'x' });
+    expect(snap!.phase).toBe('idle');
+    expect(snap!.instance).toBeNull();
+  });
+
+  it('载荷非对象回退 null（02 §7.4 跳过）', () => {
+    expect(parseActivitySnapshot(null)).toBeNull();
+    expect(parseActivitySnapshot(42)).toBeNull();
+    expect(parseActivitySnapshot([1, 2])).toBeNull();
   });
 });

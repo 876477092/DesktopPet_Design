@@ -793,3 +793,78 @@ export function parseConfigCmd(raw: unknown): ConfigCmdV1 | null {
   };
 }
 
+// ---------------------------------------------------------------------------
+// ActivitySnapshot v1（`pet://state` 的 `activity` 段；`02 §7.6` 已登记
+// `pet://activity` 为迁移事件，本阶段快照驱动——活动卡 / 明信片挂件共用）
+// ---------------------------------------------------------------------------
+
+/** 活动阶段（与 Rust `dp_activity::model::ActivityPhase` 同词表）。 */
+export type ActivityPhase = 'idle' | 'preparing' | 'running' | 'returning' | 'settled' | 'aborted';
+
+/** 合法阶段集合（枚举兜底用）。 */
+const ACTIVITY_PHASES: readonly ActivityPhase[] = [
+  'idle',
+  'preparing',
+  'running',
+  'returning',
+  'settled',
+  'aborted',
+];
+
+/** 活动实例（`pet://state.activity.instance`；camelCase 线上格式）。 */
+export interface ActivityInstanceV1 {
+  /** 活动类别（work / study / travel）。 */
+  readonly kind: string;
+  /** 定义 ID（W-01 / CRS-01 / TR-01）。 */
+  readonly defId: string;
+  /** 已完成比例 0..=1（解析时钳制）。 */
+  readonly progressRatio: number;
+  /** 剩余毫秒（≥0）。 */
+  readonly remainingMs: number;
+  /** 已收明信片张数（旅游）。 */
+  readonly postcardsSent: number;
+  /** 深夜延后（D-1：end 推到次日 07:00）。 */
+  readonly deferredSettle: boolean;
+}
+
+/** `pet://state.activity` 段（v1）。 */
+export interface ActivitySnapshotV1 {
+  /** 阶段。 */
+  readonly phase: ActivityPhase;
+  /** 是否有进行中的活动（`phase ∈ preparing/running/returning`）。 */
+  readonly running: boolean;
+  /** 活动实例（`null` = 无）。 */
+  readonly instance: ActivityInstanceV1 | null;
+}
+
+/**
+ * 解析 `pet://state` 载荷的 `activity` 段为 `ActivitySnapshotV1`（纯函数，可单测）。
+ *
+ * 前向兼容策略（与既有 `parse*` 同范式）：`phase` 不在六态集合内回退 `'idle'`；
+ * `instance` 非对象 → `null`；数值字段非有限取 0；未知字段忽略；载荷非对象 → `null`，
+ * 调用方 `console.warn` + 跳过（`02 §7.4`）。
+ */
+export function parseActivitySnapshot(raw: unknown): ActivitySnapshotV1 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+  const phase = oneOf(o.phase, ACTIVITY_PHASES, 'idle');
+  let instance: ActivityInstanceV1 | null = null;
+  if (o.instance !== null && typeof o.instance === 'object' && !Array.isArray(o.instance)) {
+    const ins = o.instance as Record<string, unknown>;
+    instance = {
+      kind: typeof ins.kind === 'string' ? ins.kind : '',
+      defId: typeof ins.defId === 'string' ? ins.defId : '',
+      progressRatio: clamp(num(ins.progressRatio, 0), 0, 1),
+      remainingMs: Math.max(0, Math.trunc(num(ins.remainingMs, 0))),
+      postcardsSent: Math.max(0, Math.trunc(num(ins.postcardsSent, 0))),
+      deferredSettle: bool(ins.deferredSettle, false),
+    };
+  }
+  return {
+    phase,
+    running: bool(o.running, phase !== 'idle' && phase !== 'settled' && phase !== 'aborted'),
+    instance,
+  };
+}

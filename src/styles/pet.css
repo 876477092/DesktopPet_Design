@@ -327,3 +327,125 @@ body {
   font-size: 11px;
   white-space: nowrap;
 }
+
+/* ---------------------------------------------------------------------------
+ * S8-M3：活动卡 + 明信片挂件（`renderer/activityWidgets.ts`）
+ * 挂载于 `#pet-overlay-root`（pointer-events:none）；两组件自身 `pointer-events:auto`
+ * 才可交互。隐藏态用 visibility+opacity（禁 display:none，与气泡同纪律）。
+ * ------------------------------------------------------------------------- */
+
+/* 活动卡：左下角，深色半透明底，白字。 */
+.activity-card {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: rgba(20, 24, 34, 0.82);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.4;
+  pointer-events: auto;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+  transition: opacity 0.2s ease;
+  z-index: 10;
+}
+
+.activity-card__icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.activity-card__title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 进度条：内嵌横向条，--progress 0..=1。 */
+.activity-card__progress {
+  width: 72px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.22);
+  overflow: hidden;
+}
+.activity-card__progress::before {
+  content: '';
+  display: block;
+  height: 100%;
+  width: calc(var(--progress, 0) * 100%);
+  border-radius: 3px;
+  background: linear-gradient(90deg, #4cc2ff, #7ce0ff);
+  transition: width 0.3s ease;
+}
+
+.activity-card__time {
+  color: rgba(255, 255, 255, 0.82);
+  white-space: nowrap;
+}
+
+.activity-card__recall {
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.activity-card__recall:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+/* 明信片：右下角，卡纸质感。 */
+.postcard {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 160px;
+  min-height: 96px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: linear-gradient(160deg, #fffdf4, #fdf3d8);
+  color: #5b4632;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.30);
+  border: 1px solid #eadfc2;
+  pointer-events: auto;
+  transition: opacity 0.25s ease;
+  z-index: 11;
+}
+.postcard::before {
+  content: '✉';
+  position: absolute;
+  top: 6px;
+  right: 10px;
+  font-size: 18px;
+  opacity: 0.35;
+}
+
+.postcard__text {
+  display: block;
+  padding-right: 14px;
+}
+
+.postcard__close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  border: none;
+  background: transparent;
+  color: #9b8360;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px;
+}
+.postcard__close:hover {
+  color: #5b4632;
+}
