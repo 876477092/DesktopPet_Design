@@ -258,6 +258,14 @@ pub enum EmotionEvent {
         /// 迁移时的档位（文案分级用：`P ≥ 30` 时提示托盘入口）。
         level: u8,
     },
+    /// 亲密度升级（S8-M1/M2：活动结算的亲和经验跨过 `100 × level` 门槛）。
+    ///
+    /// 只承载等级结果（前端提示用）；数值变化同时会带一条 [`EmotionEvent::ValuesChanged`]。
+    /// **不产线上事件**（`wire_for_events` 过滤），快照的 `affinityLevel` 已反映。
+    AffinityLevelUp {
+        /// 升级后的亲密度等级。
+        level: u32,
+    },
     /// 需要落盘（阶段变化 / 数值跨界）。
     PersistNow,
 }
@@ -1574,6 +1582,56 @@ impl<'c> EmotionEngine<'c> {
             });
         }
         out.push(EmotionEvent::PersistNow);
+        out
+    }
+
+    /// S8-M1/M2：活动结算 / 前置消耗的**数值净变化**应用（`02 §5.15` 数值面）。
+    ///
+    /// 入参 [`crate::state::ActivityDeltas`]（由 `dp-app` 从 `dp-activity::ActivityReward`
+    /// 翻译，`dp-core` 不依赖活动 crate）；本方法只落地数值：
+    ///   - Mood / Energy / Cleanliness：加后整体 `clamp_to_cfg`（配置区间，C7）；
+    ///   - 亲密度经验：`PetValues::add_affinity_exp`（满 `100 × level` 升级，上限 maxLevel）；
+    ///   - P：与 coax relief / penalty 同口径（clamp `[0, cap]`）；
+    ///   - rough：`rough_step > 0` 时 `observe_negative`（`02 §5.1` F7 / B-6）。
+    ///
+    /// **经济入账 / 技能升级 / 学费与旅行券扣款归 S8-M5**，本方法不落地；也不需要
+    /// `PersistNow`（存档脏位由 core-loop 侧统一按「有活动结算」置位）。
+    pub fn apply_activity_deltas(
+        &mut self,
+        deltas: &crate::state::ActivityDeltas,
+        now_ms: i64,
+    ) -> Vec<EmotionEvent> {
+        let mut out = Vec::new();
+        if deltas.mood != 0.0 {
+            self.state.values.mood += deltas.mood;
+        }
+        if deltas.energy != 0.0 {
+            self.state.values.energy += deltas.energy;
+        }
+        if deltas.cleanliness != 0.0 {
+            self.state.values.cleanliness += deltas.cleanliness;
+        }
+        if deltas.affinity_exp != 0.0 {
+            let gained = self
+                .state
+                .values
+                .add_affinity_exp(deltas.affinity_exp, self.cfg);
+            if gained > 0 {
+                out.push(EmotionEvent::AffinityLevelUp { level: self.state.values.affinity_level });
+            }
+        }
+        // 数值变化不单独产 `ValuesChanged`：1Hz 全量快照（`pet://state`）每拍投影，
+        // 且 `wire_for_events` 对 `ValuesChanged` 本就不产线上事件——避免重复。
+        if deltas.neglect_p_delta != 0.0 {
+            self.neglect.p =
+                (self.neglect.p + deltas.neglect_p_delta).clamp(0.0, self.neglect.cap);
+        }
+        if deltas.rough_step > 0.0 {
+            self.rough.observe_negative(now_ms, &self.cfg.rough);
+        }
+        if deltas.mood != 0.0 || deltas.energy != 0.0 || deltas.cleanliness != 0.0 {
+            self.state.values.clamp_to_cfg(self.cfg, self.needs_cfg);
+        }
         out
     }
 

@@ -934,6 +934,21 @@ pub enum CoreInput {
         /// 落盘完成回执（`()` 即成功投递；supervisor 端 `recv_timeout` 等待）。
         ack: std::sync::mpsc::Sender<()>,
     },
+    /// S8-M1：派遣外出活动（打工 / 学习 / 旅游；`02 §5.13`）。
+    ///
+    /// 前置校验（L4/L5 / Energy / Satiety / Cleanliness / 当日次数 / 安静时段）
+    /// 在 core-loop 侧以**当时内核快照**组装 [`DispatchCheck`] 后执行；经济校验
+    /// （学费 / 旅行券）随 S8-M5 接入。
+    ActivityDispatch {
+        /// 活动类别（`work` / `study` / `travel`）。
+        kind: String,
+        /// 定义 ID（`W-01` / `CRS-01` / `TR-01`；`activities.json` 键）。
+        def_id: String,
+        /// 时长（分钟；旅游取配置固定值，忽略该参数）。
+        duration_min: u32,
+    },
+    /// S8-M1：提前召回进行中的活动（收益按已完成比例 × 0.5）。
+    ActivityRecall,
 }
 
 impl CoreInput {
@@ -950,6 +965,8 @@ impl CoreInput {
             CoreInput::ImportSave { .. } => "ImportSave",
             CoreInput::Shutdown => "Shutdown",
             CoreInput::FlushSave { .. } => "FlushSave",
+            CoreInput::ActivityDispatch { .. } => "ActivityDispatch",
+            CoreInput::ActivityRecall => "ActivityRecall",
         }
     }
 }

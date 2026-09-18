@@ -75,6 +75,19 @@ impl ActivityPhase {
     pub const fn is_finished(self) -> bool {
         matches!(self, Self::Settled | Self::Aborted)
     }
+
+    /// 序列化键（存档 / 快照 `phase` 字段；与 serde lowercase 同值）。
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Preparing => "preparing",
+            Self::Running => "running",
+            Self::Returning => "returning",
+            Self::Settled => "settled",
+            Self::Aborted => "aborted",
+        }
+    }
 }
 
 /// 活动实例（`02 §4.2` 冻结字段；D 段存档 `activity` 的 Rust 镜像）。
@@ -286,4 +299,24 @@ pub struct SettleInputs {
     pub recall_rough_step: f32,
     /// 正常回归：冷落压力 P−20（`02 §5.15` 回归 | P−20）。
     pub regress_neglect_delta: f32,
+}
+
+/// 存档 D 段 `activity` 的承载形状（`02 §5 K-7`）。
+///
+/// 由 `dp-app` 在落盘 / 恢复时与 `dp-core::save::SaveFileV2.activity`
+/// （`serde_json::Value`）互转——强类型住在活动 crate（依赖方向 dp-activity →
+/// dp-core），dp-core 侧保持 Value 冻结（见 `save/schema.rs` S8-M1 口径）。
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ActivitySave {
+    /// 恢复用阶段（仅进行中阶段会被恢复）。
+    pub phase: ActivityPhase,
+    /// 实例本体（`None` = 无进行中活动）。
+    pub instance: Option<ActivityInstance>,
+}
+
+impl Default for ActivitySave {
+    fn default() -> Self {
+        Self { phase: ActivityPhase::Idle, instance: None }
+    }
 }

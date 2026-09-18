@@ -960,6 +960,7 @@ dependencies = [
 name = "dp-app"
 version = "0.1.0"
 dependencies = [
+ "dp-activity",
  "dp-assets",
  "dp-audio",
  "dp-core",

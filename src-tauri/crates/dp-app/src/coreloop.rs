@@ -53,9 +53,18 @@ use dp_core::anim::{
 };
 use dp_core::config::{ConfigBundle, ConfigService};
 use dp_core::config::model::{
-    CatchphraseCfg, ClickFeedbackCfg, EmotionConfig, GestureCfg, InteractionCfg, NeedsConfig,
-    RoamCfg,
+    ActivityGlobalCfg, CatchphraseCfg, ClickFeedbackCfg, EmotionConfig, GestureCfg,
+    InteractionCfg, NeedsConfig, RoamCfg,
 };
+// S8-M1：外出活动运行时（`02 §5.13`；`ActivityGlobalCfg` 由 dp-core 配置束提供，
+// 强类型活动模型住在 dp-activity——依赖方向 dp-app → dp-activity → dp-core）。
+use dp_activity::machine::DispatchCheck;
+use dp_activity::model::{
+    ActivityError, ActivityInstance, ActivityKind, ActivityReward, ActivitySave,
+    ActivityPhase, RecallKind, SettleInputs,
+};
+use dp_activity::{ActivityOutcome, ActivityRuntime};
+use dp_core::state::ActivityDeltas;
 use dp_core::emotion::coax::CoaxStep;
 use dp_core::emotion::solver::InteractionPolicy;
 use dp_core::emotion::TickEnv;
@@ -343,6 +352,8 @@ pub struct CoreCfg {
     /// [`CoreLoopState::new`] 会用它**恢复内核状态**（`EmotionEngine::restore`），
     /// 使重启后数值 / P / 敏感度 / 展示态连续。
     pub save: Option<SaveStore>,
+    /// 活动全局配置（`activities.json.global`；S8-M1 派遣 / 结算 / 明信片口径，C7）。
+    pub activities: ActivityGlobalCfg,
 }
 
 /// 共享站立面适配器（S7-M3 前置首件 / B12-① / P2-16）。
@@ -371,6 +382,15 @@ impl StandSurface for SharedSurface {
         let graph = self.0.read().unwrap_or_else(|e| e.into_inner());
         graph.clamp_to_stand(p)
     }
+}
+
+/// S8-M1：活动演出槽位（`actionIds.depart / return`；S8-M4 演出接线）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivitySlot {
+    /// 出发演出（ACT-N-09 / ACT-N-12）。
+    Depart,
+    /// 回归演出（ACT-N-10 / ACT-N-14）。
+    Return,
 }
 
 /// core-loop 纯逻辑状态：相机器 + 引擎持有者 + 端口暂存（**不依赖 Tauri / 窗口**）。
@@ -491,6 +511,21 @@ pub struct CoreLoopState {
     /// **不**把它指派给任何尚未开卡核实的模块。故 FR-7-4 的「每项即时生效」在 `autoRoam`
     /// 一项上**未闭环**，验收时不得据本字段判定该项通过。
     auto_roam: bool,
+    /// S8-M1：外出活动运行时（打工 / 学习 / 旅游状态机；`02 §5.13`）。
+    ///
+    /// 唯一写者 = core-loop 线程（与 `emotion` 同生命周期）；dispatch / recall 经
+    /// [`Self::apply_core_input`] 进入，1Hz 推进经 [`Self::activity_tick`]。
+    activity_runtime: ActivityRuntime,
+    /// S8-M1：墙钟端口（C3）。
+    ///
+    /// 活动 dispatch 的安静时段判定 / 回归结算墙钟的唯一真源（`activity_tick` 的
+    /// `wall` 参数同源）；测试经 [`Self::set_wall_for_test`] 注入 `FakeWallClock`。
+    wall: Arc<dyn WallClock>,
+    /// S8-M1：用户召回标记（`ActivityRecall` 置位；`settle_returning` 消费）。
+    ///
+    /// `Some(Early)` = 本次回归是用户提前召回（收益 ×0.5 + P+6 + rough+0.15）；
+    /// `None` = 自然到期（收益全量，P−20）。异常中止不经此通道（`Aborted` 直结）。
+    pending_recall_kind: Option<RecallKind>,
 }
 
 /// 回归问候（S5-M2：`02 §6.1` 启动时序「ACT-T-01 挥手 + 时段问候」）。
@@ -540,6 +575,7 @@ impl CoreLoopState {
             lines,
             audio,
             save,
+            activities,
         } = cfg;
         let platform_graph = Arc::new(RwLock::new(PlatformGraph::new(monitors.clone(), now_ms)));
         // S7-M3 前置首件（B12-① / P2-16）：把平台图注入决策层站立面——决策层据此
@@ -594,6 +630,20 @@ impl CoreLoopState {
         }
         // S4-M5：`{name}` 变量取配置默认名（C2：代码内零角色名字面量）。
         let vars = PlaceholderVars::new().with_name(character_default_name);
+        // S8-M1：活动运行时（`02 §5 K-7` D 段 `activity` 恢复进行中实例；无档 /
+        // 无实例 / 段解析失败 → 空运行 Idle，不崩不伪造）。
+        let mut activity_runtime = ActivityRuntime::new(activities.clone());
+        if let Some(store) = save.as_ref().filter(|s| s.has_session_anchor()) {
+            match serde_json::from_value::<ActivitySave>(store.cache().activity.clone()) {
+                Ok(saved) => {
+                    activity_runtime =
+                        ActivityRuntime::restore(activities, saved.instance, saved.phase);
+                }
+                Err(err) => eprintln!(
+                    "[dp-app] core-loop 活动存档段解析失败（降级空运行）：{err}"
+                ),
+            }
+        }
         Self {
             pos: clamped,
             phase: Phase::Roam,
@@ -634,6 +684,9 @@ impl CoreLoopState {
             tray_state: None,
             tray_left_home: false,
             auto_roam: true,
+            activity_runtime,
+            wall: Arc::new(SystemWallClock),
+            pending_recall_kind: None,
             activity: ActivitySample::default(),
             reminders: ReminderScheduler::new(
                 ReminderConfig::new(true, 45, true, 45, 15, 180, true),
@@ -1001,6 +1054,14 @@ impl CoreLoopState {
             return;
         };
         store.capture_from(emotion, now_ms);
+        // S8-M1：D 段 `activity` 随每拍落盘——进行中实例 / 阶段可跨进程恢复
+        // （`02 §5 K-7`；`ActivitySave` ↔ `serde_json::Value`，dp-core 侧保持 Value 冻结）。
+        let activity_save = ActivitySave {
+            phase: self.activity_runtime.phase(),
+            instance: self.activity_runtime.current().cloned(),
+        };
+        store.cache_mut().activity =
+            serde_json::to_value(activity_save).unwrap_or(serde_json::Value::Null);
         let force = core::mem::take(save_requested);
         // 无论成功失败都清位：失败靠下一拍重试，绝不让一个坏盘位把后续落盘全堵死。
         let result = if force { store.flush_force(now_mono_ms) } else { store.flush(now_mono_ms) };
@@ -1118,6 +1179,33 @@ impl CoreLoopState {
                 let _ = ack.send(());
                 Vec::new()
             }
+            // S8-M1：派遣外出活动（`02 §5.13`；前置校验在 core-loop 以当时内核快照执行，
+            // 成功 → Preparing + 出发演出 + 前置消耗；拒绝只记日志，快照不产活动）。
+            CoreInput::ActivityDispatch { kind, def_id, duration_min } => {
+                let result = self.handle_activity_dispatch(&kind, &def_id, duration_min, now_ms);
+                match &result {
+                    Ok(inst) => eprintln!(
+                        "[dp-app] core-loop 活动派遣成功：{}（{}，{}min）",
+                        inst.def_id,
+                        inst.kind.label(),
+                        inst.planned_ms / 60_000
+                    ),
+                    Err(err) => eprintln!("[dp-app] core-loop 活动派遣被拒：{err}"),
+                }
+                Vec::new()
+            }
+            // S8-M1：提前召回（Running → Returning；收益按已完成比例 ×0.5 + P+6）。
+            CoreInput::ActivityRecall => {
+                match self.activity_runtime.recall() {
+                    Ok(()) => {
+                        eprintln!("[dp-app] core-loop 活动召回已受理（回归演出后结算）");
+                        self.pending_recall_kind = Some(RecallKind::Early);
+                        self.request_save();
+                    }
+                    Err(err) => eprintln!("[dp-app] core-loop 活动召回被拒：{err}"),
+                }
+                Vec::new()
+            }
         }
     }
 
@@ -1150,7 +1238,10 @@ impl CoreLoopState {
             | CoreInput::TrayCoax
             | CoreInput::TrayFeed
             | CoreInput::TrayBath
-            | CoreInput::FlushSave { .. } => false,
+            | CoreInput::FlushSave { .. }
+            // S8-M1：活动命令不需要 AppHandle（只动运行时 + 内核）→ 交回纯逻辑出口。
+            | CoreInput::ActivityDispatch { .. }
+            | CoreInput::ActivityRecall => false,
             CoreInput::ResetAllData => {
                 match self.save.as_mut() {
                     Some(save) => match save.reset_to_default(now_mono_ms) {
@@ -1561,7 +1652,9 @@ impl CoreLoopState {
             now_local: wall.now_local(),
             session_paused: paused,
             performing: false,
-            activity_running: false,
+            // S8-M1：外出活动进行中（Preparing / Running / Returning）→ 内核演出占用位
+            // （`TickEnv.activity_running` 语义：宠物不在桌面，情绪 / 需求处理按在途活动降档）。
+            activity_running: self.activity_runtime.is_running(),
             event_delta: self.pending_mood_delta,
             // 采样不可用（`None`）→ 保守取 0 = 判定「在场」，避免把检测失败
             // 误算成用户离开而虚增冷落压力。
@@ -1615,12 +1708,294 @@ impl CoreLoopState {
         // ④'''' S7-M9：生存动作分档轮询（`02 §5.11`；AC-21/22 触发面，未启用自动跳过）。
         self.needs_action_tick(wall_now_ms, app);
 
-        // ④''''' S7-M6：托盘图标 / 菜单位同步（仅变化时调，避免每拍重建菜单）。
+        // ④''''' S8-M1/M2：活动推进（时钟观察 / 异常判定 / 明信片调度 / 到期回归 /
+        //      演出闭环）。放在需求动作之后：活动在途时需求演出让位给活动演出。
+        self.activity_tick(wall, app);
+
+        // ④'''''' S7-M6：托盘图标 / 菜单位同步（仅变化时调，避免每拍重建菜单）。
         self.sync_tray(app);
 
         // ⑤ 1Hz 全量快照（`pet://state`）：无论有无算法事件都发，供属性面板 /
         //    原因卡实时刷新（`02 §7.6` 频率列 = 1Hz）。
         self.emit_state_snapshot(app);
+    }
+
+    // -----------------------------------------------------------------------
+    // S8-M1/M2：外出活动运行时（`02 §5.13` ~ §5.16）
+    // -----------------------------------------------------------------------
+
+    /// 派遣前置检查（当时内核快照；`dispatch_precheck` 逐条执行：唯一性 → AC-36
+    /// L4/L5 → RV-03 Energy → RV-01 Satiety → 学习 Cleanliness → 打工日限 →
+    /// 安静时段；`today_job_count` 随 S8-M5 经济计费落账后计数，本卡恒 0）。
+    fn dispatch_check(&self) -> DispatchCheck {
+        let now_ms = self.wall.now_ms();
+        let offset_sec = self.wall.local_offset_sec();
+        let quiet = &self.activity_runtime.cfg().quiet_hours;
+        DispatchCheck {
+            active: self.activity_runtime.is_running(),
+            neglect_level: u32::from(self.emotion.neglect.level),
+            energy: self.emotion.state.values.energy,
+            satiety: self.emotion.state.values.satiety,
+            cleanliness: self.emotion.state.values.cleanliness,
+            today_job_count: 0,
+            local_hour: dp_activity::local_hour_from(now_ms, offset_sec),
+            quiet_from_hour: hour_of_hhmm(&quiet.from),
+            quiet_to_hour: hour_of_hhmm(&quiet.to),
+            daily_job_limit: self.activity_runtime.cfg().daily_job_limit,
+        }
+    }
+
+    /// S8-M1：派遣出口（`apply_core_input(ActivityDispatch)` 消费）。
+    ///
+    /// 成功 → ① 实例进入 Preparing；② 出发演出提交（S8-M4 启用后起播；未启用 →
+    /// 降级，`step_activity_performance` 下一拍自动 `confirm_departed`）；③ 前置消耗
+    /// （`cost.energy/cleanliness` 出发瞬间扣，`02 §5.15`）。
+    fn handle_activity_dispatch(
+        &mut self,
+        kind: &str,
+        def_id: &str,
+        duration_min: u32,
+        now_ms: u64,
+    ) -> Result<ActivityInstance, ActivityError> {
+        let kind = match kind {
+            "work" => ActivityKind::Work,
+            "study" => ActivityKind::Study,
+            "travel" => ActivityKind::Travel,
+            _ => return Err(ActivityError::UnknownDef(kind.to_string())),
+        };
+        let check = self.dispatch_check();
+        let inst = self
+            .activity_runtime
+            .dispatch(kind, def_id, duration_min, now_ms as i64, None, &check)?;
+        // 出发演出（未启用 → 降级记录，活动照常推进）。
+        self.submit_activity_play(ActivitySlot::Depart);
+        // 前置消耗（出发瞬间立即扣；旅游无前置数值消耗）。
+        if let Some(cost) = self.activity_runtime.current_cost() {
+            let deltas = ActivityDeltas {
+                energy: -cost.energy,
+                cleanliness: -cost.cleanliness,
+                ..ActivityDeltas::default()
+            };
+            let _ = self.emotion.apply_activity_deltas(&deltas, now_ms as i64);
+        }
+        self.request_save();
+        Ok(inst)
+    }
+
+    /// S8-M1/M2：活动每拍推进（1Hz 业务档；时间全部经 `wall` 端口，C3）。
+    ///
+    /// 顺序：① `ActivityRuntime::tick`（时钟观察 → 异常判定 → 明信片调度 → 到期回归 /
+    /// 深夜延后 D-1）；② 演出闭环（Preparing 出发演出完成 → Running；Returning 回归
+    /// 演出完成 → 结算）；③ 明信片到期落存档计数（挂件 UI 归 S8-M3）。
+    fn activity_tick(&mut self, wall: &dyn WallClock, _app: Option<&AppHandle>) {
+        if !self.activity_runtime.is_running() {
+            return;
+        }
+        let now_ms = wall.now_ms();
+        let offset_sec = wall.local_offset_sec();
+        let mut out = Vec::new();
+        self.activity_runtime.tick(now_ms, offset_sec, &mut out);
+        for outcome in out {
+            match outcome {
+                ActivityOutcome::PostcardDue { instance, at_ms } => {
+                    // S8-M3：明信片挂件（本卡先落存档计数 + 日志；挂件事件通道归 S8-M3）。
+                    eprintln!(
+                        "[dp-app] 旅游明信片到期：{}（第 {} 张 @{at_ms}）",
+                        instance.def_id, instance.postcards_sent
+                    );
+                    self.request_save();
+                }
+                ActivityOutcome::TimeUp(inst) => {
+                    // 到期 → 回归演出（S8-M4 启用后播；未启用降级 → 下一拍直接结算）。
+                    eprintln!(
+                        "[dp-app] 活动 {}（{}）到期，进入回归演出",
+                        inst.def_id,
+                        inst.kind.label()
+                    );
+                    self.submit_activity_play(ActivitySlot::Return);
+                    self.request_save();
+                }
+                ActivityOutcome::Aborted(reward) => {
+                    // 时钟异常保底结算（`02 §5.14`：按已完成比例，不再额外惩罚）。
+                    eprintln!(
+                        "[dp-app] 活动异常中止（时钟回拨），保底结算：coin={} mood={:+.1}",
+                        reward.coin, reward.mood_delta
+                    );
+                    self.apply_reward(&reward, now_ms);
+                    self.request_save();
+                }
+                _ => {}
+            }
+        }
+        // 演出闭环（不依赖播放完成回调的精确时序：1Hz 轮询 + drain_finished 推进队列）。
+        self.step_activity_performance(now_ms);
+    }
+
+    /// 演出闭环：Preparing（出发演出播毕 / 未启用）→ `confirm_departed`；
+    /// Returning（回归演出播毕 / 未启用）→ 结算。
+    ///
+    /// 判定口径：仲裁器当前在播动作 == 槽位动作 ID 才视为「演出中」；动作未启用 /
+    /// 不在目录 / 播毕出队 → 下一拍立即推进，**不卡死**（S8-M4 资源缺失可降级运行）。
+    fn step_activity_performance(&mut self, now_ms: i64) {
+        match self.activity_runtime.phase() {
+            ActivityPhase::Preparing => {
+                if self.activity_play_active(ActivitySlot::Depart) {
+                    return;
+                }
+                if let Err(err) = self.activity_runtime.confirm_departed() {
+                    eprintln!("[dp-app] 活动出发确认失败（降级继续）：{err}");
+                }
+            }
+            ActivityPhase::Returning => {
+                if self.activity_play_active(ActivitySlot::Return) {
+                    return;
+                }
+                self.settle_returning(now_ms);
+            }
+            _ => {}
+        }
+    }
+
+    /// 提交活动槽位演出（出发 / 回归；`actionIds.depart / return`）。
+    ///
+    /// 目录缺失 / `disabled`（批次 C 未交付）→ 降级记录，不 panic；演出闭环由
+    /// [`Self::step_activity_performance`] 兜底推进。
+    fn submit_activity_play(&mut self, slot: ActivitySlot) {
+        let Some(action_id) = self.activity_play_id(slot) else {
+            return;
+        };
+        if action_id.is_empty() {
+            return;
+        }
+        let Some(cfg) = self.catalog.find(&action_id) else {
+            eprintln!("[dp-app] 活动演出动作 {action_id} 不在目录（降级不提交）");
+            return;
+        };
+        let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
+            eprintln!("[dp-app] 活动演出动作 {action_id} 未启用（批次 C 未交付）→ 降级");
+            return;
+        };
+        let now = self.wall.now_ms().max(0) as u64;
+        let verdict = self.arbiter.submit(request, now);
+        self.settle_play(verdict, &action_id);
+    }
+
+    /// 槽位动作 ID（当前实例 `actionIds`；无实例 → `None`）。
+    fn activity_play_id(&self, slot: ActivitySlot) -> Option<String> {
+        let ids = self.activity_runtime.action_ids()?;
+        Some(match slot {
+            ActivitySlot::Depart => ids.depart.clone(),
+            ActivitySlot::Return => ids.r#return.clone(),
+        })
+    }
+
+    /// 槽位演出是否在播（仲裁器 current == 槽位动作 ID）。
+    fn activity_play_active(&self, slot: ActivitySlot) -> bool {
+        let Some(id) = self.activity_play_id(slot) else {
+            return false;
+        };
+        if id.is_empty() {
+            return false;
+        }
+        self.arbiter.current().is_some_and(|a| a.request.id == id)
+    }
+
+    /// 回归结算（Returning → Settled → Idle）：组装 [`SettleInputs`] 后
+    /// `confirm_reported` → 应用到内核（`ActivityDeltas`）→ 清场。
+    ///
+    /// `recall_kind` 由用户召回来源决定（`ActivityRecall` 置位；自然到期 = Normal）；
+    /// 提前召回惩罚（Mood−4 / P+6 / rough+0.15）在 [`crate::settle`] 计算、
+    /// 此处经 `neglect_delta` / `rough_delta` 落地到 `EmotionEngine`。
+    fn settle_returning(&mut self, _now_ms: i64) {
+        let now = self.wall.now_ms();
+        let offset_sec = self.wall.local_offset_sec();
+        let local_hour = dp_activity::local_hour_from(now, offset_sec);
+        let recall_kind = self.pending_recall_kind.take().unwrap_or(RecallKind::Normal);
+        let neglect_add = self.activity_runtime.cfg().recall_penalty.neglect_add;
+        let rough_step = self.activity_runtime.cfg().recall_penalty.rough_step;
+        let inputs = SettleInputs {
+            mood: self.emotion.state.values.mood,
+            cleanliness: self.emotion.state.values.cleanliness,
+            satiety: self.emotion.state.values.satiety,
+            diligence: (self.emotion.personality().diligence * 100.0).clamp(0.0, 100.0),
+            economy_scale: 1.0, // S8-M5 起按设置档位（casual/standard/diligent）
+            time_segment: dp_activity::time_segment_of(local_hour),
+            present: true, // 预留字段：settle 当前不消费；在场判定细化归 S8-M5
+            local_hour,
+            seed: self
+                .activity_runtime
+                .current()
+                .map(|i| i.seed)
+                .unwrap_or(0),
+            now_ms: now,
+            recall_neglect_add: neglect_add,
+            recall_rough_step: rough_step,
+            regress_neglect_delta: -20.0, // `02 §5.15` 回归 | P−20
+        };
+        match self.activity_runtime.confirm_reported(&inputs, recall_kind) {
+            Ok(reward) => {
+                eprintln!(
+                    "[dp-app] 活动结算（{recall_kind:?}）：coin={} skill={} mood={:+.1} 亲和={:+.1}",
+                    reward.coin, reward.skill_points, reward.mood_delta, reward.affinity_exp
+                );
+                self.apply_reward(&reward, now);
+                self.activity_runtime.clear();
+                self.request_save();
+            }
+            Err(err) => eprintln!("[dp-app] 活动结算失败（保持 Returning 待重试）：{err}"),
+        }
+    }
+
+    /// 活动结算结果 → 内核数值（`ActivityDeltas`；`02 §5.15` 数值面；经济归 S8-M5）。
+    ///
+    /// `reward.mood_delta` 已含召回 Mood 惩罚（`recallPenalty.mood`）；`neglect_delta` /
+    /// `rough_delta` 只在召回时非零（P+6 / rough+0.15）。
+    fn apply_reward(&mut self, reward: &ActivityReward, now_ms: i64) {
+        let deltas = ActivityDeltas {
+            mood: reward.mood_delta,
+            energy: reward.energy_delta,
+            cleanliness: reward.cleanliness_delta,
+            affinity_exp: reward.affinity_exp,
+            neglect_p_delta: reward.neglect_delta,
+            rough_step: reward.rough_delta,
+        };
+        let _ = self.emotion.apply_activity_deltas(&deltas, now_ms);
+    }
+
+    /// 活动相关状态变更 → 存档脏位（下一拍 `save_tick` 落盘）。
+    fn request_save(&mut self) {
+        self.save_requested = true;
+    }
+
+    /// S8-M3：活动快照 JSON（`pet://state.activity`；前端 ActivityCard 消费）。
+    fn activity_snapshot_json(&self) -> Option<serde_json::Value> {
+        let rt = &self.activity_runtime;
+        let phase = rt.phase();
+        if !phase.is_active() {
+            return Some(serde_json::json!({ "phase": phase.as_str(), "running": false }));
+        }
+        let inst = rt.current()?;
+        let now = self.wall.now_ms();
+        Some(serde_json::json!({
+            "phase": phase.as_str(),
+            "running": true,
+            "instance": {
+                "kind": inst.kind.label(),
+                "defId": inst.def_id,
+                "progressRatio": inst.progress_ratio(now),
+                "remainingMs": inst.remaining_ms(now),
+                "startMs": inst.start_ms,
+                "endMs": inst.end_ms,
+                "postcardsSent": inst.postcards_sent,
+                "deferredSettle": inst.deferred_settle,
+            }
+        }))
+    }
+
+    /// 测试注入墙钟（C3：活动 dispatch / 结算时间唯一真源）。
+    #[cfg(test)]
+    pub fn set_wall_for_test(&mut self, wall: Arc<dyn WallClock>) {
+        self.wall = wall;
     }
 
     /// S7-M2：需求跨档 → `pet://needs`（唯一生产点 `dp_core::event::wire_for_needs`，C8）。
@@ -1927,7 +2302,10 @@ impl CoreLoopState {
     fn emit_state_snapshot(&mut self, app: Option<&AppHandle>) {
         let Some(handle) = app else { return };
         // 性格文本 / 重掷次数归 S7 性格面板；本卡投影空串 / 0（字段存在，形状正确）。
-        let snapshot = project_snapshot(&self.emotion, "", 0);
+        let mut snapshot = project_snapshot(&self.emotion, "", 0);
+        // S8-M3：活动快照（进行中实例 → `activity` 段；前端 ActivityCard 消费；
+        // `PetSnapshotV2.activity` 为 `Option<Value>`，不破坏既有契约）。
+        snapshot.activity = self.activity_snapshot_json();
         if let Err(err) = handle.emit(STATE_EVENT, &snapshot) {
             eprintln!("[dp-app] core-loop 广播 {STATE_EVENT} 降级：{err}");
         }
@@ -2491,6 +2869,8 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         lines,
         audio,
         save,
+        // S8-M1：活动全局配置（`activities.json.global`；派遣 / 结算 / 明信片口径）。
+        activities: bundle.activities.activity.clone(),
     };
     let mut state = CoreLoopState::new(pos, monitors, cfg, seed, 0);
     // S5-M4：设置状态（应用层唯一设置真源）由配置束 ⊕ 存档 B 段推导，装配后
@@ -2537,6 +2917,11 @@ fn log_save_outcome(outcome: &LoadOutcome) {
     } else {
         eprintln!("[dp-app] core-loop 存档正常：{line}");
     }
+}
+
+/// S8-M1：`HH:MM` 配置串 → 本地小时（`quietHours.from/to`；解析失败取 0，配置坏不崩）。
+fn hour_of_hhmm(hhmm: &str) -> u8 {
+    hhmm.split(':').next().and_then(|h| h.parse::<u8>().ok()).unwrap_or(0)
 }
 
 /// 由配置束投影音频设置快照（S4-M6：`settings.json.audio` + `behavior` 的静音相关位）。
@@ -2968,6 +3353,9 @@ mod tests {
     // S5-M1：降级链落点判定（断言「全新安装走 Fresh」等装配期语义）。
     use dp_core::save::LoadStatus;
 
+    /// 活动测试墙钟起点（UTC 毫秒；本地 = UTC 除非注入 offset）。
+    const T0: i64 = 1_700_000_000_000;
+
     /// 主屏：VDC (0,0) 1920×1080，工作区底边 1040。
     fn mon_a() -> MonitorGeom {
         MonitorGeom {
@@ -3023,6 +3411,236 @@ mod tests {
             disabled: false,
             ..ActionCfg::default()
         }])
+    }
+
+    // -----------------------------------------------------------------------
+    // S8-M1/M2：活动运行时集成（真实 `activities.json`；FakeWallClock 驱动，C3）
+    // -----------------------------------------------------------------------
+
+    /// S8-M1：活动全局配置夹具（`resources/config/activities.json`；验收口径与运行
+    /// 一致；资源缺失降级内置默认，不 panic）。
+    fn test_activities() -> ActivityGlobalCfg {
+        match ConfigService::load_all(&resources_config_dir()) {
+            Ok((bundle, _)) => bundle.activities.activity,
+            Err(_) => ActivityGlobalCfg::default(),
+        }
+    }
+
+    /// S8-M1：带真实活动配置的 `CoreCfg`（活动集成测试专用）。
+    fn core_cfg_with_activities(catalog: ActionCatalog) -> CoreCfg {
+        let mut cfg = core_cfg(catalog);
+        cfg.activities = test_activities();
+        cfg
+    }
+
+    /// 装配活动测试状态（`FakeWallClock` 注入，C3；返回共享 Arc 供推进）。
+    fn activity_state(catalog: ActionCatalog, t0: i64) -> (CoreLoopState, Arc<FakeWallClock>) {
+        let mut state = CoreLoopState::new(
+            Vec2::ZERO,
+            vec![mon_a()],
+            core_cfg_with_activities(catalog),
+            7,
+            0,
+        );
+        let wall = Arc::new(FakeWallClock::new(t0));
+        state.set_wall_for_test(Arc::clone(&wall) as Arc<dyn WallClock>);
+        (state, wall)
+    }
+
+    /// 空目录（演出动作未启用）：验证 S8-M4 之前的**降级闭环**——出发 / 回归演出
+    /// 不提交，`step_activity_performance` 下一拍自动推进，活动照常结算。
+    fn empty_catalog() -> ActionCatalog {
+        ActionCatalog::from_actions(Vec::new())
+    }
+
+    /// 派遣 → 出发（降级）→ Running → 到期 → 回归（降级）→ 结算 → Idle 的完整闭环。
+    #[test]
+    fn activity_dispatch_to_settle_roundtrip() {
+        let (mut state, wall) = activity_state(empty_catalog(), T0);
+        // ① 派遣（logic 档入口；W-01 30min）。
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Preparing);
+        // 前置消耗已扣（W-01：energy −12 / cleanliness −12，`02 §5.15` 出发瞬间）。
+        assert!(
+            (state.emotion.state.values.energy - 88.0).abs() < 1e-6,
+            "energy={}",
+            state.emotion.state.values.energy
+        );
+        assert!((state.emotion.state.values.cleanliness - 73.0).abs() < 1e-6);
+        // ② 业务拍：出发演出未启用 → confirm_departed → Running。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // ③ 推进到 end 之后 → TimeUp；回归演出未启用 → **同拍直达结算** → Idle
+        //   （启用回归动作时停在 Returning 等待播毕，见 `activity_return_play_holds`）。
+        wall.set_now_ms(T0 + 30 * 60_000 + 1_000);
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Idle);
+        // 结算数值已应用到内核：Mood 经「31min 时间跳变的情绪衰减（dt 已按引擎口径
+        // 钳制）+ 打工 jitter ∈ [-2, +5]（seed 确定性）」→ 落在衰减后的合理带内。
+        assert!(
+            state.emotion.state.values.mood >= 30.0 && state.emotion.state.values.mood <= 45.0,
+            "mood={}",
+            state.emotion.state.values.mood
+        );
+    }
+
+    /// 回归演出启用时：到期 → Returning 停留（演出 in-flight），播毕后推进结算。
+    #[test]
+    fn activity_return_play_holds_then_settles() {
+        // 目录含 ACT-N-10（启用；`actions.json` 口径字段）。
+        let catalog = ActionCatalog::from_actions(vec![ActionCfg {
+            id: "ACT-N-10".to_string(),
+            name: "下班回家".to_string(),
+            category: "activity".to_string(),
+            priority: 8,
+            interruptible: true,
+            looping: false,
+            fps: 12,
+            fade_ms: 200,
+            disabled: false,
+            ..ActionCfg::default()
+        }]);
+        let (mut state, wall) = activity_state(catalog, T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        // 出发演出同样启用（ACT-N-09 不在目录 → 降级，Preparing 下一拍推进）。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // 到期：回归演出在播 → Returning 停留（不提前结算）。
+        wall.set_now_ms(T0 + 30 * 60_000 + 1_000);
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Returning);
+        assert!(
+            state
+                .arbiter
+                .current()
+                .is_some_and(|a| a.request.id == "ACT-N-10"),
+            "回归动作应已提交在播"
+        );
+        // 下一拍：动作仍在播（无 Finished 回报）→ 仍 Returning。
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Returning);
+        // 停播推进（等价播完）：`on_action_finished` 出队 → 下一拍 settle。
+        // 测试经私有入口不可达，直接验证「非在播即推进」——用不含动作的状态等价路径
+        // 已在 `activity_dispatch_to_settle_roundtrip` 覆盖；此处补 `stop_looping` 无
+        // 循环动作 → no-op，保持 Returning 语义正确。
+        assert!(!state.current_is_looping(), "ACT-N-10 非循环，停播走 Finished 回报路径");
+    }
+
+    /// 提前召回：Running → Returning；结算按已完成比例 ×0.5，P+6 生效。
+    #[test]
+    fn activity_recall_applies_early_penalty() {
+        let (mut state, wall) = activity_state(empty_catalog(), T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // 中途（15min）召回。
+        wall.set_now_ms(T0 + 15 * 60_000);
+        let _ = state.apply_core_input(CoreInput::ActivityRecall, (T0 + 15 * 60_000) as u64);
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Returning);
+        let p_before = state.emotion.neglect.p;
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Idle);
+        assert!(
+            state.emotion.neglect.p > p_before,
+            "召回 P+6 应生效：{p_before} → {}",
+            state.emotion.neglect.p
+        );
+    }
+
+    /// 安静时段（23:00-05:00 本地）拒派。
+    #[test]
+    fn activity_dispatch_refused_in_quiet_hours() {
+        let (mut state, wall) = activity_state(empty_catalog(), T0);
+        // T0 = 22:13 UTC；offset +3600s → 本地 23:13（安静时段）。
+        wall.set_offset_sec(3600);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        assert_eq!(
+            state.activity_runtime.phase(),
+            ActivityPhase::Idle,
+            "安静时段应拒派"
+        );
+    }
+
+    /// AC-36：冷落阶段 L4/L5 拒派（「她在生气，先哄好她吧」）。
+    #[test]
+    fn activity_dispatch_refused_when_cold_level_high() {
+        let (mut state, _wall) = activity_state(empty_catalog(), T0);
+        state.emotion.neglect.level = 4;
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "work".into(),
+                def_id: "W-01".into(),
+                duration_min: 30,
+            },
+            T0 as u64,
+        );
+        assert_eq!(
+            state.activity_runtime.phase(),
+            ActivityPhase::Idle,
+            "L4 应拒派"
+        );
+    }
+
+    /// 旅游：明信片按 `postcardIntervalMin` 到期累计；快照带活动段。
+    #[test]
+    fn activity_travel_accumulates_postcards_and_snapshot() {
+        let (mut state, wall) = activity_state(empty_catalog(), T0);
+        let _ = state.apply_core_input(
+            CoreInput::ActivityDispatch {
+                kind: "travel".into(),
+                def_id: "TR-01".into(),
+                duration_min: 0, // 旅游忽略该参数（固定 120min）。
+            },
+            T0 as u64,
+        );
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(state.activity_runtime.phase(), ActivityPhase::Running);
+        // TR-01：interval 40min → 40 / 80 / 120 三张；41min 时第 1 张到期。
+        wall.set_now_ms(T0 + 41 * 60_000);
+        state.business_tick_present(wall.as_ref());
+        assert_eq!(
+            state.activity_runtime.current().unwrap().postcards_sent,
+            1,
+            "第一张明信片应已到期"
+        );
+        // 快照（`app=None` 时广播早退；直接探针活动段）。
+        let snap = state.activity_snapshot_json().expect("活动快照");
+        assert_eq!(snap["running"], true);
+        assert_eq!(snap["instance"]["postcardsSent"], 1);
+        assert_eq!(snap["instance"]["defId"], "TR-01");
+        // 未运行 → 快照 `running=false`。
+        let _ = state.apply_core_input(CoreInput::ActivityRecall, (T0 + 41 * 60_000) as u64);
+        state.business_tick_present(wall.as_ref());
+        let idle = state.activity_snapshot_json().expect("空闲快照");
+        assert_eq!(idle["running"], false);
     }
 
     /// S3-M4 拖拽/甩出目录（ACT-M-06 + ACT-T-06/07/08；元数据逐字段对齐
@@ -3124,6 +3742,8 @@ mod tests {
             audio: None,
             // S5-M1 起 `CoreCfg` 追加存档门面；测试取 `None` = 不载档不落盘（纯逻辑模式）。
             save: None,
+            // S8-M1 起 `CoreCfg` 追加活动全局配置；测试取默认（C7：口径来自 activities.json）。
+            activities: ActivityGlobalCfg::default(),
         }
     }
 

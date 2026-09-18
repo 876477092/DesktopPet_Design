@@ -822,7 +822,9 @@ pub fn wire_for_event(ev: &EmotionEvent, engine: &EmotionEngine<'_>) -> Option<W
         // 不需要跨窗口广播，也无对应线上载荷契约。
         | EmotionEvent::RelationCooling { .. }
         | EmotionEvent::SlackLinger { .. }
-        | EmotionEvent::InteractionReachability { .. } => None,
+        | EmotionEvent::InteractionReachability { .. }
+        // S8-M1：亲和升级只承载等级提示（数值已由快照反映），不上事件面。
+        | EmotionEvent::AffinityLevelUp { .. } => None,
     }
 }
 

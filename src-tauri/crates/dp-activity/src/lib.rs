@@ -74,9 +74,15 @@ impl ActivityRuntime {
     ///
     /// `phase` 恢复口径：存档只存进行中（Preparing / Running / Returning）实例；
     /// 其余阶段（Idle / Settled / Aborted）按无实例处理。
+    ///
+    /// 接收 `cfg`：恢复后的实例在 tick / 结算时仍按定义 ID 查岗位 / 课程 / 旅游配置
+    /// （`C7` 配置单源；`restore` 不得悄悄退回默认配置）。
     #[must_use]
-    pub fn restore(saved: Option<ActivityInstance>, phase: ActivityPhase) -> Self {
-        let cfg = ActivityGlobalCfg::default();
+    pub fn restore(
+        cfg: ActivityGlobalCfg,
+        saved: Option<ActivityInstance>,
+        phase: ActivityPhase,
+    ) -> Self {
         let mut rt = Self::new(cfg);
         if let (Some(inst), true) = (saved, phase.is_active()) {
             rt.current = Some(inst);
@@ -333,6 +339,35 @@ impl ActivityRuntime {
         self.current = None;
         self.phase = transition(self.phase, Transition::Clear);
         self.anomaly.reset_backward();
+    }
+
+    /// 活动全局配置（只读；dp-app 结算惩罚参数 / 前端展示用）。
+    #[must_use]
+    pub const fn cfg(&self) -> &ActivityGlobalCfg {
+        &self.cfg
+    }
+
+    /// 当前实例的出发消耗（`cost.energy/cleanliness`；dp-app 前置扣减用；
+    /// 旅游无前置数值消耗，返回 `None`——经济费用归 S8-M5）。
+    #[must_use]
+    pub fn current_cost(&self) -> Option<&dp_core::config::model::CostCfg> {
+        let inst = self.current.as_ref()?;
+        match inst.kind {
+            ActivityKind::Work => self.job_of(inst).map(|j| &j.cost),
+            ActivityKind::Study => self.course_of(inst).map(|c| &c.cost),
+            ActivityKind::Travel => None,
+        }
+    }
+
+    /// 当前实例的演出动作引用（出发 / 回归 / 桌面循环 / 明信片；S8-M4 演出接线）。
+    #[must_use]
+    pub fn action_ids(&self) -> Option<&dp_core::config::model::ActionRefCfg> {
+        let inst = self.current.as_ref()?;
+        match inst.kind {
+            ActivityKind::Work => self.job_of(inst).map(|j| &j.action_ids),
+            ActivityKind::Study => self.course_of(inst).map(|c| &c.action_ids),
+            ActivityKind::Travel => self.trip_of(inst).map(|t| &t.action_ids),
+        }
     }
 
     /// 当前明信片是否已到期且未推送（S8-M3 前端轮询用）。
@@ -674,7 +709,7 @@ mod tests {
             .dispatch(ActivityKind::Work, "W-01", 30, t0(), None, &check())
             .expect("派遣应成功");
         rt.confirm_departed().unwrap();
-        let restored = ActivityRuntime::restore(Some(inst.clone()), ActivityPhase::Running);
+        let restored = ActivityRuntime::restore(cfg(), Some(inst.clone()), ActivityPhase::Running);
         assert_eq!(restored.phase(), ActivityPhase::Running);
         assert_eq!(restored.current().unwrap().end_ms, t0() + 30 * 60_000);
     }

@@ -45,6 +45,8 @@ dp-audio = { path = "../dp-audio" }
 # S5-M4：单实例锁（R17；二次启动唤醒已运行实例，不产生第二份存档写入）。
 # **C9 零网络口径**：本机命名互斥体 / 窗口消息实现，无网络面（登记见根 `Cargo.toml`）。
 tauri-plugin-single-instance = { workspace = true }
+# S8-M1：外出活动运行时（打工 / 课程 / 旅游状态机与结算；`02 §5.13`）。
+dp-activity = { path = "../dp-activity" }
 
 [build-dependencies]
 tauri-build = { workspace = true }

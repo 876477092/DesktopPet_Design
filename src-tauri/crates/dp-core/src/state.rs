@@ -121,6 +121,30 @@ impl PetValues {
     }
 }
 
+/// S8-M1/M2：活动结算 / 前置消耗的**数值净变化**（`02 §5.15` 数值面）。
+///
+/// 由 `dp-activity` 的结算结果（`ActivityReward`）在 `dp-app` 侧翻译为纯数值增量，
+/// 再经 [`crate::emotion::EmotionEngine::apply_activity_deltas`] 一次性落地——
+/// 引擎持有 `PetValues` / `neglect.p` / `RoughTracker` 的私有写权，core-loop 不绕过引擎。
+///
+/// 边界：**经济入账 / 技能升级 / 学费与旅行券扣款归 S8-M5**（本结构不承载金额 /
+/// 道具 / 技能点，只承载六维数值与 P / rough 两个派生量）。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ActivityDeltas {
+    /// Mood 增量（正 = 提升）。
+    pub mood: f32,
+    /// Energy 增量（前置消耗为负）。
+    pub energy: f32,
+    /// Cleanliness 增量（旅游 / 打工为负）。
+    pub cleanliness: f32,
+    /// 亲密度经验增量（正）。
+    pub affinity_exp: f32,
+    /// 冷落压力 P 增量（提前召回 +6 / 正常回归 −20；clamp [0, cap]）。
+    pub neglect_p_delta: f32,
+    /// 粗暴度 step 触发（>0 时 `RoughTracker::observe_negative`；召回 +0.15）。
+    pub rough_step: f32,
+}
+
 /// 会话暂停窗口（P2-2 裁定：**起止时间戳入状态，S5-M2 只读**）。
 ///
 /// 语义：`start_ms` = 进入暂停的时刻；`end_ms` = `None` 表示**仍在暂停中**。
