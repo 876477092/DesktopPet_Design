@@ -129,10 +129,22 @@ async function bootstrapPetWindow(): Promise<void> {
   const receipt = createFrameReceipt();
   // S9-M1：帧回退路径（恒就绪）+ 骨骼主路径（占位适配器，S9-M2② 未就绪）。
   // BackendSwitcher：启动即走帧路径不黑屏；骨架 3s 未就绪自动定格帧回退。
-  const frame = new FrameRenderer(stage, cache, () => {
-    host.render();
-    receipt.onFrameRendered();
-  });
+  const frame = new FrameRenderer(
+    stage,
+    cache,
+    () => {
+      host.render();
+      receipt.onFrameRendered();
+    },
+    undefined,
+    undefined,
+    // S10 修复：失败分支（图集缺失 / 载荷非法 / 布局非法）也上报心跳回执——
+    // 让看门狗区分「设计内降级跳帧」与「渲染死亡」，消除重启风暴。
+    (reason) => {
+      console.warn('[pet] 帧跳过（心跳回执）：', reason);
+      receipt.onFrameRendered();
+    },
+  );
   const skeleton = new SkeletonRenderer(createPlaceholderSpineAdapter(), {
     onLoadError: (err) => console.warn('[pet] 骨骼后端未就绪，使用帧回退：', err),
   });

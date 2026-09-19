@@ -17,7 +17,12 @@
 //!       "hit": { "threshold": 32 },          // alpha 命中阈值（02 §7.7-3）
 //!       "secondary": [                        // 次级热区（狐耳等；与 K-2 同构）
 //!         { "name": "ear_l", "x": 0, "y": 0, "w": 64, "h": 64 }
-//!       ]
+//!       ],
+//!       "pack": {                             // S10 可选：分包坐标（方案 A；缺失 = 逐动作横排旧结构）
+//!         "png": "atlas-pack-0.png",          // 所属包 PNG（相对同目录）
+//!         "columns": 8, "rows": 9,            // 包网格行宽 stride × 总行数（物理单元数）
+//!         "row": 0                            // 本动作在包内占用的行（0 起）
+//!       }
 //!     }
 //!   ]
 //! }
@@ -26,6 +31,11 @@
 //! 帧矩形布局：**横向图集、行主序** —— 第 `index` 帧位于
 //! `col = index % columns`、`row = index / columns`，矩形
 //! `(x = col * frameW, y = row * frameH, w = frameW, h = frameH)`。
+//!
+//! **S10 分包（`pack` 存在时）**：本动作的帧 `i` 落在所属包的第 `pack.row` 行、
+//! 第 `i` 列，即包内**线性帧号** `pack.row × pack.columns + i`；据此按上式切片
+//! （`columns = pack.columns`、`rows = pack.rows`）。`pack` 缺失 → 保持旧语义（`png`
+//! 即本动作横排图，`columns = frame_count`、`rows = 1`）。
 
 use serde::{Deserialize, Serialize};
 
@@ -111,6 +121,24 @@ pub struct SecondaryRegionCfg {
     pub h: u32,
 }
 
+/// 分包坐标（S10 方案 A；`gen-atlas.mjs --pack` 产出，缺失 = 逐动作横排旧结构）。
+///
+/// 一个包 PNG 收纳多动作：每动作占包内一行（行主序），行内为该动作的横向帧序列
+/// （不足行宽补透明列）。本动作帧 `i` 的包内线性帧号 = `row × columns + i`，
+/// 切片规则与 [`AtlasMeta::frame_rect`] 一致（`columns` 为包行宽 stride）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct PackRef {
+    /// 所属包 PNG 文件名（相对 atlas.json 同目录）。
+    pub png: String,
+    /// 包行宽（物理单元列数，切片 stride）。
+    pub columns: u32,
+    /// 包总行数。
+    pub rows: u32,
+    /// 本动作在包内占用的行（0 起）。
+    pub row: u32,
+}
+
 /// 单动作图集元数据（与 gen-atlas.mjs 输出同构）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -135,6 +163,8 @@ pub struct AtlasMeta {
     pub hit: HitCfg,
     /// 次级热区列表。
     pub secondary: Vec<SecondaryRegionCfg>,
+    /// S10 分包坐标（可选；`None` = 逐动作横排旧结构，`Some` = 帧取自所属包）。
+    pub pack: Option<PackRef>,
 }
 
 impl AtlasMeta {
@@ -164,6 +194,67 @@ impl AtlasMeta {
         })
     }
 
+    /// 帧数据的来源 PNG 文件名（S10：`pack` 存在时取包文件，否则本动作横排图）。
+    ///
+    /// 掩码构建 / 面包取字节均据此读文件（与 [`Self::wire_columns`] 等配套使用）。
+    #[must_use]
+    pub fn source_png(&self) -> &str {
+        self.pack.as_ref().map_or(self.png.as_str(), |p| p.png.as_str())
+    }
+
+    /// 切片所需的行宽 stride（S10：`pack` 存在时为包行宽，否则本动作帧数）。
+    #[must_use]
+    pub fn wire_columns(&self) -> u32 {
+        self.pack.as_ref().map_or(self.columns, |p| p.columns)
+    }
+
+    /// 切片所需的行数（S10：`pack` 存在时为包总行数，否则本动作行数）。
+    #[must_use]
+    pub fn wire_rows(&self) -> u32 {
+        self.pack.as_ref().map_or(self.rows, |p| p.rows)
+    }
+
+    /// 本动作第 `local` 帧在来源图内的**线性帧号**（S10）。
+    ///
+    /// - `pack` 存在：`pack.row × pack.columns + local`（包内行主序定位）；
+    /// - 否则：`local`（本动作横排图内即帧号）。
+    #[must_use]
+    pub fn wire_frame_index(&self, local: u32) -> u32 {
+        match &self.pack {
+            Some(p) => p.row.saturating_mul(p.columns).saturating_add(local),
+            None => local,
+        }
+    }
+
+    /// 第 `local` 帧在**来源图**内的矩形（S10；`pack` 缺失时等价 [`Self::frame_rect`]）。
+    ///
+    /// 包内布局按 `col = 线性号 % pack.columns`、`row = 线性号 / pack.columns` 还原，
+    /// 与本文件头注释及前端 `computeFrameRect` 同构。
+    pub fn source_frame_rect(&self, local: u32) -> Result<Rect, AssetError> {
+        if local >= self.frame_count {
+            return Err(AssetError::FrameIndexOutOfRange {
+                index: local,
+                frame_count: self.frame_count,
+            });
+        }
+        let cols = self.wire_columns();
+        if cols == 0 {
+            return Err(AssetError::AtlasJson(format!(
+                "动作 {} 的切片行宽为 0",
+                self.action_id
+            )));
+        }
+        let linear = self.wire_frame_index(local);
+        let col = linear % cols;
+        let row = linear / cols;
+        Ok(Rect {
+            x: col * self.frame_w,
+            y: row * self.frame_h,
+            w: self.frame_w,
+            h: self.frame_h,
+        })
+    }
+
     /// 结构校验。
     fn validate(&self) -> Result<(), AssetError> {
         if self.columns == 0 || self.rows == 0 {
@@ -179,6 +270,27 @@ impl AtlasMeta {
                 self.frame_count,
                 self.columns * self.rows
             )));
+        }
+        if let Some(pack) = &self.pack {
+            if pack.columns == 0 || pack.rows == 0 {
+                return Err(AssetError::AtlasJson(format!(
+                    "动作 {} 的 pack.columns/rows 不得为 0",
+                    self.action_id
+                )));
+            }
+            if pack.row >= pack.rows {
+                return Err(AssetError::AtlasJson(format!(
+                    "动作 {} 的 pack.row={} 越界（pack.rows={}）",
+                    self.action_id, pack.row, pack.rows
+                )));
+            }
+            // 本动作帧序不得溢出包行宽（行内列数上限）。
+            if self.columns > pack.columns {
+                return Err(AssetError::AtlasJson(format!(
+                    "动作 {} 的帧数 {} 超过包行宽 pack.columns={}",
+                    self.action_id, self.columns, pack.columns
+                )));
+            }
         }
         Ok(())
     }
@@ -278,5 +390,89 @@ mod tests {
             "anchor": { "x": 0, "y": 0 }, "hit": { "threshold": 32 }, "secondary": []
         }"#;
         assert!(AtlasMeta::from_json_str(json).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // S10 分包（方案 A）坐标换算
+    // -----------------------------------------------------------------------
+
+    /// 包内动作元数据（3 帧，落在包第 2 行，包行宽 4、共 3 行）。
+    const PACKED_ACTION: &str = r#"{
+        "actionId": "ACT-M-02",
+        "png": "atlas-pack-0.png",
+        "frameW": 256, "frameH": 256,
+        "columns": 3, "rows": 1, "frameCount": 3,
+        "anchor": { "x": 128, "y": 256 },
+        "hit": { "threshold": 32 },
+        "secondary": [],
+        "pack": { "png": "atlas-pack-0.png", "columns": 4, "rows": 3, "row": 2 }
+    }"#;
+
+    #[test]
+    fn pack_absent_keeps_legacy_semantics() {
+        let file = AtlasFile::from_json_str(SAMPLE_FILE).expect("样例应可解析");
+        let meta = file.find("ACT-M-01").expect("应包含 ACT-M-01");
+        assert!(meta.pack.is_none());
+        assert_eq!(meta.source_png(), "ACT-M-01_idle.png");
+        assert_eq!(meta.wire_columns(), 8);
+        assert_eq!(meta.wire_rows(), 1);
+        assert_eq!(meta.wire_frame_index(3), 3);
+        // 包缺失时 source_frame_rect 等价 frame_rect。
+        assert_eq!(meta.source_frame_rect(3).expect("3 应合法"), meta.frame_rect(3).expect("3 应合法"));
+    }
+
+    #[test]
+    fn pack_ref_parses_and_maps_to_pack_coordinates() {
+        let meta = AtlasMeta::from_json_str(PACKED_ACTION).expect("包动作应可解析");
+        let pack = meta.pack.as_ref().expect("应含 pack");
+        assert_eq!(pack.png, "atlas-pack-0.png");
+        assert_eq!(pack.columns, 4);
+        assert_eq!(pack.rows, 3);
+        assert_eq!(pack.row, 2);
+
+        // 来源取包文件；切片 stride/行数取包几何。
+        assert_eq!(meta.source_png(), "atlas-pack-0.png");
+        assert_eq!(meta.wire_columns(), 4);
+        assert_eq!(meta.wire_rows(), 3);
+
+        // 帧 i 的包内线性号 = row(2) × columns(4) + i。
+        assert_eq!(meta.wire_frame_index(0), 8);
+        assert_eq!(meta.wire_frame_index(2), 10);
+
+        // 线性号 8 → col 0, row 2 → (x=0, y=512)。
+        assert_eq!(meta.source_frame_rect(0).expect("0 应合法"), Rect { x: 0, y: 512, w: 256, h: 256 });
+        // 线性号 10 → col 2, row 2 → (x=512, y=512)。
+        assert_eq!(meta.source_frame_rect(2).expect("2 应合法"), Rect { x: 512, y: 512, w: 256, h: 256 });
+    }
+
+    #[test]
+    fn pack_row_out_of_bounds_is_invalid() {
+        let json = r#"{
+            "actionId": "ACT-X-01", "png": "atlas-pack-9.png",
+            "frameW": 256, "frameH": 256,
+            "columns": 4, "rows": 1, "frameCount": 4,
+            "anchor": { "x": 0, "y": 0 }, "hit": { "threshold": 32 }, "secondary": [],
+            "pack": { "png": "atlas-pack-9.png", "columns": 4, "rows": 2, "row": 5 }
+        }"#;
+        assert!(AtlasMeta::from_json_str(json).is_err());
+    }
+
+    #[test]
+    fn pack_action_wider_than_row_is_invalid() {
+        let json = r#"{
+            "actionId": "ACT-X-02", "png": "atlas-pack-9.png",
+            "frameW": 256, "frameH": 256,
+            "columns": 9, "rows": 1, "frameCount": 9,
+            "anchor": { "x": 0, "y": 0 }, "hit": { "threshold": 32 }, "secondary": [],
+            "pack": { "png": "atlas-pack-9.png", "columns": 8, "rows": 2, "row": 0 }
+        }"#;
+        assert!(AtlasMeta::from_json_str(json).is_err());
+    }
+
+    #[test]
+    fn pack_absent_json_still_parses() {
+        // 前向兼容：未含 pack 字段的旧 atlas.json 仍可解析（pack = None）。
+        let file = AtlasFile::from_json_str(SAMPLE_FILE).expect("旧样例应可解析");
+        assert!(file.actions.iter().all(|m| m.pack.is_none()));
     }
 }

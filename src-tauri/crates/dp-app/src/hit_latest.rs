@@ -178,7 +178,7 @@ fn build_entry(
         .iter()
         .map(|s| HitRect { x: s.x as i32, y: s.y as i32, w: s.w as i32, h: s.h as i32 })
         .collect();
-    let Some(full) = loader(&meta.png) else {
+    let Some(full) = loader(meta.source_png()) else {
         eprintln!(
             "[dp-app] hit_latest 动作 {} PNG 不可用，全帧回退 bbox 判定",
             meta.action_id
@@ -193,10 +193,11 @@ fn build_entry(
         };
     };
     // F-05：掩码构建复用 dp-assets::mask::MaskBuilder（阈值取 atlas hit.threshold）。
+    // S10：`pack` 存在时按包内坐标切片（source_frame_rect），否则等价旧 frame_rect。
     let threshold = meta.hit.threshold;
     let frames = (0..meta.frame_count)
         .map(|i| {
-            match meta.frame_rect(i) {
+            match meta.source_frame_rect(i) {
                 Ok(rect) => match extract_frame_rgba(&full, rect) {
                     Some(rgba) => MaskBuilder::from_rgba(&rgba, meta.frame_w, meta.frame_h, threshold),
                     None => HitMask::empty(),
@@ -584,6 +585,7 @@ mod tests {
                 w: 4,
                 h: 4,
             }],
+            pack: None,
         }
     }
 
@@ -595,6 +597,43 @@ mod tests {
             if name == "ACT-A.png" { Some(body.clone()) } else { None }
         };
         Arc::new(build_store_with(&atlas, &loader))
+    }
+
+    /// 包图案（32×32，2 行 × 2 帧/行，帧 16×16）：仅**第 1 行**（y=16..20, x=0..4）点亮。
+    fn pack_body() -> DecodedRgba {
+        let mut data = vec![0u8; 32 * 32 * 4];
+        for y in 16..20u32 {
+            for x in 0..4u32 {
+                data[((y * 32 + x) * 4 + 3) as usize] = 255; // 包第 1 行左上 4×4
+            }
+        }
+        DecodedRgba { width: 32, height: 32, data }
+    }
+
+    #[test]
+    fn pack_meta_mask_slices_from_pack_row() {
+        // 动作落在包第 1 行（pack.row=1、行宽 2、共 2 行）：帧 0 应切出 y=16 行区，
+        // 命中包内点亮的 4×4；若误按旧坐标（y=0）切，则掩码全空（本测守住分包切片）。
+        let mut m = meta("ACT-A");
+        m.png = "atlas-pack-0.png".to_string();
+        m.pack = Some(dp_assets::atlas::PackRef {
+            png: "atlas-pack-0.png".to_string(),
+            columns: 2,
+            rows: 2,
+            row: 1,
+        });
+        let atlas = AtlasFile { version: 1, actions: vec![m] };
+        let body = pack_body();
+        let loader = |name: &str| -> Option<DecodedRgba> {
+            if name == "atlas-pack-0.png" { Some(body.clone()) } else { None }
+        };
+        let store = build_store_with(&atlas, &loader);
+        // 帧 0 掩码：应切出包第 1 行（y=16 段）→ 局部 (2,2) 命中点亮区。
+        let frame0 = &store.entries[0].frames[0];
+        assert!(frame0.bit_at(2, 2), "分包坐标切片应命中包第 1 行点亮区（y=16 段）");
+        // 局部 (2,10) 在帧 16×16 外，回退 false（越界不 panic）；关键对照：
+        // 若误按旧坐标（y=0，即包行 0）切，则帧 0 掩码将全空、本断言反向失败。
+        assert!(!frame0.is_empty(), "帧 0 掩码不得为空（证明切到包行 1 而非空行 0）");
     }
 
     fn slot_with(store: Option<Arc<MaskStore>>) -> Arc<OnceLock<Arc<MaskStore>>> {

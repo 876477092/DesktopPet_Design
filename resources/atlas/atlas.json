@@ -1,0 +1,1224 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "actionId": "ACT-E-01",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-E-02",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-E-03",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 4,
+      "rows": 1,
+      "frameCount": 4,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-E-04",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-E-05",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-E-06",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-I-01",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-I-02",
+      "png": "atlas-pack-0.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-0.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-I-03",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-I-04",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-I-05",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 4,
+      "rows": 1,
+      "frameCount": 4,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-I-06",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-M-01",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 4,
+      "rows": 1,
+      "frameCount": 4,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-M-02",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-M-03",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-M-04",
+      "png": "atlas-pack-1.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-1.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-M-05",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-M-06",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-M-07",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-N-01",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-N-02",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-N-03",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-N-04",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-N-05",
+      "png": "atlas-pack-2.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-2.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-N-06",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-N-07",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-N-08",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-N-09",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-N-10",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-N-11",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-N-12",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-N-13",
+      "png": "atlas-pack-3.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-3.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-N-14",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-N-15",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-N-16",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-P-01",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-P-02",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 4,
+      "rows": 1,
+      "frameCount": 4,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-P-03",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-P-04",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-S-01",
+      "png": "atlas-pack-4.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-4.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-S-02",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-S-03",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-S-04",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-T-01",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-T-02",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 4
+      }
+    },
+    {
+      "actionId": "ACT-T-03",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 5
+      }
+    },
+    {
+      "actionId": "ACT-T-04",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 6
+      }
+    },
+    {
+      "actionId": "ACT-T-05",
+      "png": "atlas-pack-5.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-5.png",
+        "columns": 8,
+        "rows": 8,
+        "row": 7
+      }
+    },
+    {
+      "actionId": "ACT-T-06",
+      "png": "atlas-pack-6.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-6.png",
+        "columns": 8,
+        "rows": 5,
+        "row": 0
+      }
+    },
+    {
+      "actionId": "ACT-T-07",
+      "png": "atlas-pack-6.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-6.png",
+        "columns": 8,
+        "rows": 5,
+        "row": 1
+      }
+    },
+    {
+      "actionId": "ACT-T-08",
+      "png": "atlas-pack-6.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 8,
+      "rows": 1,
+      "frameCount": 8,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-6.png",
+        "columns": 8,
+        "rows": 5,
+        "row": 2
+      }
+    },
+    {
+      "actionId": "ACT-T-09",
+      "png": "atlas-pack-6.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-6.png",
+        "columns": 8,
+        "rows": 5,
+        "row": 3
+      }
+    },
+    {
+      "actionId": "ACT-T-10",
+      "png": "atlas-pack-6.png",
+      "frameW": 256,
+      "frameH": 256,
+      "columns": 6,
+      "rows": 1,
+      "frameCount": 6,
+      "anchor": {
+        "x": 128,
+        "y": 256
+      },
+      "hit": {
+        "threshold": 32
+      },
+      "secondary": [],
+      "pack": {
+        "png": "atlas-pack-6.png",
+        "columns": 8,
+        "rows": 5,
+        "row": 4
+      }
+    }
+  ]
+}

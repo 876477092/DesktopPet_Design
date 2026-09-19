@@ -162,7 +162,7 @@ mod tests {
     fn local_hour_via_wall_clock_port() {
         // FakeWallClock 以注入毫秒换算本地时间；这里构造一个已知小时（UTC+8）。
         let wall = FakeWallClock::new(1_800_000_000_000); // 2027-01-10 附近的固定时刻
-        let _ = wall.set_offset_sec(28_800); // 不读真实时钟
+        wall.set_offset_sec(28_800); // 不读真实时钟
         // 该毫秒对应本地小时在 [0,23] 内即可（不断言具体值，避免测试脆）。
         let hour = local_hour_of(&wall);
         assert!(hour <= 23);

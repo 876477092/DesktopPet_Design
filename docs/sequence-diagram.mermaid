@@ -1,0 +1,52 @@
+%% DesktopPet 帧回执链路 + 看门狗自愈 · 序列图（根因诊断用）
+%% 结论：链路本身无断点；acked_delta=0 的唯一解释是 main.ts:208 订阅之前整段未执行（menu TDZ 嫌疑）
+sequenceDiagram
+    autonumber
+    participant W as FrameWatchdog(Rust)
+    participant P as run_player_loop<br/>(dp-frame-player 线程)
+    participant E as Tauri event bus
+    participant M as main.ts<br/>bootstrapPetWindow()
+    participant F as FrameRenderer
+    participant S as WebGLStage
+    participant R as frame_receipt<br/>(Rust command)
+    participant V as supervisor<br/>(dp-supervisor 线程)
+
+    Note over M: ⚠️ 疑点 main.ts:117-215<br/>若此区间 throw → 下方订阅永不建立<br/>（menu TDZ @ main.ts:160）
+
+    P->>W: note_sent()   [bridge.rs:587-589]
+    P->>E: emit(pet://frame, RenderFrameCmd v1)  [bridge.rs:596]
+    E->>M: listenEvent(PET_EVENT.FRAME) callback  [main.ts:208]
+    M->>M: parseRenderFrameCmd(payload)  [main.ts:209]
+    M->>F: renderer.draw(cmd)  [main.ts:214]
+    F->>F: consume(): computeFrameRect + cache.get(atlasPng)
+    F->>S: drawSubRect(bitmap, rect, mirror, alpha)
+    Note over S: ⚠️ 图集内容 = 程序生成纯色方块<br/>alpha=255（gen-atlas.mjs:202-206）<br/>→ 用户看到「一个色块」(R1/R5)
+    S-->>F: 合成完成
+    F->>F: onFrameReady()  [main.ts:132-135]
+    F->>M: host.render() → LayerHost 按序合成
+    M->>R: invokeCommand('frame_receipt')  [main.ts:78]<br/>500ms 节流
+    R->>W: note_acked()
+    W-->>V: sample() → (sent, acked)  [supervisor.rs:309-316]
+
+    loop 每 5 tick ≈ 5s
+        V->>W: sample()
+        V->>V: watchdog_step(sent_delta, acked_delta)  [supervisor.rs:402-433]
+    end
+
+    alt sent_delta>0 且 acked_delta==0 连续 3 窗（≈15s）
+        V->>V: WatchdogStep::Heal → heal_fail+1
+        V->>R: self_heal_renderer()  [supervisor.rs:451]
+        Note over V,R: ① CoreInput::FlushSave（≤3s）<br/>② webview.reload()<br/>⚠️ 不重置 FrameWatchdog / 不重锚观察窗 (R3)
+        alt 前端仍崩（如 menu TDZ）
+            V->>V: heal_fail 累积
+        end
+    end
+
+    alt heal_fail >= 3
+        V->>V: WatchdogStep::Restart  [supervisor.rs:368-378]
+        V->>V: show_tray_balloon("连续多次自动恢复失败…")
+        V->>V: app.restart()  ← 进程级重启
+        Note over V: ⚠️ 缺陷依旧 → 重启后再次进入本循环<br/>用户可见：周期性闪退 (R3)<br/>dev-err.log:193-206 实证
+    end
+
+    Note over M,F: ✅ 若前端正常运行（pet-err.log 场景）：<br/>回执通 → 但屏幕内容**仍是色块**<br/>⇒ 色块与回执链路**无因果**，纯资源缺失

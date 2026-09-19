@@ -338,7 +338,7 @@ mod tests {
     fn ten_thousand_random_ops_replay_consistent() {
         // 确定性 LCG（不引 rand 依赖），模拟 1 万笔随机入账/消费。
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = |state: &mut u64| -> i64 {
+        let next = |state: &mut u64| -> i64 {
             *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             ((*state >> 33) % 50 + 1) as i64
         };

@@ -18,7 +18,9 @@
 //!      「最近 5s 是否有帧回执」（`FrameWatchdog` 计数差分），连续 3 次无回执 →
 //!      ① 阻塞落盘（`CoreInput::FlushSave` + 3s 回执超时）；② 重建宠物 WebView 渲染器
 //!      （`reload()`，WebView2 渲染器重建，不重建进程、不丢状态）；③ 连续 3 次自愈失败 →
-//!      托盘气泡 + `app.restart()`。另：启动后按 `SaveStatusHandle.needs_notice`
+//!      放弃自愈（**不再 `app.restart()`**，避免在渲染持续异常时形成重启风暴），
+//!      仅托盘气泡提示用户手动重启；门闩 `gave_up` 置位后本进程内不再重复动作，
+//!      杜绝「托盘气泡风暴」。另：启动后按 `SaveStatusHandle.needs_notice`
 //!      托盘气泡提示存档异常（AC-14「损坏档并提示」收口）。
 //!
 //! ⚠️ **本文件自门禁 Windows 目标**：内部引用 `crate::PetPlatform`（`#[cfg(windows)]`），
@@ -260,6 +262,11 @@ struct WatchdogState {
     miss: u32,
     /// 连续自愈失败次数（回执恢复后清零）。
     heal_fail: u32,
+    /// 门闩：已放弃自愈（连续 `HEAL_FAIL_LIMIT` 次自愈失败后置位）。
+    ///
+    /// 置位后 [`watchdog_step`] 恒返回 [`WatchdogStep::None`]，本进程内不再触发任何
+    /// 自愈 / 提示动作——否则只是把「重启风暴」换成「托盘气泡风暴」。
+    gave_up: bool,
 }
 
 /// 读取降级策略配置：`animation.json.degrade`（经与 bridge 同源的配置目录候选链），
@@ -365,16 +372,15 @@ fn perf_and_watchdog_tick(
     match watchdog_step(sent_delta, acked_delta, watchdog) {
         WatchdogStep::None => {}
         WatchdogStep::Heal => self_heal_renderer(app),
-        WatchdogStep::Restart => {
-            eprintln!(
-                "[dp-app] supervisor 连续 {HEAL_FAIL_LIMIT} 次自愈失败：重启进程 + 托盘提示"
-            );
+        WatchdogStep::GiveUp => {
+            // 连续多次自愈失败：放弃自动恢复（**不重启进程**，避免重启风暴），
+            // 仅提示用户手动重启；门闩 gave_up 已置位，后续窗口不再重复触发。
+            eprintln!("[dp-app] supervisor 连续 {HEAL_FAIL_LIMIT} 次自愈失败：放弃自愈 + 托盘提示");
             show_tray_balloon(
                 app,
-                "桌面宠物渲染异常",
-                "连续多次自动恢复失败，正在重启桌面宠物…",
+                "桌面宠物渲染持续异常",
+                "自动恢复未能生效，请从托盘菜单手动重启桌面宠物",
             );
-            app.restart();
         }
     }
 }
@@ -387,19 +393,23 @@ fn perf_and_watchdog_tick(
 /// - 本窗有回执 → 渲染健康；若此前在自愈则计一次成功（`heal_fail` 清零）；
 /// - 本窗有帧发但无回执 → `miss + 1`；连续 [`WATCHDOG_MISS_LIMIT`] 次 →
 ///   触发自愈（`Heal`，`heal_fail + 1`）；连续 [`HEAL_FAIL_LIMIT`] 次自愈失败 →
-///   `Restart`（重启进程 + 托盘提示）。
+///   放弃自愈（`GiveUp`，仅托盘提示，**不重启进程**；门闩 `gave_up` 置位后恒返回 `None`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchdogStep {
     /// 观察 / 正常（不动作）。
     None,
     /// 触发一次渲染自愈（K-8 步骤①+②）。
     Heal,
-    /// 连续自愈失败达阈值：重启进程 + 托盘提示。
-    Restart,
+    /// 连续自愈失败达阈值：放弃自愈，托盘提示用户手动重启。
+    GiveUp,
 }
 
 #[must_use]
 fn watchdog_step(sent_delta: u64, acked_delta: u64, state: &mut WatchdogState) -> WatchdogStep {
+    // 门闩：一旦放弃自愈，本进程内不再触发任何动作（防「重启风暴 / 托盘气泡风暴」）。
+    if state.gave_up {
+        return WatchdogStep::None;
+    }
     if sent_delta == 0 {
         // 播放器未推帧（无图集 / 暂停中）→ 不是渲染异常，重置 miss 不触发。
         state.miss = 0;
@@ -426,7 +436,9 @@ fn watchdog_step(sent_delta: u64, acked_delta: u64, state: &mut WatchdogState) -
         state.heal_fail
     );
     if state.heal_fail >= HEAL_FAIL_LIMIT {
-        WatchdogStep::Restart
+        // 首次达阈值：置门闩并放弃自愈；后续窗口由函数开头的 gave_up 检查拦截。
+        state.gave_up = true;
+        WatchdogStep::GiveUp
     } else {
         WatchdogStep::Heal
     }
@@ -752,9 +764,9 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_three_heal_failures_restart() {
+    fn watchdog_three_heal_failures_gives_up() {
         let mut s = WatchdogState::default();
-        // 每次自愈 = 连续 3 个无回执窗；3 次自愈失败 → Restart（第 9 个无回执窗）。
+        // 每次自愈 = 连续 3 个无回执窗；3 次自愈失败 → GiveUp（第 9 个无回执窗）。
         for heal_idx in 1..=2u32 {
             assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
             assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
@@ -771,10 +783,45 @@ mod tests {
         assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
         assert_eq!(
             watchdog_step(5, 0, &mut s),
-            WatchdogStep::Restart,
-            "连续 3 次自愈失败应触发重启"
+            WatchdogStep::GiveUp,
+            "连续 3 次自愈失败应放弃自愈（不再重启进程）"
         );
         assert_eq!(s.heal_fail, 3);
         assert_eq!(s.miss, 0);
+        assert!(s.gave_up, "放弃自愈后门闩应置位");
+    }
+
+    #[test]
+    fn watchdog_gives_up_only_once() {
+        let mut s = WatchdogState::default();
+        // 前两次自愈成功（各 = 2 个 None + 1 个 Heal，共 6 个无回执窗）。
+        for _ in 0..2 {
+            assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+            assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+            assert_eq!(
+                watchdog_step(5, 0, &mut s),
+                WatchdogStep::Heal,
+                "前两次自愈仍在正常路径"
+            );
+        }
+        assert_eq!(s.heal_fail, 2);
+        assert!(!s.gave_up, "尚未达阈值，门闩不应置位");
+        // 第 7、8 个无回执窗仍为 None，第 9 个首次 GiveUp（第 3 次自愈失败）。
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(
+            watchdog_step(5, 0, &mut s),
+            WatchdogStep::GiveUp,
+            "第 9 个无回执窗首次放弃自愈"
+        );
+        assert!(s.gave_up, "首次 GiveUp 后门闩应置位");
+        // 门闩：继续喂第 10、11、12 个无回执窗，全部返回 None（防「托盘气泡风暴」）。
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        // 即便回执恢复，门闩也不清除（本进程内不再自愈）。
+        assert_eq!(watchdog_step(5, 5, &mut s), WatchdogStep::None);
+        assert_eq!(watchdog_step(5, 0, &mut s), WatchdogStep::None);
+        assert!(s.gave_up, "门闩一旦置位应保持");
     }
 }

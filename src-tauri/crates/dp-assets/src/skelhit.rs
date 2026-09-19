@@ -188,7 +188,7 @@ mod tests {
     fn missing_clip_degrades_to_false() {
         let table = SkelHitTable::from_coverage_json(&doc_with_one_cell("wave", 0)).unwrap();
         assert!(!table.hit("nope", 0, 0.5, 0.5));
-        assert!(table.is_empty() == false);
+        assert!(!table.is_empty());
     }
 
     #[test]

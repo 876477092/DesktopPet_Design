@@ -15,10 +15,26 @@
  *   5. `atlas.json` 结构与 `dp-assets/src/atlas.rs` 的 `AtlasFile` **同构冻结**
  *      （两端任一改动必须同步另一端）。
  *
+ * S10 增量（分包机制，方案 A）：
+ *   - `--pack` 开启后，把逐动作横排图集按「每包 ≤ `--per-pack` 动作（默认 8）」合成
+ *     **网格包 PNG** `atlas-pack-<i>.png`（每动作占一行，行主序；行内为该动作的横向
+ *     帧序列，不足行宽的尾部补透明列）；`atlas.json` 每条新增可选 `pack` 子对象
+ *     `{ png, columns, rows, row }`（`columns`=包网格行宽 stride，`rows`=包总行数，
+ *     `row`=动作所在行），**未开启时不产出 `pack` 字段**（与旧结构字节兼容）；
+ *     每包 ≤8 动作（256×256 帧 ⇒ 2048/256=8 行），包边长硬上限 2048×2048，
+ *     `composePack()` 对超限**直接 throw**（把文档纪律变成代码硬约束）；
+ *   - 前端/内核仍按「行主序 `col = index % columns`」切片：包坐标下用
+ *     `frameIndex = row × packColumns + localIndex`、`columns = packColumns`、
+ *     `rows = packRows` 即得正确 (sx, sy)（`computeFrameRect` 零改动）。
+ *     逐动作横排语义（`png=单动作文件`、`columns=动作帧数`、`rows=1`）由 `pack`
+ *     缺失时的旧路径保持不变。
+ *
  * 参数：
- *   --src <dir>    序列帧根目录（默认 `assets/sprites`）
- *   --out <dir>    图集输出目录（默认：各组帧所在目录下的 `atlas/` 子目录）
- *   --threshold n  alpha 命中阈值（默认 32，`02 §7.7-3`）
+ *   --src <dir>        序列帧根目录（默认 `assets/sprites`）
+ *   --out <dir>        图集输出目录（默认：各组帧所在目录下的 `atlas/` 子目录）
+ *   --threshold n      alpha 命中阈值（默认 32，`02 §7.7-3`）
+ *   --pack             开启分包合成（默认关；关闭时逐动作横排输出旧结构）
+ *   --per-pack n       每包动作数上限（默认 8，受 2048×2048 硬上限约束；仅 `--pack` 生效）
  *
  * 约束：
  *   - 零 npm 依赖：PNG 编解码用 `node:zlib` 手写实现（编码每个扫描行滤波器
@@ -46,6 +62,10 @@ const FRAME_SIZE = 256;
 const DEFAULT_THRESHOLD = 32;
 /** 默认锚点：底部中心（物理像素）。 */
 const ANCHOR = { x: FRAME_SIZE / 2, y: FRAME_SIZE };
+/** 单包图集边长硬上限（`02 §7.7` / `01 §...`：帧回退图集单图 ≤2048×2048；256×256 帧 ⇒ ≤8 行）。 */
+const ATLAS_MAX_PX = 2048;
+/** 默认每包动作数上限（与前端 `atlasPacks.DEFAULT_ACTIONS_PER_PACK` 同口径：29→4、53→7）。 */
+const DEFAULT_ACTIONS_PER_PACK = 8;
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 /** 工程根（repo/）。 */
@@ -214,7 +234,13 @@ function decodePng(buf) {
 
 /** 解析命令行参数。 */
 function parseArgs(argv) {
-  const args = { src: join(repoRoot, 'assets', 'sprites'), out: null, threshold: DEFAULT_THRESHOLD };
+  const args = {
+    src: join(repoRoot, 'assets', 'sprites'),
+    out: null,
+    threshold: DEFAULT_THRESHOLD,
+    pack: false,
+    perPack: DEFAULT_ACTIONS_PER_PACK,
+  };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--src') {
@@ -227,8 +253,16 @@ function parseArgs(argv) {
         throw new Error(`--threshold 必须为 0~255 整数，实际 ${argv[i]}`);
       }
       args.threshold = value;
+    } else if (arg === '--pack') {
+      args.pack = true;
+    } else if (arg === '--per-pack') {
+      const value = Number(argv[++i]);
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new Error(`--per-pack 必须为正整数，实际 ${argv[i]}`);
+      }
+      args.perPack = value;
     } else {
-      throw new Error(`未知参数：${arg}（支持 --src/--out/--threshold）`);
+      throw new Error(`未知参数：${arg}（支持 --src/--out/--threshold/--pack/--per-pack）`);
     }
   }
   return args;
@@ -347,6 +381,88 @@ function composeAtlas(group, logs) {
 }
 
 // ---------------------------------------------------------------------------
+// S10 分包合成（方案 A：多动作网格包）
+// ---------------------------------------------------------------------------
+
+/**
+ * 把已合成的逐动作横排图集均衡切包（纯函数；与前端 `atlasPacks.planAtlasPacks`
+ * 同口径：去重保序、每包 ≤ perPack）。
+ *
+ * @param {Array<{ entry: object, composed: object }>} items 逐动作图集（输入序即包内行序）
+ * @param {number} perPack 每包动作数上限
+ * @returns {Array<Array<{ entry: object, composed: object }>>} 包数组（每包 ≤ perPack）
+ */
+function planPacks(items, perPack) {
+  const per = Number.isInteger(perPack) && perPack > 0 ? perPack : DEFAULT_ACTIONS_PER_PACK;
+  const packs = [];
+  for (let i = 0; i < items.length; i += per) {
+    packs.push(items.slice(i, i + per));
+  }
+  return packs;
+}
+
+/**
+ * 把一个包内的逐动作横排图集合成为**网格包 PNG**（每动作占一行，行主序）。
+ *
+ * 网格几何：`packColumns = max(各动作帧数)`（行宽 stride，物理列数），
+ * `packRows = 包内动作数`；动作 `row` 的帧 `i` 落在包内
+ * `(col = i, row = row)` 单元（行内尾部补透明列）。由此：
+ *   包内线性帧号 = `row × packColumns + i`，
+ *   前端/内核按 `col = 线性号 % packColumns`、`row = 线性号 / packColumns`
+ *   即可切出正确子矩形（`computeFrameRect` 零改动）。
+ *
+ * @param {Array<{ entry: object, composed: object }>} packItems 包内动作（输入序即行序）
+ * @returns {{ width: number, height: number, rgba: Buffer, packColumns: number, packRows: number }}
+ * @throws {Error} 包边长超过 [`ATLAS_MAX_PX`]（2048×2048 硬上限）时抛出
+ */
+function composePack(packItems) {
+  let packColumns = 1;
+  for (const { entry } of packItems) {
+    packColumns = Math.max(packColumns, entry.columns);
+  }
+  const packRows = packItems.length;
+  const width = FRAME_SIZE * packColumns;
+  const height = FRAME_SIZE * packRows;
+
+  // 几何硬守卫（`02 §7.7` 帧回退图集单图 ≤2048×2048）：把「必须 ≤2048²」从文档
+  // 纪律变成代码硬约束，防止以后调 `--per-pack` 或帧尺寸又悄悄超限。
+  if (width > ATLAS_MAX_PX || height > ATLAS_MAX_PX) {
+    throw new Error(
+      `包尺寸 ${width}×${height} 超过硬上限 ${ATLAS_MAX_PX}×${ATLAS_MAX_PX}：` +
+        `packColumns=${packColumns}、packRows=${packRows}（帧 ${FRAME_SIZE}）；` +
+        `请减小 --per-pack 或帧尺寸`,
+    );
+  }
+  const packRgba = Buffer.alloc(width * height * 4);
+
+  for (let row = 0; row < packItems.length; row++) {
+    const { composed } = packItems[row];
+    // composed.rgba 为该动作横排图集（宽 = frameCount × FRAME_SIZE，高 = FRAME_SIZE）；
+    // 逐扫描行搬入 (row, col 0..frameCount-1) 区段（行内其余列保持透明）。
+    const actionWidth = composed.width;
+    for (let y = 0; y < FRAME_SIZE; y++) {
+      const dstRowStart = ((row * FRAME_SIZE + y) * width) * 4;
+      const srcRowStart = (y * actionWidth) * 4;
+      composed.rgba.copy(packRgba, dstRowStart, srcRowStart, srcRowStart + actionWidth * 4);
+    }
+  }
+  return { width, height, rgba: packRgba, packColumns, packRows };
+}
+
+/**
+ * 由包几何生成某动作在 `atlas.json` 中的可选 `pack` 子对象。
+ *
+ * @param {string} packPng   包 PNG 文件名（如 `atlas-pack-0.png`）
+ * @param {number} packColumns 包行宽（物理列数，stride）
+ * @param {number} packRows    包总行数
+ * @param {number} row         动作所在行（0 起）
+ * @returns {{png: string, columns: number, rows: number, row: number}}
+ */
+function packRef(packPng, packColumns, packRows, row) {
+  return { png: packPng, columns: packColumns, rows: packRows, row };
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
@@ -414,17 +530,21 @@ function main() {
     }
     try {
       mkdirSync(outDir, { recursive: true });
-      for (const { entry, composed } of items) {
-        const pngPath = join(outDir, entry.png);
-        writeFileSync(pngPath, encodePng(composed.width, composed.height, composed.rgba));
-        console.log(`[gen-atlas] 已写出 ${pngPath}（${entry.frameCount} 帧，${composed.width}×${composed.height}）`);
+      if (args.pack) {
+        writePackedAtlases(outDir, items, args.perPack);
+      } else {
+        for (const { entry, composed } of items) {
+          const pngPath = join(outDir, entry.png);
+          writeFileSync(pngPath, encodePng(composed.width, composed.height, composed.rgba));
+          console.log(`[gen-atlas] 已写出 ${pngPath}（${entry.frameCount} 帧，${composed.width}×${composed.height}）`);
+        }
       }
       const atlasJson = {
         version: 1,
         actions: items.map((it) => it.entry),
       };
       writeFileSync(join(outDir, 'atlas.json'), `${JSON.stringify(atlasJson, null, 2)}\n`);
-      console.log(`[gen-atlas] 已写出 ${join(outDir, 'atlas.json')}（${items.length} 个动作）`);
+      console.log(`[gen-atlas] 已写出 ${join(outDir, 'atlas.json')}（${items.length} 个动作${args.pack ? `，${items.length > 0 ? planPacks(items, args.perPack).length : 0} 包` : ''}）`);
     } catch (err) {
       console.error(`[gen-atlas] 写出失败：${err.message}`);
       return EXIT_FAIL;
@@ -432,6 +552,38 @@ function main() {
   }
 
   return EXIT_OK;
+}
+
+/**
+ * 分包写出（方案 A）：`items` 按 ≤ perPack 均衡切包 → 每包合成网格 PNG
+ * `atlas-pack-<i>.png`；并**就地为每个 entry 挂上 `pack` 子对象**（含 png/columns/
+ * rows/row），使随后统一的 atlas.json 写出携带包坐标；同时把 entry.png 也改写为
+ * 包文件名（内核/前端 `meta.png` 取包，切片用 pack 坐标）。
+ *
+ * 副作用：入参 items 的 entry 被就地更新（pack、png 字段）。
+ *
+ * @param {string} outDir 输出目录
+ * @param {Array<{ entry: object, composed: object }>} items 逐动作图集
+ * @param {number} perPack 每包动作数上限
+ */
+function writePackedAtlases(outDir, items, perPack) {
+  const packs = planPacks(items, perPack);
+  packs.forEach((packItems, packIndex) => {
+    const packPng = `atlas-pack-${packIndex}.png`;
+    const composed = composePack(packItems);
+    const pngPath = join(outDir, packPng);
+    writeFileSync(pngPath, encodePng(composed.width, composed.height, composed.rgba));
+    console.log(
+      `[gen-atlas] 已写出 ${pngPath}（${packItems.length} 动作，${composed.width}×${composed.height}，` +
+        `${composed.packColumns} 列 × ${composed.packRows} 行）`,
+    );
+    packItems.forEach(({ entry }, row) => {
+      const ref = packRef(packPng, composed.packColumns, composed.packRows, row);
+      // 就地更新：pack 子对象 + png 指向包文件（内核/前端按包取图，按 pack 坐标切片）。
+      entry.pack = ref;
+      entry.png = packPng;
+    });
+  });
 }
 
 process.exit(main());

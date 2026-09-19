@@ -75,6 +75,10 @@ interface ReadyFrame {
  * @param now          单调时钟读数（默认 `performance.now`；仅测本地过渡时长，
  *                     C3 边界：不读墙钟、不落业务计时）
  * @param fade         S9-M1 交叉淡入配置（默认 150ms 线性）
+ * @param onFrameSkipped 失败分支跳帧回调（S10 修复：图集缺失 / 载荷非法 / 布局非法）
+ *                     —— 装配方据此也上报帧回执心跳，使看门狗能区分
+ *                     「设计内降级跳帧」与「渲染死亡」（C8：事件名/载荷不变）；
+ *                     追加在参数表末尾以保持既有调用签名向后兼容
  */
 export class FrameRenderer implements ICharacterRenderer {
   /** 渲染后端种类（K-14：`kind` 标识，骨骼实现为 S9-M1 段）。 */
@@ -99,6 +103,7 @@ export class FrameRenderer implements ICharacterRenderer {
     private readonly onFrameReady: () => void,
     private readonly now: () => number = () => performance.now(),
     fade: { ms?: number; easing?: CrossfadeEasing } = {},
+    private readonly onFrameSkipped: (reason: string) => void = () => {},
   ) {
     // B10：位图被 AtlasCache LRU close() 驱逐 → 立即失效引用它的就绪帧，
     // 否则 paint 将使用已关闭的 ImageBitmap（真实风险：>12 图集触发驱逐）。
@@ -220,6 +225,7 @@ export class FrameRenderer implements ICharacterRenderer {
   private async consume(cmd: RenderFrameCmdV1): Promise<void> {
     if (cmd.columns <= 0 || cmd.rows <= 0) {
       console.warn('[FrameRenderer] 载荷缺图集布局（columns/rows=0），跳帧：', cmd.actionId);
+      this.onFrameSkipped('invalid-layout');
       return;
     }
     const rect = computeFrameRect(
@@ -231,10 +237,12 @@ export class FrameRenderer implements ICharacterRenderer {
     );
     if (rect === null) {
       console.warn('[FrameRenderer] 帧子矩形非法，跳帧：index=', cmd.frameIndex);
+      this.onFrameSkipped('invalid-rect');
       return;
     }
     if (cmd.atlasPng.length === 0) {
       console.warn('[FrameRenderer] 载荷缺图集引用（atlasPng 为空），跳帧：', cmd.actionId);
+      this.onFrameSkipped('missing-atlas-ref');
       return;
     }
 
@@ -242,6 +250,7 @@ export class FrameRenderer implements ICharacterRenderer {
     if (bitmap === null) {
       // 02 §7.4：图集缺失降级——告警 + 跳帧。
       console.warn('[FrameRenderer] 图集不可用，跳帧：', cmd.atlasPng);
+      this.onFrameSkipped('atlas-unavailable');
       return;
     }
 

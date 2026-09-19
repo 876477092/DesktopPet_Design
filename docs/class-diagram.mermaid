@@ -1,0 +1,157 @@
+%% DesktopPet 渲染侧类图（存量项目结构，根因诊断标注）
+classDiagram
+    direction TB
+
+    class ICharacterRenderer {
+        <<interface>>
+        +kind: 'frame' | 'skeleton'
+        +isReady() bool
+        +draw(cmd: RenderFrameCmdV1) void
+        +paint() void
+    }
+
+    class BackendSwitcher {
+        -primary: ICharacterRenderer
+        -fallback: ICharacterRenderer
+        -latched: bool
+        -active: ICharacterRenderer
+        -armedAt: number
+        -timeoutMs: number = 3000
+        +activeKind: string
+        +isFallbackLatched: bool
+        +draw(cmd) void
+        +paint() void
+        -maybeAdvance() void
+        +SwitcherHooks hooks
+    }
+    note for BackendSwitcher "启动即 active=fallback（:56-57）\n3s 未就绪 → latched + onFallbackLatched\n→ 骨架路径从未被使用（R1）"
+
+    class FrameRenderer {
+        +kind = 'frame'
+        -readyFrame: ReadyFrame
+        -fadeFrom: ReadyFrame
+        -pendingCmd: RenderFrameCmdV1
+        -drawing: bool
+        +isReady() bool "恒 true"
+        +draw(cmd) void "latest-wins"
+        +paint() void
+        -consume(cmd) Promise
+    }
+
+    class SkeletonRenderer {
+        +kind = 'skeleton'
+        -loaded: bool
+        -loadError: unknown
+        +isReady() bool
+        +draw(cmd) void
+        +paint() void
+        +setSkin(name) void
+    }
+
+    class SpineRuntimeAdapter {
+        <<interface>>
+        +isLoaded() bool
+        +load() Promise
+        +setAnimation(id, looping) void
+        +setSkin(name) void
+        +render(opts) void
+    }
+
+    class PlaceholderSpineAdapter {
+        +isLoaded() bool "恒 false"
+        +load() Promise "直接 throw"
+    }
+    note for PlaceholderSpineAdapter "spineAdapter.ts:16-24\n明确的占位实现\n正式 Spine 4.2 绑定从未交付（R1）"
+
+    class WebGLStage {
+        -canvas: HTMLCanvasElement
+        -kind: 'webgl2' | 'webgl1' | 'canvas2d'
+        -ctx2d: CanvasRenderingContext2D
+        -gfx: GlProgram
+        -texture: WebGLTexture
+        +backend: string
+        +create(canvas) WebGLStage
+        +resize(w, h) void
+        +drawSubRect(bitmap, atlasName, rect, mirror, alpha, opts) void
+    }
+
+    class AtlasCache {
+        -loader: (name) => Promise~ArrayBuffer~
+        -cache: Map
+        -evicted: listeners
+        +get(name) Promise~ImageBitmap~
+        +onEvict(listener) UnlistenFn
+    }
+
+    class LayerHost {
+        -layers: Map~LayerName, LayerDrawable~
+        +setLayer(name, draw) void
+        +render() void
+    }
+
+    class MenuLayer {
+        -view: MenuView
+        -opened: bool
+        -needShow: bool
+        -needHide: bool
+        -pendingAt: {x, y}
+        +open(at) void
+        +close() void
+        +choose(id) void
+        +flush() void
+    }
+
+    class MenuView {
+        <<interface>>
+        +show(items, at) void
+        +hide() void
+        +containerSize() {width, height}
+    }
+
+    class DomMenuView {
+        -rootEl: HTMLDivElement
+        -panel: HTMLDivElement
+        -backdrop: HTMLDivElement
+        -onCommand: (id) => void
+        -onClose: () => void
+        +show(items, at) void
+        +hide() void
+        +containerSize() {width, height}
+    }
+    note for DomMenuView "构造期只存 handlers，不回调\n（:277-297）⇒ 不触发 main.ts:160 TDZ\n但 containerSize() 返回自身尺寸（:333-335）→ R4"
+
+    class FrameWatchdog {
+        -sent: Arc~AtomicU64~
+        -acked: Arc~AtomicU64~
+        +note_sent() void
+        +note_acked() void
+        +sample() (u64, u64)
+    }
+
+    class WatchdogState {
+        +prev_sent: u64
+        +prev_acked: u64
+        +miss: u32
+        +heal_fail: u32
+    }
+
+    class WatchdogStep {
+        <<enum>>
+        None
+        Heal
+        Restart
+    }
+
+    ICharacterRenderer <|.. FrameRenderer : 实现
+    ICharacterRenderer <|.. SkeletonRenderer : 实现
+    SpineRuntimeAdapter <|.. PlaceholderSpineAdapter : 实现（占位）
+    SkeletonRenderer --> SpineRuntimeAdapter : 窄端口注入
+    BackendSwitcher --> ICharacterRenderer : primary = skeleton
+    BackendSwitcher --> ICharacterRenderer : fallback = frame
+    FrameRenderer --> WebGLStage : 舞台注入
+    FrameRenderer --> AtlasCache : 位图注入
+    LayerHost ..> FrameRenderer : 经 BackendSwitcher.paint()
+    MenuLayer --> MenuView : 端口
+    MenuView <|.. DomMenuView : 实现
+    FrameWatchdog --> WatchdogState : supervisor 差分采样
+    WatchdogState --> WatchdogStep : watchdog_step() 纯函数

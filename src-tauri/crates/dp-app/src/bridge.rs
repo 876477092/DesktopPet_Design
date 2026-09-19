@@ -159,7 +159,10 @@ impl RenderFrameCmd {
 
 /// 由图集元数据 + 播放器一帧拼装 `RenderFrameCmd` v1（纯函数，单测覆盖）。
 ///
-/// - 布局字段（png/columns/rows/frameW/frameH）取自图集元数据；
+/// - 布局字段（png/columns/rows/frameW/frameH）取自图集元数据；**S10 分包**：
+///   当 `meta.pack` 存在时，`atlas_png` 取包文件名、`columns/rows` 取包网格尺寸、
+///   `frame_index` 取**包内线性帧号** `pack.row × pack.columns + local`，
+///   使前端 `computeFrameRect` 零改动即切出正确子矩形；`pack` 缺失 → 旧语义不变；
 /// - `mirror` / `frame_index` / `action_id` 取自播放器输出（K-4 镜像规则）；
 /// - `alpha` 恒 1.0（整体不透明度由设置模块 S3+ 接管）；
 /// - `fps` 为当前 tick 档位（K-4 档位提示，与动作自身帧率正交）。
@@ -168,10 +171,10 @@ pub fn frame_cmd(meta: &dp_assets::atlas::AtlasMeta, frame: &PlayerFrame, tier_f
     RenderFrameCmd {
         version: FRAME_CMD_VERSION,
         action_id: frame.action_id.clone(),
-        atlas_png: meta.png.clone(),
-        frame_index: frame.frame_index,
-        columns: meta.columns,
-        rows: meta.rows,
+        atlas_png: meta.source_png().to_string(),
+        frame_index: meta.wire_frame_index(frame.frame_index),
+        columns: meta.wire_columns(),
+        rows: meta.wire_rows(),
         frame_w: meta.frame_w,
         frame_h: meta.frame_h,
         mirror: frame.mirror,
@@ -2171,6 +2174,63 @@ mod tests {
         ] {
             assert!(value.as_object().expect("对象").contains_key(key), "缺字段 {key}");
         }
+    }
+
+    #[test]
+    fn frame_cmd_pack_absent_emits_legacy_coordinates() {
+        // pack 缺失 → 载荷与旧语义逐字节一致（png=动作图，columns=帧数，index=帧号）。
+        let m = meta("ACT-M-02", "ACT-M-02_walk.png", 8);
+        let frame = PlayerFrame {
+            action_id: "ACT-M-02".to_string(),
+            frame_index: 5,
+            mirror: false,
+            action_fps: 12,
+        };
+        let cmd = frame_cmd(&m, &frame, 6);
+        assert_eq!(cmd.atlas_png, "ACT-M-02_walk.png");
+        assert_eq!(cmd.columns, 8);
+        assert_eq!(cmd.rows, 1);
+        assert_eq!(cmd.frame_index, 5);
+    }
+
+    #[test]
+    fn frame_cmd_pack_present_emits_pack_coordinates() {
+        // pack 存在 → atlasPng 取包、columns/rows 取包几何、frameIndex 取包内线性号。
+        let mut m = meta("ACT-M-02", "atlas-pack-0.png", 3);
+        m.pack = Some(dp_assets::atlas::PackRef {
+            png: "atlas-pack-0.png".to_string(),
+            columns: 4,
+            rows: 3,
+            row: 2,
+        });
+        let frame = PlayerFrame {
+            action_id: "ACT-M-02".to_string(),
+            frame_index: 1,
+            mirror: false,
+            action_fps: 6,
+        };
+        let cmd = frame_cmd(&m, &frame, 6);
+        assert_eq!(cmd.atlas_png, "atlas-pack-0.png");
+        assert_eq!(cmd.columns, 4, "columns 取包行宽");
+        assert_eq!(cmd.rows, 3, "rows 取包行数");
+        assert_eq!(cmd.frame_index, 2 * 4 + 1, "包内线性号 = row×columns + local");
+        // 前端 computeFrameRect 语义核对：线性号 9 → col 1、row 2。
+        let rect = cmd.frame_rect().expect("包坐标应合法");
+        assert_eq!((rect.x, rect.y), (256, 512));
+        // 载荷字段集合不变（C8：shape 冻结，仅值语义变）。
+        let json = serde_json::to_string(&cmd).expect("应可序列化");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("应为合法 JSON");
+        for key in [
+            "version", "actionId", "atlasPng", "frameIndex", "columns", "rows", "frameW",
+            "frameH", "mirror", "alpha", "fps",
+        ] {
+            assert!(value.as_object().expect("对象").contains_key(key), "缺字段 {key}");
+        }
+        assert_eq!(
+            value.as_object().expect("对象").len(),
+            11,
+            "不得新增/删除载荷字段（C8 冻结）"
+        );
     }
 
     #[test]

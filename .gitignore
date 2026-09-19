@@ -38,6 +38,13 @@ resources/**
 !resources/schema/
 !resources/schema/.gitkeep
 !resources/schema/*.json
+# S10：图集为版本化交付物（`02 §7.7` 帧序列 → 横向图集 + atlas.json，由
+# `scripts/gen-sprites.mjs` + `scripts/gen-atlas.mjs` 自制生成后入库）。
+# 现状：图集 PNG/JSON 为版本化交付物，需入库以保证干净 checkout 可复现构建；
+# 注意：入库 git ≠ 捆进安装包 —— `02 §4.4` 明文「帧回退图集不随基础包分发」。
+!resources/atlas/
+!resources/atlas/*.png
+!resources/atlas/*.json
 
 # 事故留档：2026-09-14 .git 对象库损坏的现场快照（含 reflog 等元数据，仅供手工排查，不入库）
 .git-broken-*/

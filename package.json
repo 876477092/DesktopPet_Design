@@ -19,7 +19,9 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "gen:types": "node scripts/gen-types.mjs",
-    "gen:atlas": "node scripts/gen-atlas.mjs"
+    "gen:atlas": "node scripts/gen-atlas.mjs",
+    "gen:sprites": "node scripts/gen-sprites.mjs",
+    "gen:art": "node scripts/gen-sprites.mjs && node scripts/gen-atlas.mjs --src assets/sprites --out resources/atlas --pack"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.1.1",

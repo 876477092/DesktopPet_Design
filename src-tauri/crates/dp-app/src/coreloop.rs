@@ -1267,7 +1267,7 @@ impl CoreLoopState {
                     self.request_save();
                     eprintln!("[dp-app] 装饰已摆放：槽 {slot} ← {item_id}");
                 }
-                return Vec::new();
+                Vec::new()
             }
             // S10-M1：取下某槽装饰（写 save.decor[slot] = null）。
             CoreInput::DecorRemove { slot } => {
@@ -1289,7 +1289,7 @@ impl CoreLoopState {
                     self.request_save();
                     eprintln!("[dp-app] 装饰已取下：槽 {slot}");
                 }
-                return Vec::new();
+                Vec::new()
             }
             // S8-M1：提前召回（Running → Returning；收益按已完成比例 ×0.5 + P+6）。
             CoreInput::ActivityRecall => {

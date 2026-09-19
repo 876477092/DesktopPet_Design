@@ -312,3 +312,115 @@ describe('FrameRenderer B10 驱逐守卫', () => {
     expect(stage.calls).toHaveLength(0);
   });
 });
+
+/**
+ * S10 修复：失败分支心跳解耦。
+ *
+ * `frame_receipt` 语义是「合成完成回执」，看门狗却把它当「前端活着」的心跳，
+ * 导致设计内降级跳帧（图集缺失 / 载荷非法 / 布局非法）被误判为渲染死亡 →
+ * 重启风暴。修复：所有失败分支也调用 `onFrameSkipped`，装配方据此发心跳，
+ * 但**不**触发 `onFrameReady`（不污染「成功合成」语义）。
+ */
+describe('FrameRenderer 失败分支心跳（S10：跳帧 ≠ 渲染死亡）', () => {
+  /** 收集失败原因 + 成功合成次数的装配替身。 */
+  function makeSpy(status: { ready: number; skipped: string[] }) {
+    return {
+      onReady: () => { status.ready += 1; },
+      onSkipped: (reason: string) => { status.skipped.push(reason); },
+    };
+  }
+
+  it('布局非法（columns/rows=0）→ onFrameSkipped(invalid-layout)，不发 ready', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    cache.put('A.png', new FakeBitmap());
+    const status = { ready: 0, skipped: [] as string[] };
+    const spy = makeSpy(status);
+    const renderer = new FrameRenderer(
+      stage, cache, spy.onReady, new FakeClock().now, {}, spy.onSkipped,
+    );
+
+    renderer.draw({ ...cmd('ACT-A', 'A.png'), columns: 0, rows: 0 });
+    await flush();
+    renderer.paint();
+    expect(status.skipped).toEqual(['invalid-layout']);
+    expect(status.ready).toBe(0);
+    expect(stage.calls).toHaveLength(0);
+  });
+
+  it('子矩形非法（frameIndex 越界）→ onFrameSkipped(invalid-rect)', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    cache.put('A.png', new FakeBitmap());
+    const status = { ready: 0, skipped: [] as string[] };
+    const spy = makeSpy(status);
+    const renderer = new FrameRenderer(
+      stage, cache, spy.onReady, new FakeClock().now, {}, spy.onSkipped,
+    );
+
+    renderer.draw({ ...cmd('ACT-A', 'A.png'), frameIndex: 99 });
+    await flush();
+    expect(status.skipped).toEqual(['invalid-rect']);
+    expect(status.ready).toBe(0);
+  });
+
+  it('atlasPng 为空 → onFrameSkipped(missing-atlas-ref)', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    const status = { ready: 0, skipped: [] as string[] };
+    const spy = makeSpy(status);
+    const renderer = new FrameRenderer(
+      stage, cache, spy.onReady, new FakeClock().now, {}, spy.onSkipped,
+    );
+
+    renderer.draw({ ...cmd('ACT-A', 'A.png'), atlasPng: '' });
+    await flush();
+    expect(status.skipped).toEqual(['missing-atlas-ref']);
+    expect(status.ready).toBe(0);
+  });
+
+  it('图集不可用 → onFrameSkipped(atlas-unavailable)；心跳仍发出（看门狗不误判）', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    const status = { ready: 0, skipped: [] as string[] };
+    const spy = makeSpy(status);
+    const renderer = new FrameRenderer(
+      stage, cache, spy.onReady, new FakeClock().now, {}, spy.onSkipped,
+    );
+
+    renderer.draw(cmd('ACT-A', 'missing.png'));
+    await flush();
+    renderer.paint();
+    expect(status.skipped).toEqual(['atlas-unavailable']);
+    // 关键：跳帧也触发心跳（skipped 非空即装配方会发回执），不误判为死亡。
+    expect(status.skipped.length).toBeGreaterThan(0);
+    expect(status.ready).toBe(0);
+    expect(stage.calls).toHaveLength(0);
+  });
+
+  it('成功合成只发 ready、不发 skipped（两种信号互斥）', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    cache.put('A.png', new FakeBitmap());
+    const status = { ready: 0, skipped: [] as string[] };
+    const spy = makeSpy(status);
+    const renderer = new FrameRenderer(
+      stage, cache, spy.onReady, new FakeClock().now, {}, spy.onSkipped,
+    );
+
+    renderer.draw(cmd('ACT-A', 'A.png'));
+    await flush();
+    expect(status.ready).toBe(1);
+    expect(status.skipped).toEqual([]);
+  });
+
+  it('省略 onFrameSkipped（旧调用签名）不报错，跳帧静默降级', async () => {
+    const stage = new FakeStage();
+    const cache = new FakeCache();
+    const renderer = new FrameRenderer(stage, cache, () => {}, new FakeClock().now);
+    renderer.draw(cmd('ACT-A', 'missing.png'));
+    await flush();
+    renderer.paint();
+    expect(stage.calls).toHaveLength(0);
+  });
+});
