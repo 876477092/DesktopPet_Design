@@ -634,6 +634,10 @@ pub struct PetSnapshotV2 {
     pub skills: std::collections::BTreeMap<String, SkillSnapshot>,
     /// 展示态（扩展字段；便于属性面板一并渲染当前情绪）。
     pub state: EmotionStateWire,
+    /// 相册照片条目（S10；形状由相册段决定，前端只读渲染；空数组 = 尚无照片）。
+    pub album: serde_json::Value,
+    /// 桌面装饰 5 槽（S10；每槽为商品 ID 字符串或 `null`；长度恒 5，`DECOR_SLOTS=5`）。
+    pub decor: Vec<serde_json::Value>,
 }
 
 impl Default for PetSnapshotV2 {
@@ -648,6 +652,8 @@ impl Default for PetSnapshotV2 {
             inventory: Vec::new(),
             skills: std::collections::BTreeMap::new(),
             state: EmotionStateWire::Idle,
+            album: serde_json::Value::Array(Vec::new()),
+            decor: vec![serde_json::Value::Null; crate::save::schema::DECOR_SLOTS],
         }
     }
 }
@@ -727,6 +733,8 @@ pub fn project_snapshot(engine: &EmotionEngine<'_>, personality_text: &str, rero
         inventory: Vec::new(),
         skills: std::collections::BTreeMap::new(),
         state: engine.state.emotion.into(),
+        album: serde_json::Value::Array(Vec::new()),
+        decor: vec![serde_json::Value::Null; crate::save::schema::DECOR_SLOTS],
     }
 }
 

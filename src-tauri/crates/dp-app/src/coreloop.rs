@@ -53,8 +53,8 @@ use dp_core::anim::{
 };
 use dp_core::config::{ConfigBundle, ConfigService};
 use dp_core::config::model::{
-    ActivityGlobalCfg, CatchphraseCfg, ClickFeedbackCfg, EmotionConfig, GestureCfg,
-    InteractionCfg, NeedsConfig, RoamCfg,
+    AchievementsConfig, ActivityGlobalCfg, CatchphraseCfg, ClickFeedbackCfg, EmotionConfig,
+    GestureCfg, InteractionCfg, NeedsConfig, RoamCfg, ShopConfig,
 };
 // S8-M1：外出活动运行时（`02 §5.13`；`ActivityGlobalCfg` 由 dp-core 配置束提供，
 // 强类型活动模型住在 dp-activity——依赖方向 dp-app → dp-activity → dp-core）。
@@ -354,6 +354,10 @@ pub struct CoreCfg {
     pub save: Option<SaveStore>,
     /// 活动全局配置（`activities.json.global`；S8-M1 派遣 / 结算 / 明信片口径，C7）。
     pub activities: ActivityGlobalCfg,
+    /// 商城目录（`shop.json`；S8-M5/M6 经济上限 + 30 商品）。
+    pub shop: ShopConfig,
+    /// 成就目录（`achievements.json`；FR-9-1 幂等入账）。
+    pub achievements: AchievementsConfig,
 }
 
 /// 共享站立面适配器（S7-M3 前置首件 / B12-① / P2-16）。
@@ -530,6 +534,8 @@ pub struct CoreLoopState {
     /// `Some(Early)` = 本次回归是用户提前召回（收益 ×0.5 + P+6 + rough+0.15）；
     /// `None` = 自然到期（收益全量，P−20）。异常中止不经此通道（`Aborted` 直结）。
     pending_recall_kind: Option<RecallKind>,
+    /// S8-M5/M6：经济运行时（账本 / 限购 / 目录 / 背包 / 成就）。
+    economy: crate::economy_rt::EconomyRuntime,
 }
 
 /// 回归问候（S5-M2：`02 §6.1` 启动时序「ACT-T-01 挥手 + 时段问候」）。
@@ -580,6 +586,8 @@ impl CoreLoopState {
             audio,
             save,
             activities,
+            shop,
+            achievements,
         } = cfg;
         let platform_graph = Arc::new(RwLock::new(PlatformGraph::new(monitors.clone(), now_ms)));
         // S7-M3 前置首件（B12-① / P2-16）：把平台图注入决策层站立面——决策层据此
@@ -648,6 +656,20 @@ impl CoreLoopState {
                 ),
             }
         }
+        // S8-M5/M6：经济运行时。有存档 → 从 save.economy/save.inventory 还原；否则全新。
+        let economy = match save.as_ref().filter(|st| st.has_session_anchor()) {
+            Some(st) => {
+                let cache = st.cache();
+                crate::economy_rt::EconomyRuntime::restore(
+                    shop,
+                    achievements,
+                    &cache.economy,
+                    &cache.inventory,
+                )
+            }
+            None => crate::economy_rt::EconomyRuntime::new(shop, achievements),
+        };
+
         Self {
             pos: clamped,
             phase: Phase::Roam,
@@ -691,6 +713,7 @@ impl CoreLoopState {
             activity_runtime,
             wall: Arc::new(SystemWallClock),
             pending_recall_kind: None,
+            economy,
             activity: ActivitySample::default(),
             reminders: ReminderScheduler::new(
                 ReminderConfig::new(true, 45, true, 45, 15, 180, true),
@@ -1066,6 +1089,9 @@ impl CoreLoopState {
         };
         store.cache_mut().activity =
             serde_json::to_value(activity_save).unwrap_or(serde_json::Value::Null);
+        // S8-M5/M6：经济 D 段随每拍落盘。
+        store.cache_mut().economy = self.economy.to_save_economy();
+        store.cache_mut().inventory = self.economy.to_save_inventory();
         let force = core::mem::take(save_requested);
         // 无论成功失败都清位：失败靠下一拍重试，绝不让一个坏盘位把后续落盘全堵死。
         let result = if force { store.flush_force(now_mono_ms) } else { store.flush(now_mono_ms) };
@@ -1198,6 +1224,73 @@ impl CoreLoopState {
                 }
                 Vec::new()
             }
+            // S8-M6：商城购买（事务：余额 / 限购 / 失败冲正；结果经 economy 段回传前端）。
+            CoreInput::Purchase { item_id, qty } => {
+                let at_ms = now_ms as i64;
+                let day_key = Self::local_day_key(at_ms);
+                let week_key = Self::local_week_key(at_ms);
+                let affinity_level = self.emotion.state.values.affinity_level;
+                match self.economy.buy(&item_id, qty, affinity_level, &day_key, &week_key, at_ms) {
+                    Ok(out) => {
+                        eprintln!(
+                            "[dp-app] 购买成功：{}×{} 花 {}，余额 {}",
+                            item_id, out.qty, out.spent, out.balance_after
+                        );
+                        self.request_save();
+                    }
+                    Err(err) => eprintln!("[dp-app] 购买被拒：{err}"),
+                }
+                Vec::new()
+            }
+            // S10-M1：桌面装饰摆放（槽位 0..=4；背包须拥有该摆件；写 save.decor[slot]）。
+            CoreInput::DecorPlace { slot, item_id } => {
+                let slot = slot as usize;
+                let slots = dp_core::save::schema::DECOR_SLOTS;
+                if slot >= slots {
+                    eprintln!("[dp-app] 装饰摆放被拒：槽位 {slot} 越界（{slots} 槽）");
+                    return Vec::new();
+                }
+                if self.economy.inventory_count(&item_id) == 0 {
+                    eprintln!("[dp-app] 装饰摆放被拒：背包无摆件 {item_id}");
+                    return Vec::new();
+                }
+                if let Some(save) = self.save.as_mut() {
+                    let decor = save
+                        .cache_mut()
+                        .decor
+                        .as_array_mut()
+                        .expect("save.decor 恒为数组");
+                    if decor.len() < slots {
+                        decor.resize(slots, serde_json::Value::Null);
+                    }
+                    decor[slot] = serde_json::Value::String(item_id.clone());
+                    self.request_save();
+                    eprintln!("[dp-app] 装饰已摆放：槽 {slot} ← {item_id}");
+                }
+                return Vec::new();
+            }
+            // S10-M1：取下某槽装饰（写 save.decor[slot] = null）。
+            CoreInput::DecorRemove { slot } => {
+                let slot = slot as usize;
+                let slots = dp_core::save::schema::DECOR_SLOTS;
+                if slot >= slots {
+                    eprintln!("[dp-app] 装饰取下被拒：槽位 {slot} 越界");
+                    return Vec::new();
+                }
+                if let Some(save) = self.save.as_mut() {
+                    let decor = save
+                        .cache_mut()
+                        .decor
+                        .as_array_mut()
+                        .expect("save.decor 恒为数组");
+                    if let Some(cell) = decor.get_mut(slot) {
+                        *cell = serde_json::Value::Null;
+                    }
+                    self.request_save();
+                    eprintln!("[dp-app] 装饰已取下：槽 {slot}");
+                }
+                return Vec::new();
+            }
             // S8-M1：提前召回（Running → Returning；收益按已完成比例 ×0.5 + P+6）。
             CoreInput::ActivityRecall => {
                 match self.activity_runtime.recall() {
@@ -1245,7 +1338,12 @@ impl CoreLoopState {
             | CoreInput::FlushSave { .. }
             // S8-M1：活动命令不需要 AppHandle（只动运行时 + 内核）→ 交回纯逻辑出口。
             | CoreInput::ActivityDispatch { .. }
-            | CoreInput::ActivityRecall => false,
+            | CoreInput::ActivityRecall
+            // S8-M6：购买不需要 AppHandle → 交回纯逻辑出口。
+            // S10-M1：装饰摆放/取下只动存档缓存 → 交回纯逻辑出口。
+            | CoreInput::Purchase { .. }
+            | CoreInput::DecorPlace { .. }
+            | CoreInput::DecorRemove { .. } => false,
             CoreInput::ResetAllData => {
                 match self.save.as_mut() {
                     Some(save) => match save.reset_to_default(now_mono_ms) {
@@ -1975,7 +2073,8 @@ impl CoreLoopState {
             cleanliness: self.emotion.state.values.cleanliness,
             satiety: self.emotion.state.values.satiety,
             diligence: (self.emotion.personality().diligence * 100.0).clamp(0.0, 100.0),
-            economy_scale: 1.0, // S8-M5 起按设置档位（casual/standard/diligent）
+            // S8-M5/M6：饱食度 <20 → 打工收益 ×0.7（饿肚子干活打折）；<5 的拒派在 dispatch 处。
+            economy_scale: if self.emotion.state.values.satiety < 20.0 { 0.7 } else { 1.0 },
             time_segment: dp_activity::time_segment_of(local_hour),
             present: true, // 预留字段：settle 当前不消费；在场判定细化归 S8-M5
             local_hour,
@@ -2022,6 +2121,34 @@ impl CoreLoopState {
             rough_step: reward.rough_delta,
         };
         let _ = self.emotion.apply_activity_deltas(&deltas, now_ms);
+        // S8-M5：打工结算心币入账（经三道硬顶；幂等 refId = 结算时刻）。
+        if reward.coin > 0 {
+            let day_key = Self::local_day_key(now_ms);
+            let activity_id = format!("{:?}", reward.kind);
+            let ref_id = format!("work:{:?}:{now_ms}", reward.kind);
+            self.economy.credit_work(
+                &activity_id,
+                reward.coin,
+                &ref_id,
+                now_ms,
+                &day_key,
+            );
+            self.request_save();
+        }
+    }
+
+    /// 由墙钟毫秒推导本地日桶（`YYYY-MM-DD`；C3 口径与 dp-economy 一致）。
+    fn local_day_key(at_ms: i64) -> String {
+        use chrono::{TimeZone, Utc};
+        let dt = Utc.timestamp_millis_opt(at_ms).single().unwrap_or_default();
+        dt.format("%Y-%m-%d").to_string()
+    }
+
+    /// 由墙钟毫秒推导 ISO 周桶（`YYYY-Www`；限购周桶用）。
+    fn local_week_key(at_ms: i64) -> String {
+        use chrono::{Datelike, TimeZone, Utc};
+        let dt = Utc.timestamp_millis_opt(at_ms).single().unwrap_or_default();
+        format!("{}-W{:02}", dt.iso_week().year(), dt.iso_week().week())
     }
 
     /// 活动相关状态变更 → 存档脏位（下一拍 `save_tick` 落盘）。
@@ -2368,6 +2495,20 @@ impl CoreLoopState {
         // S8-M3：活动快照（进行中实例 → `activity` 段；前端 ActivityCard 消费；
         // `PetSnapshotV2.activity` 为 `Option<Value>`，不破坏既有契约）。
         snapshot.activity = self.activity_snapshot_json();
+        // S10-M1：经济余额 + 背包并入快照（商城 / 背包 Tab 的唯一数据源；
+        // 此前 economy/inventory 仅落盘、未回传前端）。
+        snapshot.economy.coin = self.economy.balance();
+        snapshot.inventory = self.economy.inventory_wire();
+        // S10-M1：相册 + 桌面装饰 5 槽回传前端（只读；写经 pet_decor_place/remove）。
+        if let Some(save) = &self.save {
+            let cache = save.cache();
+            snapshot.album = cache.album.clone();
+            snapshot.decor = cache
+                .decor
+                .as_array()
+                .cloned()
+                .unwrap_or_else(|| vec![serde_json::Value::Null; dp_core::save::schema::DECOR_SLOTS]);
+        }
         if let Err(err) = handle.emit(STATE_EVENT, &snapshot) {
             eprintln!("[dp-app] core-loop 广播 {STATE_EVENT} 降级：{err}");
         }
@@ -2933,6 +3074,8 @@ fn build_state(app: &AppHandle) -> Option<CoreLoopState> {
         save,
         // S8-M1：活动全局配置（`activities.json.global`；派遣 / 结算 / 明信片口径）。
         activities: bundle.activities.activity.clone(),
+        shop: bundle.shop.clone(),
+        achievements: bundle.achievements.clone(),
     };
     let mut state = CoreLoopState::new(pos, monitors, cfg, seed, 0);
     // S5-M4：设置状态（应用层唯一设置真源）由配置束 ⊕ 存档 B 段推导，装配后
@@ -3919,6 +4062,8 @@ mod tests {
             save: None,
             // S8-M1 起 `CoreCfg` 追加活动全局配置；测试取默认（C7：口径来自 activities.json）。
             activities: ActivityGlobalCfg::default(),
+            shop: ShopConfig::default(),
+            achievements: AchievementsConfig::default(),
         }
     }
 

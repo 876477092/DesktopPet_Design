@@ -173,6 +173,54 @@ pub fn pet_recall(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// S8-M6：商城购买（前端 `invoke('pet_buy', { itemId, qty })`）。
+///
+/// 只做**投递**：`CoreInput::Purchase` 交给 core-loop 逻辑档，余额 / 限购 / 日顶 /
+/// 失败冲正在 core-loop 以当时账本快照执行；结果经 1Hz `pet://state` 的 economy/inventory
+/// 字段回传前端。
+///
+/// # Errors
+/// 入站通道尚未装配时返回中文可读错误串。
+#[tauri::command]
+pub fn pet_buy(app: AppHandle, item_id: String, qty: u32) -> Result<(), String> {
+    use tauri::Manager;
+
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配，无法购买".to_string())?;
+    channel.push(crate::bridge::CoreInput::Purchase { item_id, qty });
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// S10-M1：桌面装饰摆放 / 取下（`01 FR-13-6`；5 槽）。
+//
+// 只投递：校验（槽位越界 / 背包拥有 / 落盘）在 core-loop 单写者线程内完成，
+// 命令层不碰存档（与 `pet_buy` 同纪律）。
+// ---------------------------------------------------------------------------
+
+/// 设置页相册 Tab：把已拥有的摆件摆到桌面某槽（0..=4）。
+#[tauri::command]
+pub fn pet_decor_place(app: AppHandle, slot: u8, item_id: String) -> Result<(), String> {
+    use tauri::Manager;
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配".to_string())?;
+    channel.push(crate::bridge::CoreInput::DecorPlace { slot, item_id });
+    Ok(())
+}
+
+/// 设置页相册 Tab：取下桌面某槽装饰。
+#[tauri::command]
+pub fn pet_decor_remove(app: AppHandle, slot: u8) -> Result<(), String> {
+    use tauri::Manager;
+    let channel = app
+        .try_state::<crate::bridge::CoreInputChannel>()
+        .ok_or_else(|| "core-loop 入站通道尚未装配".to_string())?;
+    channel.push(crate::bridge::CoreInput::DecorRemove { slot });
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // S5-M4：设置命令（设置页 ⇄ 应用层设置状态；`01 FR-7` / `02 §7.6 pet://config`）
 // ---------------------------------------------------------------------------

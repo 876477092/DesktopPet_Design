@@ -1,0 +1,81 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "AchievementsConfig",
+  "description": "`achievements.json` 根：成就目录（条件 + 一次性奖励）。",
+  "type": "object",
+  "properties": {
+    "achievements": {
+      "description": "成就目录。",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/AchievementCfg"
+      }
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "AchievementCfg": {
+      "description": "单条成就。",
+      "type": "object",
+      "properties": {
+        "coin": {
+          "description": "达成奖励心币（20~200）。",
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        },
+        "condition": {
+          "description": "达成条件（累计指标 ≥ target）。",
+          "default": {
+            "metric": "",
+            "target": 0.0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/AchievementConditionCfg"
+            }
+          ]
+        },
+        "desc": {
+          "description": "成就描述。",
+          "default": "",
+          "type": "string"
+        },
+        "id": {
+          "description": "成就 ID（如 `ACH_FIRST_PET`）。",
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "description": "成就名（`{name}` 模板展示）。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "AchievementConditionCfg": {
+      "description": "成就达成条件（累计型：某计数指标达到阈值即一次性达成）。",
+      "type": "object",
+      "properties": {
+        "metric": {
+          "description": "指标名（`petCount` / `coaxCount` / `feedCount` / `bathCount` / `loginDays` / `eggCount` / `workCount` / `studyCount` / `travelCount` / `coaxSolved` 等）。",
+          "default": "",
+          "type": "string"
+        },
+        "target": {
+          "description": "达成阈值（累计达到即触发一次）。",
+          "default": 0.0,
+          "type": "number",
+          "format": "double"
+        }
+      }
+    }
+  }
+}

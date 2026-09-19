@@ -3007,6 +3007,181 @@ impl Default for PostcardCfg {
 }
 
 // ---------------------------------------------------------------------------
+// S8-M5：商城 `shop.json`（30 商品 + 经济上限 + 连续登录数列）
+// 出处：`01 §6.14.2/6.14.3`、`02 §5.18`（K-13/QI-05 定版）。
+// ---------------------------------------------------------------------------
+
+/// `shop.json` 根：经济全局 + 商品目录。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ShopConfig {
+    /// 配置版本。
+    pub version: u32,
+    /// 经济全局参数（上限 / 连续登录 / 日常任务）。
+    pub economy: ShopEconomyCfg,
+    /// 商品目录（30 件，`01 §6.14.3`）。
+    pub items: Vec<ShopItemCfg>,
+}
+
+impl Default for ShopConfig {
+    fn default() -> Self {
+        Self { version: 1, economy: ShopEconomyCfg::default(), items: Vec::new() }
+    }
+}
+
+/// 经济全局（`02 §5.18` C 契约：上限 99999 / 单笔 2000 / 日入账 350）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ShopEconomyCfg {
+    /// 心币余额上限（硬截断，溢出记 `CoinOverflow`）。
+    pub coin_max: i64,
+    /// 单笔入账上限（正向入账单条金额截断）。
+    pub per_tx_max: i64,
+    /// 每日入账硬顶（QI-05 定版 350；消费不占此顶）。
+    pub daily_income_cap: i64,
+    /// 连续登录显式数列（M-12：第 1~7 天 `[10,15,20,25,30,40,50]`）。
+    pub login_streak: Vec<i64>,
+    /// 第 8 天起每日固定值（≤ 数列峰值 50）。
+    pub login_streak_after: i64,
+    /// 日常任务单个奖励下限（心币）。
+    pub daily_task_reward_min: i64,
+    /// 日常任务单个奖励上限（心币）。
+    pub daily_task_reward_max: i64,
+}
+
+impl Default for ShopEconomyCfg {
+    fn default() -> Self {
+        Self {
+            coin_max: 99_999,
+            per_tx_max: 2_000,
+            daily_income_cap: 350,
+            login_streak: vec![10, 15, 20, 25, 30, 40, 50],
+            login_streak_after: 30,
+            daily_task_reward_min: 5,
+            daily_task_reward_max: 15,
+        }
+    }
+}
+
+/// 商品（`01 §6.14.3` 30 行；8 分类）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ShopItemCfg {
+    /// 商品 ID（如 `FOOD_RICEBALL`）。
+    pub id: String,
+    /// 商品名（含 emoji，展示用）。
+    pub name: String,
+    /// 分类（`food`/`groom`/`toy`/`furniture`/`clothing`/`textbook`/`coupon`/`frame`）。
+    pub category: String,
+    /// 价格（心币）。
+    pub price: i64,
+    /// 使用效果（食用 / 洗护时施加的六维 delta）。
+    pub effect: ItemEffectCfg,
+    /// 限购（每日 / 每周 / 一次性 / 不限）。
+    pub quota: ItemQuotaCfg,
+    /// 解锁条件（亲密度等级；0 = 无）。
+    pub unlock: ItemUnlockCfg,
+}
+
+/// 商品使用效果（缺省 = 不影响该维）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ItemEffectCfg {
+    /// 饱食度变化。
+    pub satiety: Option<f32>,
+    /// 清洁度变化。
+    pub cleanliness: Option<f32>,
+    /// 精力变化。
+    pub energy: Option<f32>,
+    /// 心情变化。
+    pub mood: Option<f32>,
+    /// 购买后解锁的动作 / 交互 ID（玩具 / 家具类；可空）。
+    pub unlock_action: Option<String>,
+}
+
+/// 限购规则。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ItemQuotaCfg {
+    /// 计数周期（`daily` / `weekly` / `once` / `unlimited`）。
+    pub kind: String,
+    /// 该周期内可购上限（`once`=1、`unlimited`=0 表示不限）。
+    pub limit: u32,
+}
+
+impl Default for ItemQuotaCfg {
+    fn default() -> Self {
+        Self { kind: "unlimited".to_string(), limit: 0 }
+    }
+}
+
+/// 解锁条件。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ItemUnlockCfg {
+    /// 所需亲密度等级（0 = 无要求）。
+    pub affinity_level: u32,
+    /// 附加条件文案（展示用）。
+    pub text: String,
+}
+
+// ---------------------------------------------------------------------------
+// S8-M5：成就 `achievements.json`（`01 FR-9-1`，≥25 个）
+// ---------------------------------------------------------------------------
+
+/// `achievements.json` 根：成就目录（条件 + 一次性奖励）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AchievementsConfig {
+    /// 配置版本。
+    pub version: u32,
+    /// 成就目录。
+    pub achievements: Vec<AchievementCfg>,
+}
+
+impl Default for AchievementsConfig {
+    fn default() -> Self {
+        Self { version: 1, achievements: Vec::new() }
+    }
+}
+
+/// 单条成就。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AchievementCfg {
+    /// 成就 ID（如 `ACH_FIRST_PET`）。
+    pub id: String,
+    /// 成就名（`{name}` 模板展示）。
+    pub name: String,
+    /// 成就描述。
+    pub desc: String,
+    /// 达成奖励心币（20~200）。
+    pub coin: i64,
+    /// 达成条件（累计指标 ≥ target）。
+    pub condition: AchievementConditionCfg,
+}
+
+/// 成就达成条件（累计型：某计数指标达到阈值即一次性达成）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AchievementConditionCfg {
+    /// 指标名（`petCount` / `coaxCount` / `feedCount` / `bathCount` / `loginDays` /
+    /// `eggCount` / `workCount` / `studyCount` / `travelCount` / `coaxSolved` 等）。
+    pub metric: String,
+    /// 达成阈值（累计达到即触发一次）。
+    pub target: f64,
+}
+
+// ---------------------------------------------------------------------------
 // 单元测试（S2-M4 QA 补充：RoamCfg 向后兼容验收项）
 // ---------------------------------------------------------------------------
 

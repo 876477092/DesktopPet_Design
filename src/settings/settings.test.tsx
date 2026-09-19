@@ -183,10 +183,11 @@ describe('设置面板 · 补丁工具（纯函数）', () => {
 });
 
 describe('设置面板 · 结构（静态渲染）', () => {
-  it('外壳渲染 6 个 Tab，标题走 {name} 占位（C2）', async () => {
+  it('外壳渲染全部 Tab（S10-M1 起 9 个），标题走 {name} 占位（C2）', async () => {
     const store = new SettingsStore(fakePort(), { debounceMs: 0 });
     const html = await renderWithStore(<App />, store);
-    expect(TABS).toHaveLength(6);
+    // S5-M3 冻结 6 个；S10-M1 增量追加 活动/商城/相册 → 9。
+    expect(TABS).toHaveLength(9);
     for (const tab of TABS) {
       expect(html).toContain(`data-testid="tab-${tab}"`);
     }

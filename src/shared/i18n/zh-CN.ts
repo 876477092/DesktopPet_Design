@@ -18,8 +18,11 @@ export const ZH_CN: Messages = {
   'app.tab.behavior': '行为',
   'app.tab.interaction': '互动',
   'app.tab.needs': '属性',
+  'app.tab.activity': '活动',
+  'app.tab.shop': '商城',
   'app.tab.data': '数据',
   'app.tab.achievement': '成就',
+  'app.tab.album': '相册',
   'app.footer.save': '保存',
   'app.footer.reset': '重置全部数据',
   'app.dirty.hint': '有未保存的改动',
@@ -99,7 +102,39 @@ export const ZH_CN: Messages = {
   'needs.mood': '心情',
   'needs.affinity': '亲密度',
   'needs.boredom': '无聊度',
+  'needs.affinity.progress': 'Lv{level}·{exp}/{next}',
+  'needs.affinity.max': 'Lv{level}·满级',
   'needs.placeholder': '属性面板骨架已就绪，实时数值随 S7 属性系统接入。',
+
+  // --- 活动（S10-M1；`01 §8.4`；FR-13） -----------------------------------
+  'activity.idle.title': '暂无外出',
+  'activity.idle.hint': '选择下方活动派遣她外出：打工 / 学习 / 旅游。',
+  'activity.kind.work': '打工',
+  'activity.kind.study': '学习',
+  'activity.kind.travel': '旅游',
+  'activity.remaining': '剩余 {ms}',
+  'activity.recall': '提前召回',
+
+  // --- 商城 / 背包（S10-M1；`01 §8.5`；FR-14） ----------------------------
+  'shop.balance': '心币 {coin}',
+  'shop.inventory.section': '背包',
+
+  // --- 相册 / 桌面装饰（S10-M1；`01 §8.6` / FR-13-6） --------------------
+  'album.photos.title': '我的相册',
+  'album.photos.empty': '还没有照片，去旅游寄张明信片吧～',
+  'album.frame.hint': '在商城购买「{frame}」后，可把照片摆成桌面相框。',
+  'decor.title': '桌面装饰',
+  'decor.pick.title': '选择摆件',
+  'decor.pick.empty': '暂无可摆放的摆件（在商城「摆件」分类购买）。',
+  'decor.slots.title': '桌面 5 槽',
+  'decor.slot.empty': '槽 {n}（空）',
+
+  // --- 情绪原因卡（S10-M2；`01 §6.12` P 因子可解释性） --------------------
+  'reason.title': '她为什么委屈？',
+  'reason.pressure': '冷落压力 {p}/{cap}',
+  'reason.none': '现在情绪不错（{state}），继续保持～',
+  'reason.dir.faster': '加速冷落 ×{w}',
+  'reason.dir.slower': '缓解 ×{w}',
 
   // --- 数据（FR-8-2 / FR-8-4，含存档健康提示） ----------------------------
   'data.save.section': '存档',

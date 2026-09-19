@@ -18,8 +18,11 @@ export const EN_US: Messages = {
   'app.tab.behavior': 'Behavior',
   'app.tab.interaction': 'Interaction',
   'app.tab.needs': 'Stats',
+  'app.tab.activity': 'Activity',
+  'app.tab.shop': 'Shop',
   'app.tab.data': 'Data',
   'app.tab.achievement': 'Achievements',
+  'app.tab.album': 'Album',
   'app.footer.save': 'Save',
   'app.footer.reset': 'Reset all data',
   'app.dirty.hint': 'Unsaved changes',
@@ -99,8 +102,40 @@ export const EN_US: Messages = {
   'needs.mood': 'Mood',
   'needs.affinity': 'Affinity',
   'needs.boredom': 'Boredom',
+  'needs.affinity.progress': 'Lv{level} · {exp}/{next}',
+  'needs.affinity.max': 'Lv{level} · Max',
   'needs.placeholder':
     'The stats panel skeleton is ready; live values arrive with the S7 needs system.',
+
+  // --- Activity (S10-M1; `01 §8.4`; FR-13) --------------------------------
+  'activity.idle.title': 'She is not away right now',
+  'activity.idle.hint': 'Pick an activity below to send her out: work / study / travel.',
+  'activity.kind.work': 'Work',
+  'activity.kind.study': 'Study',
+  'activity.kind.travel': 'Travel',
+  'activity.remaining': '{ms} left',
+  'activity.recall': 'Recall early',
+
+  // --- Shop / inventory (S10-M1; `01 §8.5`; FR-14) ------------------------
+  'shop.balance': '{coin} coins',
+  'shop.inventory.section': 'Inventory',
+
+  // --- Album / desktop decor (S10-M1; `01 §8.6` / FR-13-6) ---------------
+  'album.photos.title': 'My album',
+  'album.photos.empty': 'No photos yet — go travel and send a postcard back.',
+  'album.frame.hint': 'Buy "{frame}" in the shop to display a photo as a desktop frame.',
+  'decor.title': 'Desktop decor',
+  'decor.pick.title': 'Pick an ornament',
+  'decor.pick.empty': 'No ornaments yet — buy one in the "Ornaments" shop category.',
+  'decor.slots.title': '5 desktop slots',
+  'decor.slot.empty': 'Slot {n} (empty)',
+
+  // --- Reason card (S10-M2; `01 §6.12` neglect explainability) ------------
+  'reason.title': 'Why is she feeling down?',
+  'reason.pressure': 'Neglect {p}/{cap}',
+  'reason.none': 'She is in a good mood now ({state}); keep it up!',
+  'reason.dir.faster': 'speeds neglect ×{w}',
+  'reason.dir.slower': 'eases ×{w}',
 
   // --- Data --------------------------------------------------------------
   'data.save.section': 'Save file',

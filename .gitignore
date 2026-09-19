@@ -41,3 +41,8 @@ resources/**
 
 # 事故留档：2026-09-14 .git 对象库损坏的现场快照（含 reflog 等元数据，仅供手工排查，不入库）
 .git-broken-*/
+
+# 运行期临时产物
+scripts_tmp/
+*.log
+run-dev.ps1

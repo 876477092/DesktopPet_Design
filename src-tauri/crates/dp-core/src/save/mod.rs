@@ -31,6 +31,7 @@
 //! - 不做 v2→v1 降级迁移（`02 §5 K-7`：新增字段无法映射；回退走 `v1bak` 手工导入）。
 //! - 不新增 `pet://` 事件（C8）：损坏提示经返回值 + 日志传达到装配层。
 
+pub mod migrate;
 pub mod schema;
 pub mod store;
 

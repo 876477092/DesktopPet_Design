@@ -232,13 +232,23 @@ impl SaveStore {
                 LoadStatus::Loaded,
             ),
             Probe::NeedsMigration { found } => {
-                // 迁移归 S8-M7：本卡不改文件、禁写盘，只如实报出。
-                let mut store = Self::with_cache(save_path, SaveFileV2::default());
-                store.writable = false;
-                warnings.push(format!(
-                    "存档为 v{found}，需迁移至 v{SAVE_VERSION}（迁移归 S8-M7）；本次禁写盘以保护原档"
-                ));
-                (store, LoadStatus::MigrationPending { found })
+                // S8-M7：执行 v1→v2 迁移（v1bak 备份 + 立即写回 v2）。
+                match Self::migrate_v1_to_v2(&save_path, now_ms, &mut warnings) {
+                    Ok(cache) => {
+                        let store = Self::with_cache(save_path, cache);
+                        warnings.push(format!(
+                            "存档 v{found} 已迁移至 v{SAVE_VERSION}（v1 原档已备份为 v1bak）"
+                        ));
+                        (store, LoadStatus::Loaded)
+                    }
+                    Err(err) => {
+                        // 迁移失败：降级为禁写盘保护（不破坏 v1 原档）。
+                        let mut store = Self::with_cache(save_path, SaveFileV2::default());
+                        store.writable = false;
+                        warnings.push(format!("v1 迁移失败（{err}）；本次禁写盘以保护原档"));
+                        (store, LoadStatus::MigrationPending { found })
+                    }
+                }
             }
             Probe::Future { found } => {
                 let isolated = isolate(&save_path, "future", now_ms, &mut warnings);
@@ -347,6 +357,39 @@ impl SaveStore {
 
     fn with_cache(save_path: PathBuf, cache: SaveFileV2) -> Self {
         Self { save_path, cache, last_flush_mono_ms: None, dirty: false, writable: true }
+    }
+
+    /// S8-M7：v1→v2 迁移。
+    ///
+    /// 步骤（`02 §5 K-7`）：
+    ///   1. 读 v1 JSON；
+    ///   2. **首次**复制 `save.json → save.json.v1bak`（已存在则不覆盖，永不覆盖）；
+    ///   3. [`crate::save::migrate::migrate`] 做字段映射 → v2；
+    ///   4. 立即原子写回 v2（迁移后即可写盘，`writable=true`）。
+    fn migrate_v1_to_v2(
+        save_path: &Path,
+        now_ms: i64,
+        warnings: &mut Vec<String>,
+    ) -> Result<SaveFileV2, String> {
+        let text = fs::read_to_string(save_path).map_err(|e| format!("读取 v1 档失败：{e}"))?;
+        let v1: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("v1 JSON 解析失败：{e}"))?;
+
+        // 备份 v1bak（仅首次，永不覆盖）。
+        let bak = v1_bak_path(save_path);
+        if !bak.exists() {
+            if let Err(e) = fs::copy(save_path, &bak) {
+                warnings.push(format!("v1bak 备份失败（不阻断迁移）：{e}"));
+            }
+        }
+
+        let cache = crate::save::migrate::migrate(&v1);
+
+        // 立即原子写回 v2（与降级分支同语义：不带着旧档状态跑 30s）。
+        let mut store = Self::with_cache(save_path.to_path_buf(), cache);
+        store.writable = true;
+        store.flush_force(now_ms as u64).map_err(|e| format!("v2 写回失败：{e}"))?;
+        Ok(store.cache)
     }
 
     /// 只读：存档文件路径。
@@ -808,26 +851,50 @@ mod tests {
         assert_eq!(rebuilt, SaveFileV2::default());
     }
 
-    /// v1 是合法用户数据：**不迁移、不改文件、禁写盘**（迁移归 S8-M7）。
+    /// S8-M7：v1 档启动即迁移——新字段取默认、v1bak 生成、立即写回 v2、可继续写盘。
     #[test]
-    fn v1_save_is_neither_migrated_nor_overwritten() {
-        let dir = temp_dir("v1");
+    fn v1_save_is_migrated_with_v1bak_and_writable() {
+        let dir = temp_dir("v1-migrate");
         let v1 = serde_json::json!({ "v": 1, "boredom": 40.0, "coldLevel": 2, "coin": 500 });
         let text = serde_json::to_string_pretty(&v1).unwrap();
         fs::write(dir.join(SAVE_FILE), &text).expect("写 v1 档失败（测试前置）");
 
-        let (mut store, outcome) = SaveStore::load(&dir, T0);
-        assert_eq!(outcome.status, LoadStatus::MigrationPending { found: 1 });
-        assert!(!store.is_writable(), "待迁移期间必须禁写盘（防定时覆盖原档）");
-        assert!(!store.flush_force(0).expect("禁写盘不报错"), "禁写盘时 flush 为 no-op");
-        assert_eq!(
-            fs::read_to_string(dir.join(SAVE_FILE)).unwrap(),
-            text,
-            "v1 原档必须逐字未改"
-        );
-        assert!(!dir.join("save.json.v1bak").exists(), "v1bak 写入归 S8-M7");
-        assert!(outcome.needs_notice());
-        assert!(outcome.describe().contains("S8-M7"));
+        let (store, outcome) = SaveStore::load(&dir, T0);
+        assert_eq!(outcome.status, LoadStatus::Loaded, "迁移完成后应视为已装载");
+        assert!(store.is_writable(), "迁移后必须可写盘");
+
+        // v1bak 已生成且内容与 v1 逐字一致。
+        let bak = dir.join("save.json.v1bak");
+        assert!(bak.exists(), "迁移必须生成 v1bak（K-7 F）");
+        assert_eq!(fs::read_to_string(&bak).unwrap(), text, "v1bak 应逐字保留 v1");
+
+        // 主档已升级为 v2，且 P 由 boredom 反推（40×1.2=48）、coldLevel→level。
+        let main = read_json(&dir.join(SAVE_FILE));
+        assert_eq!(main["v"], 2);
+        assert_eq!(main["emotion"]["neglect"]["p"], 48.0);
+        assert_eq!(main["emotion"]["neglect"]["level"], 2);
+        // 经济：旧币 500 + Lv1 补偿 20 = 520，迁移流水幂等 refId。
+        assert_eq!(main["economy"]["coin"], 520);
+        assert_eq!(main["economy"]["ledger"][0]["refId"], "migration:v1tov2");
+    }
+
+    /// S8-M7：v1bak 仅首次写入，永不覆盖（二次迁移 / 重跑不冲掉旧备份）。
+    #[test]
+    fn v1bak_is_never_overwritten() {
+        let dir = temp_dir("v1-bak-once");
+        fs::write(dir.join(SAVE_FILE), r#"{ "v": 1, "boredom": 10.0, "coldLevel": 0, "coin": 100 }"#)
+            .expect("写 v1");
+        let (store1, _) = SaveStore::load(&dir, T0);
+        assert!(store1.is_writable());
+        let first_bak = fs::read_to_string(dir.join("save.json.v1bak")).unwrap();
+
+        // 改主档内容（模拟用户继续玩），再把主档换回 v1 不应冲掉首次 v1bak。
+        fs::write(dir.join(SAVE_FILE), r#"{ "v": 1, "boredom": 99.0, "coldLevel": 3, "coin": 999 }"#)
+            .expect("重写 v1");
+        let (_store2, _) = SaveStore::load(&dir, T0);
+        let bak_now = fs::read_to_string(dir.join("save.json.v1bak")).unwrap();
+        assert_eq!(first_bak, bak_now, "v1bak 永不覆盖");
+        assert!(bak_now.contains("\"coin\": 100"));
     }
 
     #[test]

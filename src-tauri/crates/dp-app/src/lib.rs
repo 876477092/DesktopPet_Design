@@ -43,6 +43,7 @@ pub mod interaction_consumer;
 // 文件以 `#![cfg(windows)]` 自门禁（引用 `PetPlatform` 与 `dp-platform/win/*`）。
 #[cfg(windows)]
 pub mod coreloop;
+pub mod economy_rt;
 // S3-M0：装配层适配器（`MonitorGeom` / `PlatformBand` / `PetBBoxHandle` 端口注入；
 // 纯逻辑换算跨平台，Windows 换算局部门控）。
 pub mod ports;
@@ -93,7 +94,12 @@ pub fn run() {
             bridge::frame_receipt,
             // S8-M1/M3：活动派遣 / 召回（前端活动卡按钮；`01 §6.13`）。
             commands::pet_dispatch,
-            commands::pet_recall
+            commands::pet_recall,
+            // S8-M6：商城购买（前端商城卡按钮）。
+            commands::pet_buy,
+            // S10-M1：桌面装饰摆放 / 取下（相册 Tab）。
+            commands::pet_decor_place,
+            commands::pet_decor_remove
         ]);
 
     // 仅 Windows 落平台窗口层（本项目仅 Windows 目标）。

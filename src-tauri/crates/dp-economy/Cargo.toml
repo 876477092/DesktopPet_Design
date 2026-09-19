@@ -1,6 +1,6 @@
 [package]
 name = "dp-economy"
-description = "经济与商城：序号账本、背包、商品目录、配额、订单与履约"
+description = "经济与商城：心币账本（可重放）、限购、商城目录、购买事务、背包与成就判定"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,5 +11,10 @@ publish = false
 name = "dp_economy"
 path = "src/lib.rs"
 
-# S1-M1 骨架：不预先引入依赖，随模块落地时按 `02 §2.5` 增补。
+# S8-M5：经济账本 / 商城目录 / 限购。
 [dependencies]
+dp-core = { path = "../dp-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }

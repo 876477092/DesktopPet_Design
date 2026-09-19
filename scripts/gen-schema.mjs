@@ -50,6 +50,8 @@ const BASE_NAMES = [
   'lines',
   'schedule',
   'activities',
+  'shop',
+  'achievements',
 ];
 
 const configDir = join(repoRoot, 'resources', 'config');

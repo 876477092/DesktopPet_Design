@@ -13,6 +13,7 @@ import {
 import { PET_EVENT } from './shared/types';
 import { ActivityCard, PostcardWidget } from './renderer/activityWidgets';
 import { AtlasCache } from './renderer/AtlasCache';
+import { BackendSwitcher } from './renderer/BackendSwitcher';
 import { BubbleLayer } from './renderer/BubbleLayer';
 import { DomBubbleView, DomMenuView, DomOverlayView, DomParticleView } from './renderer/DomLayers';
 import { FrameRenderer } from './renderer/FrameRenderer';
@@ -20,6 +21,8 @@ import { LayerHost } from './renderer/LayerHost';
 import { MenuLayer } from './renderer/MenuLayer';
 import { OverlayLayer } from './renderer/OverlayLayer';
 import { ParticleLayer } from './renderer/ParticleLayer';
+import { SkeletonRenderer } from './renderer/SkeletonRenderer';
+import { createPlaceholderSpineAdapter } from './renderer/spineAdapter';
 import { WebGLStage } from './renderer/WebGLStage';
 
 /**
@@ -124,9 +127,17 @@ async function bootstrapPetWindow(): Promise<void> {
   const host = new LayerHost();
   // S6-M2：合成完成后上报帧回执（节流见 createFrameReceipt；看门狗计数源）。
   const receipt = createFrameReceipt();
-  const renderer = new FrameRenderer(stage, cache, () => {
+  // S9-M1：帧回退路径（恒就绪）+ 骨骼主路径（占位适配器，S9-M2② 未就绪）。
+  // BackendSwitcher：启动即走帧路径不黑屏；骨架 3s 未就绪自动定格帧回退。
+  const frame = new FrameRenderer(stage, cache, () => {
     host.render();
     receipt.onFrameRendered();
+  });
+  const skeleton = new SkeletonRenderer(createPlaceholderSpineAdapter(), {
+    onLoadError: (err) => console.warn('[pet] 骨骼后端未就绪，使用帧回退：', err),
+  });
+  const renderer = new BackendSwitcher(skeleton, frame, {
+    onFallbackLatched: () => console.info('[pet] 骨骼后端 3s 未就绪，定格帧回退路径'),
   });
   host.setLayer('character', () => renderer.paint());
 

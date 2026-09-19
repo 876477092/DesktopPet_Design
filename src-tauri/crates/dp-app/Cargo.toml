@@ -47,6 +47,11 @@ dp-audio = { path = "../dp-audio" }
 tauri-plugin-single-instance = { workspace = true }
 # S8-M1：外出活动运行时（打工 / 课程 / 旅游状态机与结算；`02 §5.13`）。
 dp-activity = { path = "../dp-activity" }
+# S8-M5/M6：经济（账本/额度/目录/背包/履约），业务逻辑在 dp-economy。
+dp-economy = { path = "../dp-economy" }
+chrono = { workspace = true }
+
+
 
 [build-dependencies]
 tauri-build = { workspace = true }

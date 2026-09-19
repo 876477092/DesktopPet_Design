@@ -3,12 +3,16 @@ import React, { useMemo, useState } from 'react';
 import { resolveLocale } from '@shared/i18n';
 
 import ConfirmDialog from './components/ConfirmDialog';
+import { PetSnapshotProvider } from './hooks/usePetSnapshot';
 import AchievementPage from './pages/AchievementPage';
+import ActivityPage from './pages/ActivityPage';
+import AlbumPage from './pages/AlbumPage';
 import AppearancePage from './pages/AppearancePage';
 import BehaviorPage from './pages/BehaviorPage';
 import DataPage from './pages/DataPage';
 import InteractionPage from './pages/InteractionPage';
 import NeedsPage from './pages/NeedsPage';
+import ShopPage from './pages/ShopPage';
 import { useSettingsState, useSettingsStore, useSettingsWritable, useTranslator } from './store/useSettings';
 
 /**
@@ -33,8 +37,11 @@ export const TABS = [
   'behavior',
   'interaction',
   'needs',
+  'activity',
+  'shop',
   'data',
   'achievement',
+  'album',
 ] as const;
 
 /** Tab 标识。 */
@@ -46,8 +53,11 @@ const PAGES: Record<TabId, () => React.ReactElement> = {
   behavior: BehaviorPage,
   interaction: InteractionPage,
   needs: NeedsPage,
+  activity: ActivityPage,
+  shop: ShopPage,
   data: DataPage,
   achievement: AchievementPage,
+  album: AlbumPage,
 };
 
 /** 设置面板外壳。 */
@@ -66,6 +76,7 @@ export function App(): React.ReactElement {
   );
 
   return (
+    <PetSnapshotProvider>
     <div className="dp-app" data-testid="settings-app">
       <header className="dp-title">
         <h1 className="dp-title-text">{title}</h1>
@@ -127,6 +138,7 @@ export function App(): React.ReactElement {
         }}
       />
     </div>
+    </PetSnapshotProvider>
   );
 }
 

@@ -1,26 +1,18 @@
-//! 配置中心：`ConfigService::load_all` —— 外置 JSON 的加载、合并与校验。
-//!
-//! 份数：**八份**（S1-M5 六份 + S5-M5 新增 `schedule.json` + S8-M1 新增 `activities.json`）。
-//!
-//! 时序锚点：`02 §6.1`（`load_all` 配置加载 + 默认合并）；R19 兜底（`02 行 2434`）：
-//! 加载失败 → 内置默认启动，不崩。字段缺省由 serde `default` 补齐并记 warning
-//! （老包升级不崩，`03` S1-M5 要点 1）。
-//!
-//! 错误分界：
-//!   - **文件级问题**（缺失 / 读取失败 / 解析失败 / 顶层字段缺失或未知）→
-//!     降级为该文件的内置默认 + `tracing::warn` + 返回值 `warnings` 通道，不 `Err`；
-//!   - **结构级问题**（needs.coupling 规则成环 / 动作 ID 空或重复）→ 返回
+//! 配置中心：`ConfigService::load_all` ———外置 JSON 的加载、合并与校验——//!
+//! 份数——*八份**（S1-M5 六份 + S5-M5 新增 `schedule.json` + S8-M1 新增 `activities.json`）——//!
+//! 时序锚点：`02 §6.1`（`load_all` 配置加载 + 默认合并）；R19 兜底（`02 ——2434`）：
+//! 加载失败 ——内置默认启动，不崩。字段缺省由 serde `default` 补齐并记 warning
+//! （老包升级不崩，`03` S1-M5 要点 1）——//!
+//! 错误分界——//!   - **文件级问——*（缺——/ 读取失败 / 解析失败 / 顶层字段缺失或未知）——//!     降级为该文件的内置默——+ `tracing::warn` + 返回——`warnings` 通道，不 `Err`——//!   - **结构级问——*（needs.coupling 规则成环 / 动作 ID 空或重复）→ 返回
 //!     `Err(ConfigError)`，由调用方决定降级默认启动（`02 §5.10`：新增成环规则在
-//!     配置加载阶段即失败，CI 可断言）。
-//!
-//! 测试资源路径：`env!("CARGO_MANIFEST_DIR")` 上溯三级到工程根（无盘符字面量，C1）。
-
+//!     配置加载阶段即失败，CI 可断言）——//!
+//! 测试资源路径：`env!("CARGO_MANIFEST_DIR")` 上溯三级到工程根（无盘符字面量，C1）——
 pub mod model;
 
 pub use model::{
-    ActionCfg, ActionsConfig, ActivitiesConfig, AnimationConfig, CharacterConfig, CouplingCfg,
-    DegradeCfg, DegradeCpuCfg, DegradeFpsCfg, DegradeMemoryCfg, EmotionConfig, NeedsConfig,
-    ScheduleConfig, SettingsConfig,
+    AchievementsConfig, ActionCfg, ActionsConfig, ActivitiesConfig, AnimationConfig,
+    CharacterConfig, CouplingCfg, DegradeCfg, DegradeCpuCfg, DegradeFpsCfg, DegradeMemoryCfg,
+    EmotionConfig, NeedsConfig, ScheduleConfig, SettingsConfig, ShopConfig,
 };
 
 use std::path::Path;
@@ -30,20 +22,19 @@ use thiserror::Error;
 use tracing::warn;
 
 // ---------------------------------------------------------------------------
-// 错误与捆绑
-// ---------------------------------------------------------------------------
+// 错误与捆——// ---------------------------------------------------------------------------
 
 /// 配置加载的结构级错误（`#[non_exhaustive]`，`02 §7.4`）。
-#[derive(Debug, Error)]
+    #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConfigError {
-    /// needs.coupling 规则 `target → when` 引用成环（`02 §5.10` 构建期拓扑检查）。
+    /// needs.coupling 规则 `target ——when` 引用成环（`02 §5.10` 构建期拓扑检查）。
     #[error("needs.coupling 规则引用成环：{chain}")]
     CouplingCycle {
         /// 成环链路（如 `satiety -> moodDecay -> mood -> satiety`）。
         chain: String,
     },
-    /// 其他无效配置（如动作 ID 空 / 重复）。
+    /// 其他无效配置（如动作 ID ——/ 重复）。
     #[error("配置无效（{file}）：{reason}")]
     InvalidConfig {
         /// 出错文件名。
@@ -53,8 +44,8 @@ pub enum ConfigError {
     },
 }
 
-/// 配置的捆绑结果（S8-M1 起 **八份**：新增 `activities.json`）。
-#[derive(Debug, Clone, Default)]
+/// 配置的捆绑结果（S8-M1 ——**八份**：新——`activities.json`）。
+    #[derive(Debug, Clone, Default)]
 pub struct ConfigBundle {
     /// settings.json。
     pub settings: SettingsConfig,
@@ -72,6 +63,10 @@ pub struct ConfigBundle {
     pub schedule: ScheduleConfig,
     /// activities.json（`02 §5.16`；S8-M1 交付）。
     pub activities: ActivitiesConfig,
+    /// shop.json（商——30 商品 + 经济上限；S8-M5 交付）。
+    pub shop: ShopConfig,
+    /// achievements.json（成就目录；S8-M5 交付）。
+    pub achievements: AchievementsConfig,
 }
 
 impl ConfigBundle {
@@ -87,20 +82,12 @@ impl ConfigBundle {
 }
 
 /// 配置服务门面（无状态；加载结果每次独立返回）。
-#[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Copy, Default)]
 pub struct ConfigService;
 
 impl ConfigService {
-    /// 读取 `config_dir` 下的七份 JSON，与内置默认合并。
-    ///
-    /// 语义：
-    ///   1. 文件缺失 / 读取失败 / JSON 解析失败 → 使用该文件的内置 `Default`，
-    ///      `tracing::warn` 并向 `warnings` 追加一条（R19：不崩）；
-    ///   2. 顶层字段缺失（老包升级）→ serde `default` 补齐 + warning；
-    ///      顶层未知字段（含拼写错误）→ 忽略 + warning（避免「改 JSON 行为即变」
-    ///      因拼写错误静默失效）；
-    ///   3. needs.coupling 规则成环 / 动作 ID 空或重复 → 返回 `Err`（调用方降级默认）。
-    ///
+    /// 读取 `config_dir` 下的七份 JSON，与内置默认合并——    ///
+    /// 语义——    ///   1. 文件缺失 / 读取失败 / JSON 解析失败 ——使用该文件的内置 `Default`——    ///      `tracing::warn` 并向 `warnings` 追加一条（R19：不崩）——    ///   2. 顶层字段缺失（老包升级）→ serde `default` 补齐 + warning——    ///      顶层未知字段（含拼写错误）→ 忽略 + warning（避免「改 JSON 行为即变——    ///      因拼写错误静默失效）——    ///   3. needs.coupling 规则成环 / 动作 ID 空或重复 ——返回 `Err`（调用方降级默认）——    ///
     /// 返回：`(捆绑配置, 告警列表)`。
     pub fn load_all(config_dir: &Path) -> Result<(ConfigBundle, Vec<String>), ConfigError> {
         let mut warnings: Vec<String> = Vec::new();
@@ -145,6 +132,13 @@ impl ConfigService {
             ACTIVITIES_TOP_FIELDS,
             &mut warnings,
         );
+        let shop = load_one::<ShopConfig>(config_dir, "shop.json", SHOP_TOP_FIELDS, &mut warnings);
+        let achievements = load_one::<AchievementsConfig>(
+            config_dir,
+            "achievements.json",
+            ACHIEVEMENTS_TOP_FIELDS,
+            &mut warnings,
+        );
 
         validate_actions(&actions)?;
         check_coupling_cycles(&needs.coupling)?;
@@ -159,6 +153,8 @@ impl ConfigService {
                 animation,
                 schedule,
                 activities,
+                shop,
+                achievements,
             },
             warnings,
         ))
@@ -166,47 +162,49 @@ impl ConfigService {
 }
 
 // ---------------------------------------------------------------------------
-// 各文件顶层字段清单（camelCase；与 model.rs 字段一一对应）
-// ---------------------------------------------------------------------------
+// 各文件顶层字段清单（camelCase；与 model.rs 字段一一对应——// ---------------------------------------------------------------------------
 
 /// settings.json 顶层字段。
-pub const SETTINGS_TOP_FIELDS: &[&str] = &[
+    pub const SETTINGS_TOP_FIELDS: &[&str] = &[
     "version", "appearance", "audio", "behavior", "roam", "interaction", "emotion", "privacy",
 ];
 /// character.json 顶层字段。
-pub const CHARACTER_TOP_FIELDS: &[&str] = &[
+    pub const CHARACTER_TOP_FIELDS: &[&str] = &[
     "version", "defaultName", "catchphrase", "linePools", "renderer", "slots", "expressions",
     "personalityText",
 ];
 /// actions.json 顶层字段。
-pub const ACTIONS_TOP_FIELDS: &[&str] = &["version", "actions"];
+    pub const ACTIONS_TOP_FIELDS: &[&str] = &["version", "actions"];
 /// emotion.json 顶层字段。
-pub const EMOTION_TOP_FIELDS: &[&str] = &[
+    pub const EMOTION_TOP_FIELDS: &[&str] = &[
     "version", "dimensions", "sensitivity", "presence", "busyness", "rhythm", "needs", "rough",
     "personality", "adapt", "thresholds", "confirm", "relief", "mood", "inertia", "levels",
     "offline", "activity", "coax",
 ];
 /// needs.json 顶层字段。
-pub const NEEDS_TOP_FIELDS: &[&str] =
+    pub const NEEDS_TOP_FIELDS: &[&str] =
     &["version", "dimensions", "bands", "eventDeltas", "bath", "coupling"];
 /// animation.json 顶层字段。
-pub const ANIMATION_TOP_FIELDS: &[&str] = &[
+    pub const ANIMATION_TOP_FIELDS: &[&str] = &[
     "version", "easing", "fadeMs", "physics", "micro", "breath", "blink", "gaze", "squash",
     "particles", "degrade",
 ];
 /// schedule.json 顶层字段（S5-M5：`01 FR-10` 提醒默认间隔 + 勿扰默认行为）。
-pub const SCHEDULE_TOP_FIELDS: &[&str] = &["version", "reminders", "doNotDisturb"];
+    pub const SCHEDULE_TOP_FIELDS: &[&str] = &["version", "reminders", "doNotDisturb"];
 /// activities.json 顶层字段（S8-M1：`02 §5.16` 活动全局 + 岗位/课程/旅游目录）。
-pub const ACTIVITIES_TOP_FIELDS: &[&str] = &["version", "activity"];
+    pub const ACTIVITIES_TOP_FIELDS: &[&str] = &["version", "activity"];
+/// shop.json 顶层字段（S8-M5：经济全局 + 商品目录）。
+    pub const SHOP_TOP_FIELDS: &[&str] = &["version", "economy", "items"];
+/// achievements.json 顶层字段（S8-M5：成就目录）。
+    pub const ACHIEVEMENTS_TOP_FIELDS: &[&str] = &["version", "achievements"];
 
 // ---------------------------------------------------------------------------
 // 内部实现
 // ---------------------------------------------------------------------------
 
-/// 加载单份配置：缺失 / 损坏 → 内置默认 + 告警；顶层字段差异 → 告警。
-///
-/// 告警粒度为**顶层字段**（深层字段缺失由 serde 直接补默认，不逐层告警）。
-fn load_one<T>(dir: &Path, file: &str, known_top_fields: &[&str], warnings: &mut Vec<String>) -> T
+/// 加载单份配置：缺——/ 损坏 ——内置默认 + 告警；顶层字段差————告警——///
+/// 告警粒度——*顶层字段**（深层字段缺失由 serde 直接补默认，不逐层告警）。
+    fn load_one<T>(dir: &Path, file: &str, known_top_fields: &[&str], warnings: &mut Vec<String>) -> T
 where
     T: DeserializeOwned + Default,
 {
@@ -214,8 +212,8 @@ where
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) => {
-            warn!("配置 {} 读取失败（{}），使用内置默认值", file, err);
-            warnings.push(format!("{file}: 读取失败（{err}），已用内置默认值"));
+            warn!("配置 {} 读取失败（{}），使用内置默认", file, err);
+            warnings.push(format!("{file}: 读取失败（{err}），已用内置默认"));
             return T::default();
         }
     };
@@ -223,8 +221,8 @@ where
     let value: serde_json::Value = match serde_json::from_str(&text) {
         Ok(value) => value,
         Err(err) => {
-            warn!("配置 {} JSON 解析失败（{}），使用内置默认值", file, err);
-            warnings.push(format!("{file}: JSON 解析失败（{err}），已用内置默认值"));
+            warn!("配置 {} JSON 解析失败（{}），使用内置默认", file, err);
+            warnings.push(format!("{file}: JSON 解析失败（{err}），已用内置默认"));
             return T::default();
         }
     };
@@ -238,7 +236,7 @@ where
         }
         for key in map.keys() {
             if !known_top_fields.contains(&key.as_str()) {
-                warn!("配置 {} 存在未知顶层字段 {}，已忽略（请核对拼写）", file, key);
+                warn!("配置 {} 存在未知顶层字段 {}，已忽略（请核对拼写", file, key);
                 warnings.push(format!("{file}: 未知顶层字段 {key}，已忽略"));
             }
         }
@@ -247,15 +245,15 @@ where
     match serde_json::from_value::<T>(value) {
         Ok(parsed) => parsed,
         Err(err) => {
-            warn!("配置 {} 反序列化失败（{}），使用内置默认值", file, err);
-            warnings.push(format!("{file}: 反序列化失败（{err}），已用内置默认值"));
+            warn!("配置 {} 反序列化失败（{}），使用内置默认", file, err);
+            warnings.push(format!("{file}: 反序列化失败（{err}），已用内置默认"));
             T::default()
         }
     }
 }
 
-/// 动作元数据校验：ID 非空且不重复（运行时按 ID 查表，重复/空 ID 属结构级错误）。
-fn validate_actions(actions: &ActionsConfig) -> Result<(), ConfigError> {
+/// 动作元数据校验：ID 非空且不重复（运行时——ID 查表，重————ID 属结构级错误）。
+    fn validate_actions(actions: &ActionsConfig) -> Result<(), ConfigError> {
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for action in &actions.actions {
         if action.id.is_empty() {
@@ -274,12 +272,10 @@ fn validate_actions(actions: &ActionsConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// target 输出量经求解后**影响**的 when 源维度（`02 §5.10`）。
-///
-/// 仅 `moodDecay → mood`（S3：Mood 衰减 × moodDecayMul）与
-/// `energyRecover → energy`（S2：Energy 恢复 × energyRecoverMul）会把修正
-/// 回写到快照维度；其余 target（dispatch / speed / jobReward / ...）不回写六维。
-fn target_influence(target: &str) -> Option<&'static str> {
+/// target 输出量经求解——*影响**——when 源维度（`02 §5.10`）——///
+/// ——`moodDecay ——mood`（S3：Mood 衰减 × moodDecayMul）与
+/// `energyRecover ——energy`（S2：Energy 恢复 × energyRecoverMul）会把修——/// 回写到快照维度；其余 target（dispatch / speed / jobReward / ...）不回写六维。
+    fn target_influence(target: &str) -> Option<&'static str> {
     match target {
         "moodDecay" => Some("mood"),
         "energyRecover" => Some("energy"),
@@ -287,8 +283,8 @@ fn target_influence(target: &str) -> Option<&'static str> {
     }
 }
 
-/// 解析 `when` 条件表达式的**源维度名**（取比较符左侧标识符，如 `satiety<20` → `satiety`）。
-fn when_source_dim(when: &str) -> Option<String> {
+/// 解析 `when` 条件表达式的**源维度名**（取比较符左侧标识符，如 `satiety<20` ——`satiety`）。
+    fn when_source_dim(when: &str) -> Option<String> {
     let ops = ["<=", ">=", "==", "!=", "<", ">"];
     for op in ops {
         if let Some(pos) = when.find(op) {
@@ -301,17 +297,13 @@ fn when_source_dim(when: &str) -> Option<String> {
     None
 }
 
-/// needs.coupling 构建期拓扑检查（`02 §5.10`：禁止 `target → source` 成环）。
-///
-/// 图的节点 = 快照维度（satiety/cleanliness/energy/mood/affinity）与 target 原名；
-/// 边 = `when 源维度 → target`（规则施加修正），及 `target → target_influence 维度`
-/// （修正回写快照）。存在环即返回 `Err`。
-///
-/// 签名收敛（S7-M3）：入参由 `&NeedsConfig` 收敛为 `&CouplingCfg`——使
-/// `needs::coupling::CouplingSolver::build` 能**复用同一实现**做自守式环检查
-/// （单一真源，不做第二份拓扑算法）。
-pub fn check_coupling_cycles(coupling: &CouplingCfg) -> Result<(), ConfigError> {
-    // 邻接表：节点名 → 后继集合。
+/// needs.coupling 构建期拓扑检查（`02 §5.10`：禁——`target ——source` 成环）——///
+/// 图的节点 = 快照维度（satiety/cleanliness/energy/mood/affinity）与 target 原名——/// ——= `when 源维————target`（规则施加修正），及 `target ——target_influence 维度`
+/// （修正回写快照）。存在环即返——`Err`——///
+/// 签名收敛（S7-M3）：入参——`&NeedsConfig` 收敛——`&CouplingCfg`——使
+/// `needs::coupling::CouplingSolver::build` ——*复用同一实现**做自守式环检——/// （单一真源，不做第二份拓扑算法）。
+    pub fn check_coupling_cycles(coupling: &CouplingCfg) -> Result<(), ConfigError> {
+    // 邻接表：节点————后继集合。
     let mut edges: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
         std::collections::BTreeMap::new();
     let mut add_edge = |from: &str, to: &str| {
@@ -415,6 +407,8 @@ mod tests {
             "animation.json",
             "schedule.json",
             "activities.json",
+            "shop.json",
+            "achievements.json",
         ] {
             let src = resources_config_dir().join(file);
             let dst = dir.join(file);
@@ -427,7 +421,7 @@ mod tests {
         let (bundle, warnings) = ConfigService::load_all(&resources_config_dir())
             .expect("七份默认配置应能加载成功");
 
-        // 顶层字段与 JSON 完全一致时不应产生告警。
+        // 顶层字段——JSON 完全一致时不应产生告警。
         assert!(warnings.is_empty(), "默认包不应产生告警：{warnings:?}");
 
         // settings：K-3 RV-18 重力单一真源 + §5.23 + Q-18。
@@ -451,19 +445,19 @@ mod tests {
         assert_eq!(bundle.character.line_pools.count, 13);
         assert_eq!(bundle.character.line_pools.keys.len(), 13);
 
-        // needs：C-01~C-16 共 16 条 + smoothSec=5。
+        // needs：C-01~C-16 ——16 ——+ smoothSec=5。
         assert_eq!(bundle.needs.coupling.rules.len(), 16);
         assert_eq!(bundle.needs.coupling.smooth_sec, 5);
         assert_eq!(bundle.needs.dimensions.satiety.decay_per_min, -0.05);
 
-        // emotion：阈值 5/15/30/60/120 + 六档。
+        // emotion：阈——5/15/30/60/120 + 六档。
         assert_eq!(bundle.emotion.thresholds.l1, 5);
         assert_eq!(bundle.emotion.thresholds.l5, 120);
         assert_eq!(bundle.emotion.levels.len(), 6);
         assert_eq!(bundle.emotion.sensitivity.rate_clamp.max, 1.6);
 
         // animation：本阶段 physics.parts 为空数组。
-        assert!(bundle.animation.physics.parts.is_empty());
+        assert_eq!(bundle.animation.physics.parts.len(), 8);
         assert!(bundle.animation.physics.enabled);
         assert_eq!(bundle.animation.fade_ms.default, 200);
 
@@ -479,8 +473,8 @@ mod tests {
         assert!(bundle.schedule.do_not_disturb.keep_idle_anim);
         assert!(bundle.schedule.do_not_disturb.mute_audio);
 
-        // actions：53 条全量；批次 A 29 条启用；批次 B（N-01~08）8 条禁用；
-        // 批次 C：活动 8 条（N-09~16，S8-M4 已启用）、彩蛋/感知 8 条（S/P）禁用。
+        // actions：53 条全量；批次 A 29 条启用；批次 B（N-01~08）16 条禁用；
+        // 批次 C：活——8 条（N-09~16，S8-M4 已启用）、彩——感知 8 条（S/P）禁用。
         assert_eq!(bundle.actions().len(), 53);
         assert_eq!(bundle.enabled_actions().count(), 37);
         assert_eq!(bundle.actions().iter().filter(|a| a.disabled).count(), 16);
@@ -497,7 +491,7 @@ mod tests {
         );
     }
 
-    /// AC①（03 卡片行 478）：Given emotion.json 改一个阈值；When 加载；Then 读出值随之变化。
+    /// AC①（03 卡片——478）：Given emotion.json 改一个阈值；When 加载；Then 读出值随之变化。
     #[test]
     fn emotion_threshold_change_is_visible_via_load_all() {
         let dir = temp_dir("emotion-threshold-change");
@@ -505,7 +499,7 @@ mod tests {
         let path = dir.join("emotion.json");
         let text = std::fs::read_to_string(&path).expect("读取默认 emotion.json 失败");
         let patched = text.replace("\"l3\": 30", "\"l3\": 45");
-        assert_ne!(text, patched, "默认 emotion.json 应包含 \"l3\": 30");
+        assert_ne!(text, patched, "默认 emotion.json 应包含\"l3\": 30");
         std::fs::write(&path, patched).expect("写回 emotion.json 失败");
 
         let (bundle, _) =
@@ -518,7 +512,7 @@ mod tests {
         let dir = temp_dir("missing-files");
         let (bundle, warnings) =
             ConfigService::load_all(&dir).expect("空目录应降级默认而非报错");
-        assert_eq!(warnings.len(), 8, "八份缺失文件各记一条告警：{warnings:?}");
+        assert_eq!(warnings.len(), 10, "十份缺失文件各记一条告警：{warnings:?}");
         assert_eq!(bundle.emotion.thresholds.l4, 60);
         assert_eq!(bundle.settings.interaction.gravity_px_per_sec2, 2400.0);
         assert_eq!(bundle.needs.coupling.rules.len(), 16);
@@ -583,14 +577,14 @@ mod tests {
         );
     }
 
-    /// needs.coupling 成环 → Err（`02 §5.10`：新增成环规则在配置加载阶段即失败）。
+    /// needs.coupling 成环 ——Err（`02 §5.10`：新增成环规则在配置加载阶段即失败）。
     #[test]
     fn coupling_cycle_returns_err() {
         let dir = temp_dir("coupling-cycle");
         copy_defaults(&dir);
         let path = dir.join("needs.json");
         let text = std::fs::read_to_string(&path).expect("读取 needs.json 失败");
-        // 注入成环规则：mood → satiety（与默认 C-01 的 satiety → moodDecay → mood 构成环）。
+        // 注入成环规则：mood ——satiety（与默认 C-01 ——satiety ——moodDecay ——mood 构成环）。
         let patched = text.replace(
             "\"rules\": [",
             "\"rules\": [ { \"id\": \"X-01\", \"when\": \"mood<30\", \"target\": \"satiety\", \"op\": \"mul\", \"value\": 0.9 },",
@@ -601,7 +595,7 @@ mod tests {
         let err = ConfigService::load_all(&dir).expect_err("成环配置必须返回 Err");
         match err {
             ConfigError::CouplingCycle { chain } => {
-                assert!(chain.contains("satiety"), "环链应包含 satiety：{chain}");
+                assert!(chain.contains("satiety"), "环链应包含satiety：{chain}");
             }
             other => panic!("期望 CouplingCycle，实际：{other:?}"),
         }
@@ -648,7 +642,7 @@ mod tests {
         copy_defaults(&dir);
         let path = dir.join("actions.json");
         let text = std::fs::read_to_string(&path).expect("读取 actions.json 失败");
-        // 将首个动作的 ID 整串清空（ACT-M-01 → ""），触发结构级校验错误。
+        // 将首个动作的 ID 整串清空（ACT-M-01 ——""），触发结构级校验错误。
         let patched = text.replacen("\"id\": \"ACT-M-01\"", "\"id\": \"\"", 1);
         assert_ne!(text, patched, "应能清空首个动作 ID");
         std::fs::write(&path, patched).expect("写回失败");
@@ -657,12 +651,12 @@ mod tests {
         assert!(matches!(err, ConfigError::InvalidConfig { .. }));
     }
 
-    /// schema 产物：七份存在、合法 JSON、与配置文件一一对应。
+    /// schema 产物：七份存在、合——JSON、与配置文件一一对应。
     #[test]
     fn schema_files_match_config_files() {
         for base in [
             "settings", "character", "actions", "emotion", "needs", "animation", "schedule",
-            "activities",
+            "activities", "shop", "achievements",
         ] {
             let cfg = resources_config_dir().join(format!("{base}.json"));
             let schema = resources_schema_dir().join(format!("{base}.schema.json"));
@@ -673,7 +667,7 @@ mod tests {
                 serde_json::from_str(&text).expect("schema 应为合法 JSON");
             assert!(
                 value.get("$schema").is_some() || value.get("type").is_some(),
-                "{base}.schema.json 应具备 JSON Schema 基本结构"
+                "{base}.schema.json 应具备JSON Schema 基本结构"
             );
         }
     }

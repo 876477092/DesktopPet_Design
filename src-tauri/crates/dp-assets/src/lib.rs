@@ -2,8 +2,8 @@
 //!
 //! 承载内容（`02 §3`）：`atlas/mask/skelhit/cache`；本模块（S1-M5 / T-03）落地
 //! `atlas.rs`（atlas.json 帧矩形解析）、`mask.rs`（alpha→1bit 掩码，下采样 2x）、
-//! `cache.rs`（`LruAtlasCache` 字节上限驱逐）。`skelhit.rs`（骨骼覆盖率表）按
-//! `03` 台账由 S2 阶段随 `gen-skeleton.mjs` 落地。
+//! `cache.rs`（`LruAtlasCache` 字节上限驱逐）、`skelhit.rs`（骨骼 32×32 覆盖率表，
+//! S9-M2 随 `scripts/gen-skeleton.mjs` 落地）。
 //!
 //! 契约要点（`03 §4.4` / `02 §4.4` / §5 K-2 / K-4）：
 //!   - 图集 LRU 硬上限 **64MB**（C10，2026-09-13 现场修复：原 48MB → 64MB）；
@@ -15,6 +15,7 @@
 pub mod atlas;
 pub mod cache;
 pub mod mask;
+pub mod skelhit;
 
 use thiserror::Error;
 

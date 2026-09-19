@@ -1,6 +1,28 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# cargo run 默认构建/运行 dp-app（含 DesktopPet 二进制）；
+# 根占位包 desktoppet-root 仅用于让 tauri-cli 读到 [package]，不参与默认构建。
+default-members = ["crates/dp-app"]
+
+# ---------------------------------------------------------------------------
+# 根包占位：Tauri CLI 要求 src-tauri/Cargo.toml 带 [package] 以读取
+# 版本/包名。真正的可执行产物在 crates/dp-app（[[bin]] name=DesktopPet，
+# 与 tauri.conf.json 的 mainBinaryName 一致）；tauri 以 --bin DesktopPet 构建，
+# 本根包无 src，不参与编译。
+# ---------------------------------------------------------------------------
+[package]
+name = "desktoppet-root"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = false
+
+[lib]
+name = "desktoppet_root"
+path = "src/lib.rs"
 
 # ---------------------------------------------------------------------------
 # 工作区级共享元数据（各 crate 通过 `xxx.workspace = true` 继承）

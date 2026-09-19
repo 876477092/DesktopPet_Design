@@ -23,8 +23,9 @@
 
 import type { RenderFrameCmdV1 } from '../shared/ipc';
 import { computeFrameRect, type FrameSubRect } from './AtlasCache';
-import { CROSSFADE_MS, crossfadeAlphas } from './crossfade';
+import { CROSSFADE_MS, crossfadeAlphas, linearEasing, type CrossfadeEasing } from './crossfade';
 import type { DrawOptions } from './WebGLStage';
+import type { ICharacterRenderer } from './ICharacterRenderer';
 
 /** 渲染后端种类标识（K-14 `ICharacterRenderer.kind` 的帧回退实现取值）。 */
 export const RENDERER_KIND_FRAME = 'frame';
@@ -64,13 +65,18 @@ interface ReadyFrame {
 /**
  * 帧动画渲染器（帧回退实现，`ICharacterRenderer <|.. FrameRenderer`，K-14）。
  *
+ * S9-M1：实现 [`ICharacterRenderer`]——`isReady()` 恒 `true`（帧路径无异步加载期）；
+ * 交叉淡入时长/缓动可配（默认 150ms 线性，与 S2-M2 既有行为一致；传入 150~250ms
+ * 区间 + 缓动曲线即升级）。
+ *
  * @param stage        渲染舞台（三级探测结果，由装配方注入）
  * @param cache        图集位图缓存
  * @param onFrameReady 就绪帧更新后的回调（装配方接到 `LayerHost.render()` 做按序合成）
  * @param now          单调时钟读数（默认 `performance.now`；仅测本地过渡时长，
  *                     C3 边界：不读墙钟、不落业务计时）
+ * @param fade         S9-M1 交叉淡入配置（默认 150ms 线性）
  */
-export class FrameRenderer {
+export class FrameRenderer implements ICharacterRenderer {
   /** 渲染后端种类（K-14：`kind` 标识，骨骼实现为 S9-M1 段）。 */
   readonly kind = RENDERER_KIND_FRAME;
 
@@ -82,15 +88,28 @@ export class FrameRenderer {
   private pendingCmd: RenderFrameCmdV1 | null = null;
   private drawing = false;
 
+  /** 本次动作切换采用的交叉淡入时长（S9-M1；构造期固化，默认 150ms）。 */
+  private readonly fadeMs: number;
+  /** 本次动作切换采用的交叉淡入缓动（S9-M1；默认线性）。 */
+  private readonly fadeEasing: CrossfadeEasing;
+
   constructor(
     private readonly stage: FrameStage,
     private readonly cache: FrameAtlasCache,
     private readonly onFrameReady: () => void,
     private readonly now: () => number = () => performance.now(),
+    fade: { ms?: number; easing?: CrossfadeEasing } = {},
   ) {
     // B10：位图被 AtlasCache LRU close() 驱逐 → 立即失效引用它的就绪帧，
     // 否则 paint 将使用已关闭的 ImageBitmap（真实风险：>12 图集触发驱逐）。
     this.cache.onEvict?.((name) => this.invalidateAtlas(name));
+    this.fadeMs = Number.isFinite(fade.ms ?? CROSSFADE_MS) ? (fade.ms as number) : CROSSFADE_MS;
+    this.fadeEasing = fade.easing ?? linearEasing;
+  }
+
+  /** 帧路径恒就绪（K-14：无运行时加载期，BackendSwitcher 回退判定用）。 */
+  isReady(): boolean {
+    return true;
   }
 
   /** 失效引用指定图集的就绪帧（B10 驱逐回调主体）。 */
@@ -184,7 +203,11 @@ export class FrameRenderer {
     if (this.fadeStart === null || this.fadeFrom === null) {
       return null;
     }
-    const alphas = crossfadeAlphas(this.now() - this.fadeStart, CROSSFADE_MS);
+    const alphas = crossfadeAlphas(
+      this.now() - this.fadeStart,
+      this.fadeMs,
+      this.fadeEasing,
+    );
     if (alphas === null) {
       this.fadeFrom = null;
       this.fadeStart = null;

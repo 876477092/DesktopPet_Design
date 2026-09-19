@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "achievements": [
+    { "id": "ACH_FIRST_COAX", "name": "心心的第一个比心", "desc": "完成第一次比心", "coin": 20, "condition": { "metric": "coaxCount", "target": 1 } },
+    { "id": "ACH_COAX_10", "name": "十指连心", "desc": "累计抚摸 10 次", "coin": 30, "condition": { "metric": "coaxCount", "target": 10 } },
+    { "id": "ACH_COAX_50", "name": "温柔相待", "desc": "累计抚摸 50 次", "coin": 60, "condition": { "metric": "coaxCount", "target": 50 } },
+    { "id": "ACH_COAX_100", "name": "百次抚摸", "desc": "累计抚摸 100 次", "coin": 100, "condition": { "metric": "coaxCount", "target": 100 } },
+    { "id": "ACH_COAX_500", "name": "心心贴贴王", "desc": "累计抚摸 500 次", "coin": 200, "condition": { "metric": "coaxCount", "target": 500 } },
+    { "id": "ACH_FIRST_FEED", "name": "第一口饭", "desc": "第一次喂食", "coin": 20, "condition": { "metric": "feedCount", "target": 1 } },
+    { "id": "ACH_FEED_50", "name": "贴心大厨", "desc": "累计喂食 50 次", "coin": 50, "condition": { "metric": "feedCount", "target": 50 } },
+    { "id": "ACH_FEED_200", "name": "御膳房总管", "desc": "累计喂食 200 次", "coin": 120, "condition": { "metric": "feedCount", "target": 200 } },
+    { "id": "ACH_FIRST_BATH", "name": "第一次洗澡", "desc": "第一次给心心洗澡", "coin": 20, "condition": { "metric": "bathCount", "target": 1 } },
+    { "id": "ACH_BATH_50", "name": "香氛SPA", "desc": "累计洗澡 50 次", "coin": 80, "condition": { "metric": "bathCount", "target": 50 } },
+    { "id": "ACH_FIRST_WORK", "name": "初入职场", "desc": "第一次打工", "coin": 30, "condition": { "metric": "workCount", "target": 1 } },
+    { "id": "ACH_WORK_10", "name": "熟练打工人", "desc": "累计打工 10 次", "coin": 60, "condition": { "metric": "workCount", "target": 10 } },
+    { "id": "ACH_WORK_50", "name": "劳模本模", "desc": "累计打工 50 次", "coin": 150, "condition": { "metric": "workCount", "target": 50 } },
+    { "id": "ACH_FIRST_STUDY", "name": "初学乍练", "desc": "第一次学习", "coin": 30, "condition": { "metric": "studyCount", "target": 1 } },
+    { "id": "ACH_STUDY_10", "name": "学霸之路", "desc": "累计学习 10 次", "coin": 80, "condition": { "metric": "studyCount", "target": 10 } },
+    { "id": "ACH_FIRST_TRAVEL", "name": "第一次远行", "desc": "第一次旅游", "coin": 50, "condition": { "metric": "travelCount", "target": 1 } },
+    { "id": "ACH_TRAVEL_5", "name": "周游世界", "desc": "累计旅游 5 次", "coin": 150, "condition": { "metric": "travelCount", "target": 5 } },
+    { "id": "ACH_LOGIN_1", "name": "初见你", "desc": "连续登录 1 天", "coin": 20, "condition": { "metric": "loginDays", "target": 1 } },
+    { "id": "ACH_LOGIN_3", "name": "三日之约", "desc": "连续登录 3 天", "coin": 40, "condition": { "metric": "loginDays", "target": 3 } },
+    { "id": "ACH_LOGIN_7", "name": "一周陪伴", "desc": "连续登录 7 天", "coin": 100, "condition": { "metric": "loginDays", "target": 7 } },
+    { "id": "ACH_LOGIN_14", "name": "双周不离", "desc": "连续登录 14 天", "coin": 150, "condition": { "metric": "loginDays", "target": 14 } },
+    { "id": "ACH_LOGIN_30", "name": "月月相伴", "desc": "连续登录 30 天", "coin": 200, "condition": { "metric": "loginDays", "target": 30 } },
+    { "id": "ACH_EGG_1", "name": "初次发现", "desc": "发现第一个彩蛋", "coin": 30, "condition": { "metric": "eggCount", "target": 1 } },
+    { "id": "ACH_EGG_5", "name": "彩蛋猎人", "desc": "发现 5 个彩蛋", "coin": 100, "condition": { "metric": "eggCount", "target": 5 } },
+    { "id": "ACH_SOLVE_1", "name": "哄好啦", "desc": "第一次哄好心心", "coin": 30, "condition": { "metric": "coaxSolved", "target": 1 } },
+    { "id": "ACH_SOLVE_10", "name": "情绪治愈师", "desc": "累计哄好 10 次", "coin": 120, "condition": { "metric": "coaxSolved", "target": 10 } }
+  ]
+}

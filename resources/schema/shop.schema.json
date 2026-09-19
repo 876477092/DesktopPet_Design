@@ -1,0 +1,261 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ShopConfig",
+  "description": "`shop.json` 根：经济全局 + 商品目录。",
+  "type": "object",
+  "properties": {
+    "economy": {
+      "description": "经济全局参数（上限 / 连续登录 / 日常任务）。",
+      "default": {
+        "coinMax": 99999,
+        "dailyIncomeCap": 350,
+        "dailyTaskRewardMax": 15,
+        "dailyTaskRewardMin": 5,
+        "loginStreak": [
+          10,
+          15,
+          20,
+          25,
+          30,
+          40,
+          50
+        ],
+        "loginStreakAfter": 30,
+        "perTxMax": 2000
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/ShopEconomyCfg"
+        }
+      ]
+    },
+    "items": {
+      "description": "商品目录（30 件，`01 §6.14.3`）。",
+      "default": [],
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ShopItemCfg"
+      }
+    },
+    "version": {
+      "description": "配置版本。",
+      "default": 1,
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "ItemEffectCfg": {
+      "description": "商品使用效果（缺省 = 不影响该维）。",
+      "type": "object",
+      "properties": {
+        "cleanliness": {
+          "description": "清洁度变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "energy": {
+          "description": "精力变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "mood": {
+          "description": "心情变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "satiety": {
+          "description": "饱食度变化。",
+          "default": null,
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "float"
+        },
+        "unlockAction": {
+          "description": "购买后解锁的动作 / 交互 ID（玩具 / 家具类；可空）。",
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ItemQuotaCfg": {
+      "description": "限购规则。",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "description": "计数周期（`daily` / `weekly` / `once` / `unlimited`）。",
+          "default": "unlimited",
+          "type": "string"
+        },
+        "limit": {
+          "description": "该周期内可购上限（`once`=1、`unlimited`=0 表示不限）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      }
+    },
+    "ItemUnlockCfg": {
+      "description": "解锁条件。",
+      "type": "object",
+      "properties": {
+        "affinityLevel": {
+          "description": "所需亲密度等级（0 = 无要求）。",
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "text": {
+          "description": "附加条件文案（展示用）。",
+          "default": "",
+          "type": "string"
+        }
+      }
+    },
+    "ShopEconomyCfg": {
+      "description": "经济全局（`02 §5.18` C 契约：上限 99999 / 单笔 2000 / 日入账 350）。",
+      "type": "object",
+      "properties": {
+        "coinMax": {
+          "description": "心币余额上限（硬截断，溢出记 `CoinOverflow`）。",
+          "default": 99999,
+          "type": "integer",
+          "format": "int64"
+        },
+        "dailyIncomeCap": {
+          "description": "每日入账硬顶（QI-05 定版 350；消费不占此顶）。",
+          "default": 350,
+          "type": "integer",
+          "format": "int64"
+        },
+        "dailyTaskRewardMax": {
+          "description": "日常任务单个奖励上限（心币）。",
+          "default": 15,
+          "type": "integer",
+          "format": "int64"
+        },
+        "dailyTaskRewardMin": {
+          "description": "日常任务单个奖励下限（心币）。",
+          "default": 5,
+          "type": "integer",
+          "format": "int64"
+        },
+        "loginStreak": {
+          "description": "连续登录显式数列（M-12：第 1~7 天 `[10,15,20,25,30,40,50]`）。",
+          "default": [
+            10,
+            15,
+            20,
+            25,
+            30,
+            40,
+            50
+          ],
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "loginStreakAfter": {
+          "description": "第 8 天起每日固定值（≤ 数列峰值 50）。",
+          "default": 30,
+          "type": "integer",
+          "format": "int64"
+        },
+        "perTxMax": {
+          "description": "单笔入账上限（正向入账单条金额截断）。",
+          "default": 2000,
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "ShopItemCfg": {
+      "description": "商品（`01 §6.14.3` 30 行；8 分类）。",
+      "type": "object",
+      "properties": {
+        "category": {
+          "description": "分类（`food`/`groom`/`toy`/`furniture`/`clothing`/`textbook`/`coupon`/`frame`）。",
+          "default": "",
+          "type": "string"
+        },
+        "effect": {
+          "description": "使用效果（食用 / 洗护时施加的六维 delta）。",
+          "default": {
+            "cleanliness": null,
+            "energy": null,
+            "mood": null,
+            "satiety": null,
+            "unlockAction": null
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ItemEffectCfg"
+            }
+          ]
+        },
+        "id": {
+          "description": "商品 ID（如 `FOOD_RICEBALL`）。",
+          "default": "",
+          "type": "string"
+        },
+        "name": {
+          "description": "商品名（含 emoji，展示用）。",
+          "default": "",
+          "type": "string"
+        },
+        "price": {
+          "description": "价格（心币）。",
+          "default": 0,
+          "type": "integer",
+          "format": "int64"
+        },
+        "quota": {
+          "description": "限购（每日 / 每周 / 一次性 / 不限）。",
+          "default": {
+            "kind": "unlimited",
+            "limit": 0
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ItemQuotaCfg"
+            }
+          ]
+        },
+        "unlock": {
+          "description": "解锁条件（亲密度等级；0 = 无）。",
+          "default": {
+            "affinityLevel": 0,
+            "text": ""
+          },
+          "allOf": [
+            {
+              "$ref": "#/definitions/ItemUnlockCfg"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

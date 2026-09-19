@@ -949,6 +949,31 @@ pub enum CoreInput {
     },
     /// S8-M1：提前召回进行中的活动（收益按已完成比例 × 0.5）。
     ActivityRecall,
+    /// S8-M6：商城购买（背包入库；`02 §5.18`）。
+    ///
+    /// 校验（余额 / 限购 / 日顶 / 失败冲正）在 core-loop 侧以当时经济账本快照执行；
+    /// 成功后库存 +1 并播对应 ACT 事件。
+    Purchase {
+        /// 商品 ID（`shop.json` 键，如 `FOOD_CRACKER`）。
+        item_id: String,
+        /// 购买数量。
+        qty: u32,
+    },
+    /// S10-M1：桌面装饰摆放到 5 槽之一（`01 FR-13-6`；`DECOR_SLOTS=5`）。
+    ///
+    /// 校验（槽位越界 / 背包无此摆件 / 非 furniture 分类）在 core-loop 侧以当时库存
+    /// 快照执行；成功后写 `save.decor[slot] = item_id` 并请求落盘。
+    DecorPlace {
+        /// 槽位（0..=4；越界拒绝）。
+        slot: u8,
+        /// 摆件商品 ID（须为已拥有的 furniture 分类）。
+        item_id: String,
+    },
+    /// S10-M1：取下某槽桌面装饰（`save.decor[slot] = null`；空槽拒绝）。
+    DecorRemove {
+        /// 槽位（0..=4；越界 / 空槽拒绝）。
+        slot: u8,
+    },
 }
 
 impl CoreInput {
@@ -967,6 +992,9 @@ impl CoreInput {
             CoreInput::FlushSave { .. } => "FlushSave",
             CoreInput::ActivityDispatch { .. } => "ActivityDispatch",
             CoreInput::ActivityRecall => "ActivityRecall",
+            CoreInput::Purchase { .. } => "Purchase",
+            CoreInput::DecorPlace { .. } => "DecorPlace",
+            CoreInput::DecorRemove { .. } => "DecorRemove",
         }
     }
 }

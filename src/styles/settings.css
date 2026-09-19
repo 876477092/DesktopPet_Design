@@ -494,3 +494,239 @@ body,
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* ===========================================================================
+ * S10-M1/M2 新增组件样式（活动 / 商城·背包 / 相册·装饰 / 原因卡 / 明信片）
+ * 复用上方 --dp-* 变量；不引入新色板。
+ * ======================================================================== */
+
+/* 次按钮（派遣 / 召回 / 槽位等次要动作；与 .dp-btn-primary 区分） */
+.dp-btn-secondary {
+  appearance: none;
+  border: 1px solid var(--dp-border);
+  background: var(--dp-panel);
+  color: var(--dp-text);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dp-btn-secondary:hover {
+  border-color: var(--dp-primary);
+  color: var(--dp-primary);
+}
+
+/* 活动 Tab */
+.dp-activity-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dp-activity-card {
+  border: 1px solid var(--dp-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--dp-panel);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dp-activity-idle {
+  color: var(--dp-text-dim);
+  border-style: dashed;
+}
+.dp-activity-name {
+  font-weight: 600;
+}
+.dp-activity-hint {
+  color: var(--dp-text-dim);
+  font-size: 12px;
+}
+.dp-activity-remaining {
+  color: var(--dp-text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.dp-dispatch-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dp-dispatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.dp-dispatch-kind {
+  min-width: 3em;
+  color: var(--dp-text-dim);
+}
+
+/* 商城余额条 */
+.dp-shop-balance {
+  margin: 0 0 8px;
+  font-weight: 600;
+  color: var(--dp-primary);
+}
+
+/* 相册网格 */
+.dp-album-grid {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+.dp-album-cell {
+  border: 1px solid var(--dp-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--dp-panel);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+}
+.dp-album-photo {
+  font-size: 28px;
+  line-height: 1;
+}
+.dp-album-caption {
+  font-size: 11px;
+  color: var(--dp-text-dim);
+}
+
+/* 装饰 5 槽 */
+.dp-decor {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.dp-decor-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.dp-decor-item {
+  border: 1px solid var(--dp-border);
+  background: var(--dp-panel);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.dp-decor-item.is-selected {
+  border-color: var(--dp-primary);
+  background: var(--dp-primary-soft);
+}
+.dp-decor-slots {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+}
+.dp-decor-slot {
+  min-height: 44px;
+  border: 1px dashed var(--dp-border);
+  border-radius: 6px;
+  background: var(--dp-bg);
+  color: var(--dp-text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px;
+}
+.dp-decor-slot.is-occupied {
+  border-style: solid;
+  border-color: var(--dp-primary);
+  color: var(--dp-text);
+  background: var(--dp-primary-soft);
+}
+
+/* 情绪原因卡（设置页内预览；桌面浮层另有气泡样式） */
+.dp-reason-card {
+  border: 1px solid var(--dp-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--dp-panel);
+  margin: 8px 0;
+}
+.dp-reason-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.dp-reason-title {
+  font-weight: 600;
+}
+.dp-reason-p {
+  color: var(--dp-text-dim);
+  font-size: 12px;
+}
+.dp-reason-close {
+  margin-left: auto;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--dp-text-dim);
+}
+.dp-reason-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dp-reason-item {
+  border-left: 3px solid var(--dp-primary);
+  padding-left: 8px;
+}
+.dp-reason-label {
+  font-weight: 600;
+}
+.dp-reason-weight {
+  color: var(--dp-text-dim);
+  font-size: 11px;
+  margin-left: 6px;
+}
+.dp-reason-advice {
+  margin: 2px 0 0;
+  color: var(--dp-text-dim);
+  font-size: 12px;
+}
+
+/* 明信片（相册内预览） */
+.dp-postcard {
+  border: 1px solid var(--dp-border);
+  border-radius: 4px;
+  padding: 10px;
+  margin: 0;
+  background: #fffdf7;
+  position: relative;
+}
+.dp-postcard-title {
+  font-weight: 600;
+}
+.dp-postcard-stamp {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  font-size: 10px;
+  color: var(--dp-text-dim);
+  border: 1px solid var(--dp-border);
+  padding: 2px 4px;
+}
+.dp-postcard-body {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--dp-text-dim);
+  line-height: 1.6;
+}

@@ -6,7 +6,16 @@
     "enabled": true,
     "subStepMs": 8,
     "level": "full",
-    "parts": []
+    "parts": [
+      { "bone": "tail_0", "kind": "chain", "stiffness": 0.8, "damping": 0.7, "mass": 1.0, "inheritFrom": null, "moodSwingMul": 1.0, "angryStiff": true },
+      { "bone": "tail_1", "kind": "chain", "stiffness": 0.8, "damping": 0.7, "mass": 1.0, "inheritFrom": "tail_0", "moodSwingMul": 1.0, "angryStiff": true },
+      { "bone": "tail_2", "kind": "pendulum", "stiffness": 0.7, "damping": 0.7, "mass": 0.8, "inheritFrom": "tail_1", "moodSwingMul": 1.2, "angryStiff": true },
+      { "bone": "ear_l", "kind": "pendulum", "stiffness": 0.6, "damping": 0.6, "mass": 0.4, "inheritFrom": "head", "moodSwingMul": 1.0, "angryStiff": false },
+      { "bone": "ear_r", "kind": "pendulum", "stiffness": 0.6, "damping": 0.6, "mass": 0.4, "inheritFrom": "head", "moodSwingMul": 1.0, "angryStiff": false },
+      { "bone": "hem_l", "kind": "cloth", "stiffness": 0.5, "damping": 0.8, "mass": 0.6, "inheritFrom": "body", "moodSwingMul": null, "angryStiff": false },
+      { "bone": "hem_r", "kind": "cloth", "stiffness": 0.5, "damping": 0.8, "mass": 0.6, "inheritFrom": "body", "moodSwingMul": null, "angryStiff": false },
+      { "bone": "scarf", "kind": "cloth", "stiffness": 0.6, "damping": 0.75, "mass": 0.5, "inheritFrom": "neck", "moodSwingMul": null, "angryStiff": false }
+    ]
   },
   "micro": {
     "intervalSec": [5, 12],

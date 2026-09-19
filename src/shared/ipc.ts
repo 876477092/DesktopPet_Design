@@ -868,3 +868,239 @@ export function parseActivitySnapshot(raw: unknown): ActivitySnapshotV1 | null {
     instance,
   };
 }
+
+// ---------------------------------------------------------------------------
+// PetSnapshotV1（`pet://state`；S10-M1 引入前端消费面；Rust 真源见
+// `dp_core::event::PetSnapshotV2`，两端同构，serde camelCase）
+// ---------------------------------------------------------------------------
+
+/** 六维数值投影（`values` 段）。 */
+export interface ValuesSnapshotV1 {
+  /** 心情 0~100。 */
+  readonly mood: number;
+  /** 体力 0~100。 */
+  readonly energy: number;
+  /** 展示无聊度 0~100。 */
+  readonly boredom: number;
+  /** 饱食度 0~100。 */
+  readonly satiety: number;
+  /** 清洁度 0~100。 */
+  readonly cleanliness: number;
+  /** 亲密度等级 Lv1~10。 */
+  readonly affinityLevel: number;
+  /** 亲密度当前级内经验。 */
+  readonly affinityExp: number;
+  /** 升级所需经验（满级为 0）。 */
+  readonly affinityExpNext: number;
+}
+
+/** 冷落压力七因子投影（`neglect.factors`）。 */
+export interface FactorsSnapshotV1 {
+  readonly presence: number;
+  readonly busyness: number;
+  readonly personality: number;
+  readonly rhythm: number;
+  readonly needs: number;
+  readonly rough: number;
+  readonly adapt: number;
+  /** 原始乘积（未乘敏感度）。 */
+  readonly product: number;
+}
+
+/** 原因卡条目方向。 */
+export type NeglectReasonDir = 'faster' | 'slower';
+
+/** 原因卡条目（`neglect.reasons`；S10-M2 ReasonCard 消费）。 */
+export interface NeglectReasonV1 {
+  readonly factorKey: string;
+  readonly label: string;
+  readonly weight: number;
+  readonly dir: NeglectReasonDir;
+  readonly advice?: string;
+}
+
+/** 冷落压力投影（`neglect`）。 */
+export interface NeglectSnapshotV1 {
+  /** 当前 P。 */
+  readonly p: number;
+  /** 当前封顶。 */
+  readonly cap: number;
+  /** 生效档位 0..=5。 */
+  readonly level: number;
+  /** 生效速率（含敏感度）。 */
+  readonly ratePerMin: number;
+  readonly factors: FactorsSnapshotV1;
+  readonly sensitivity: { readonly value: number };
+  readonly reasons: readonly NeglectReasonV1[];
+}
+
+/** 经济投影（`economy`）。 */
+export interface EconomySnapshotV1 {
+  /** 心币余额。 */
+  readonly coin: number;
+  /** 今日已赚。 */
+  readonly todayEarned: number;
+  /** 每日入账硬顶。 */
+  readonly dailyCap: number;
+}
+
+/** 背包条目。 */
+export interface InventoryItemV1 {
+  readonly itemId: string;
+  readonly qty: number;
+}
+
+/** 性格投影（`personality`）。 */
+export interface PersonalitySnapshotV1 {
+  readonly text: string;
+  readonly rerollLeft: number;
+  readonly canReroll: boolean;
+}
+
+/**
+ * `pet://state` 全量快照（S10-M1：属性 / 活动 / 商城 / 背包 / 相册·装饰 / 原因卡的
+ * 唯一数据源；Rust 真源 `dp_core::event::PetSnapshotV2`）。
+ *
+ * - `decor` 恒为长度 5 的数组，空位为 `null`，占用为商品 ID（`02 §5 DECOR_SLOTS=5`）；
+ * - `album` 为照片条目数组（形状由后端决定，前端只读渲染，不假设字段）；
+ * - `state` 为展示情绪档（idle / happy / ...，仅用于原因卡显隐）。
+ */
+export interface PetSnapshotV2 {
+  readonly v: number;
+  readonly values: ValuesSnapshotV1;
+  readonly neglect: NeglectSnapshotV1;
+  readonly personality: PersonalitySnapshotV1;
+  readonly activity: ActivitySnapshotV1 | null;
+  readonly economy: EconomySnapshotV1;
+  readonly inventory: readonly InventoryItemV1[];
+  readonly decor: readonly (string | null)[];
+  readonly album: readonly unknown[];
+  readonly state: string;
+}
+
+/** 解析七因子（缺字段取 1.0，与 Rust `FactorsSnapshot::default` 同值域）。 */
+function parseFactors(raw: unknown): FactorsSnapshotV1 {
+  const o = (raw ?? {}) as Record<string, unknown>;
+  const one = (key: string): number => num(o[key], 1.0);
+  return {
+    presence: one('presence'),
+    busyness: one('busyness'),
+    personality: one('personality'),
+    rhythm: one('rhythm'),
+    needs: one('needs'),
+    rough: one('rough'),
+    adapt: one('adapt'),
+    product: num(o.product, 1.0),
+  };
+}
+
+/** 解析原因卡条目数组（脏项丢弃）。 */
+function parseReasons(raw: unknown): NeglectReasonV1[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const out: NeglectReasonV1[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      continue;
+    }
+    const o = item as Record<string, unknown>;
+    out.push({
+      factorKey: str(o.factorKey, ''),
+      label: str(o.label, ''),
+      weight: num(o.weight, 0),
+      dir: oneOf(o.dir, ['faster', 'slower'] as const, 'faster'),
+      advice: typeof o.advice === 'string' && o.advice.length > 0 ? o.advice : undefined,
+    });
+  }
+  return out;
+}
+
+/**
+ * 解析 `pet://state` 载荷为 [`PetSnapshotV2`]（纯函数，可单测）。
+ *
+ * 前向兼容策略（与既有各 `parse*` 同范式）：缺段取 Rust 同名默认；`activity` 复用
+ * [`parseActivitySnapshot`]；`decor` 非数组 → 空 5 槽全 null；`album` 非数组 → 空；
+ * 未知字段忽略；载荷非对象 → `null`（调用方保留上一份已知快照，不闪空白）。
+ */
+export function parsePetSnapshotV2(raw: unknown): PetSnapshotV2 | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const o = raw as Record<string, unknown>;
+
+  const valuesRaw = (o.values ?? {}) as Record<string, unknown>;
+  const values: ValuesSnapshotV1 = {
+    mood: num(valuesRaw.mood, 0),
+    energy: num(valuesRaw.energy, 0),
+    boredom: num(valuesRaw.boredom, 0),
+    satiety: num(valuesRaw.satiety, 0),
+    cleanliness: num(valuesRaw.cleanliness, 0),
+    affinityLevel: Math.max(0, Math.trunc(num(valuesRaw.affinityLevel, 1))),
+    affinityExp: num(valuesRaw.affinityExp, 0),
+    affinityExpNext: num(valuesRaw.affinityExpNext, 0),
+  };
+
+  const neglectRaw = (o.neglect ?? {}) as Record<string, unknown>;
+  const sensRaw = (neglectRaw.sensitivity ?? {}) as Record<string, unknown>;
+  const neglect: NeglectSnapshotV1 = {
+    p: num(neglectRaw.p, 0),
+    cap: num(neglectRaw.cap, 0),
+    level: Math.max(0, Math.min(5, Math.trunc(num(neglectRaw.level, 0)))),
+    ratePerMin: num(neglectRaw.ratePerMin, 0),
+    factors: parseFactors(neglectRaw.factors),
+    sensitivity: { value: num(sensRaw.value, 1.0) },
+    reasons: parseReasons(neglectRaw.reasons),
+  };
+
+  const persRaw = (o.personality ?? {}) as Record<string, unknown>;
+  const personality: PersonalitySnapshotV1 = {
+    text: typeof persRaw.text === 'string' ? persRaw.text : '',
+    rerollLeft: Math.max(0, Math.trunc(num(persRaw.rerollLeft, 0))),
+    canReroll: bool(persRaw.canReroll, false),
+  };
+
+  const activity = parseActivitySnapshot(o.activity);
+
+  const econRaw = (o.economy ?? {}) as Record<string, unknown>;
+  const economy: EconomySnapshotV1 = {
+    coin: Math.trunc(num(econRaw.coin, 0)),
+    todayEarned: Math.max(0, Math.trunc(num(econRaw.todayEarned, 0))),
+    dailyCap: Math.max(0, Math.trunc(num(econRaw.dailyCap, 0))),
+  };
+
+  const inventory: InventoryItemV1[] = Array.isArray(o.inventory)
+    ? (o.inventory as unknown[])
+        .filter(
+          (it): it is Record<string, unknown> =>
+            it !== null && typeof it === 'object' && !Array.isArray(it),
+        )
+        .map((it) => ({
+          itemId: str(it.itemId, ''),
+          qty: Math.max(0, Math.trunc(num(it.qty, 0))),
+        }))
+        .filter((it) => it.itemId.length > 0)
+    : [];
+
+  // decor 恒 5 槽；非数组 / 脏项 → null。
+  const decorRaw = Array.isArray(o.decor) ? o.decor : [];
+  const decor: (string | null)[] = Array.from({ length: 5 }, (_, i) => {
+    const slot = decorRaw[i];
+    return typeof slot === 'string' && slot.length > 0 ? slot : null;
+  });
+
+  const album: unknown[] = Array.isArray(o.album) ? [...o.album] : [];
+
+  return {
+    v: Math.max(0, Math.trunc(num(o.v, 0))),
+    values,
+    neglect,
+    personality,
+    activity,
+    economy,
+    inventory,
+    decor,
+    album,
+    state: typeof o.state === 'string' ? o.state : 'idle',
+  };
+}
