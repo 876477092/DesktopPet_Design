@@ -192,11 +192,17 @@ export interface PlacementInput {
 /**
  * 气泡摆位（设计 §3 Q4）：右侧优先 → 左侧翻转 → 两侧不足则钳制；纵向越上边界向下钳制。
  *
- * ⚠️ **窗口几何约束（非缺陷）**：宠物窗口内容宽 = 256 CSS px、锚点默认居中（`cx=128`）时，
- * 右空间 = 左空间 = `128 - gap - pad = 116`。故 `bubbleWidth ≤ 116` 恒命中 `side='right'`；
- * `bubbleWidth > 116` 两侧皆不足 → 恒命中 `side='clamp'`；`side='left'` 在该几何下**不可达**。
- * 这是**窗口几何限制**（扩窗属窗口层 T-02/S7，设计 §9-2 已挂起），非摆位逻辑缺陷。
- * 宽容器 + 锚点靠右时三态才全部可达（见单测）。
+ * ⚠️ **窗口几何约束（非缺陷）**：宠物窗口内容宽 = **128 CSS px**（窗口物理 256 ÷ DPR 2，
+ * 即 `PET_LOGICAL_WIDTH`）、锚点默认居中 `cx = 64`（= `PARTICLE_ANCHOR_CENTER_X`，与粒子同源）时，
+ * 右空间 = 左空间 = `64 − gap(8) − pad(4) = 52`。故 `mw ≤ 52` 恒命中 `side='right'`；
+ * `52 < mw ≤ 128` 两侧皆不足 → 恒命中 `side='clamp'`，**但 `mw ≤ wc` 故钳到 `pad` 后不再右出血**；
+ * `side='left'` 在该几何下**不可达**（这一条为几何限制，保留）。宽容器 + 锚点靠右时三态才全部可达（见单测）。
+ *
+ * ⚠️ 历史 Bug（2026-09-19）：`BUBBLE_MAX_WIDTH` 原误取 256（把「256 逻辑」当「256 CSS」）⇒
+ * `mw > wc` 时左右两侧恒不足、`side='left'` 翻转永不可达（`01 §4.4`「越界自动翻转」被旁路）
+ * 且长文本气泡恒右出血。已改 `BUBBLE_MAX_WIDTH = PET_LOGICAL_WIDTH = 128`（本窗口几何内自洽）。
+ *
+ * 窗口几何限制本身（扩窗让气泡/菜单有充裕空间）属窗口层 T-02/S7，设计 §9-2 已挂起。
  */
 export function resolveBubblePlacement(input: PlacementInput): BubblePlacement {
   const {

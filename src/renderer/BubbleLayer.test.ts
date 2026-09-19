@@ -6,14 +6,21 @@
  *
  * 覆盖：
  *   - 纯函数：占位符 / 3~5s 钳制 / 优先级 / 勿扰派生 / §4.1 七步短路仲裁（含 20s 边界
- *     「恰好 20000ms 放行」）/ 摆位三态 + 256 窗口几何退化 / 双侧淡入淡出曲线；
+ *     「恰好 20000ms 放行」）/ 摆位三态 + 128 CSS 视口几何 / 双侧淡入淡出曲线；
  *   - 状态机：show 时序（setContent 先于 measure/place/setVisible）、20s 冷却不重复
  *     setContent、preempt 覆盖、淡入 alpha、到期隐藏、无脏 flush 零写入、署名 / 高对比。
  */
 import { describe, expect, it } from 'vitest';
 
 import type { BubbleCmdV1 } from '../shared/ipc';
-import { BUBBLE_COOLDOWN_MS, type BubbleContent, type BubblePlacement, type BubbleView } from './layerPorts';
+import {
+  BUBBLE_COOLDOWN_MS,
+  BUBBLE_MAX_WIDTH,
+  PET_LOGICAL_WIDTH,
+  type BubbleContent,
+  type BubblePlacement,
+  type BubbleView,
+} from './layerPorts';
 import {
   bubblePriority,
   clampDwellMs,
@@ -182,7 +189,7 @@ describe('decideBubble（七步短路真值表，逐分支）', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 纯函数：resolveBubblePlacement（三态 + 256 窗口几何退化）
+// 纯函数：resolveBubblePlacement（三态 + 128 CSS 视口几何 + 宽容器算法覆盖）
 // ---------------------------------------------------------------------------
 
 describe('resolveBubblePlacement（右侧优先 → 左侧翻转 → 钳制）', () => {
@@ -190,7 +197,8 @@ describe('resolveBubblePlacement（右侧优先 → 左侧翻转 → 钳制）',
   const PAD = 4;
   const TAIL_H = 10;
 
-  it('宽容器（640）三态真实可达：right / left / clamp', () => {
+  it('宽容器（640）三态真实可达：right / left / clamp（算法覆盖输入，非真机视口）', () => {
+    // 注：containerWidth=640 为**算法覆盖输入**（令 left/clamp 分支可达），非真机视口宽（真机 128 CSS）。
     // right：锚点居中 + 小气泡 → 右侧放得下。
     expect(
       resolveBubblePlacement({
@@ -214,27 +222,50 @@ describe('resolveBubblePlacement（右侧优先 → 左侧翻转 → 钳制）',
     ).toEqual({ side: 'clamp', left: 236, top: 4 });
   });
 
-  it('窗口几何退化（256×256 窗口 + 锚点居中 cx=128）：mw≤116 → right；mw>116 → clamp；left 不可达', () => {
-    // 右空间 = 左空间 = 128 - 8 - 4 = 116（窗口几何限制，扩窗属窗口层，设计 §9-2 挂起）。
+  it('窗口几何（128 CSS 视口 + 锚点居中 cx=64）：mw≤52 → right；mw>52 → clamp；left 不可达', () => {
+    // 视口内容宽 = 128 CSS px（窗口物理 256 ÷ DPR 2）；右空间 = 左空间 = 64 - 8 - 4 = 52。
     expect(
       resolveBubblePlacement({
-        containerWidth: 256, bubbleWidth: 116, bubbleHeight: 40,
-        anchorCx: 128, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
+        containerWidth: 128, bubbleWidth: 52, bubbleHeight: 40,
+        anchorCx: 64, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
       }).side,
     ).toBe('right');
     expect(
       resolveBubblePlacement({
-        containerWidth: 256, bubbleWidth: 117, bubbleHeight: 40,
-        anchorCx: 128, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
+        containerWidth: 128, bubbleWidth: 53, bubbleHeight: 40,
+        anchorCx: 64, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
       }).side,
     ).toBe('clamp');
-    // 该几何下 left 恒不可达（扫描验证，非逻辑缺陷而是窗口几何限制）。
-    for (let mw = 1; mw <= 256; mw += 5) {
+    // 该几何下 left 恒不可达（居中锚点几何限制，非逻辑缺陷）；扫描含 mw=128（= BUBBLE_MAX_WIDTH）。
+    for (let mw = 1; mw <= 128; mw += 5) {
       const p = resolveBubblePlacement({
-        containerWidth: 256, bubbleWidth: mw, bubbleHeight: 40,
-        anchorCx: 128, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
+        containerWidth: 128, bubbleWidth: mw, bubbleHeight: 40,
+        anchorCx: 64, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
       });
       expect(p.side === 'left').toBe(false);
+    }
+  });
+
+  it('A 回归护栏：BUBBLE_MAX_WIDTH ≤ 视口宽，且长气泡 clamp 后不再右出血（历史 Bug 2026-09-19）', () => {
+    // 历史 Bug：BUBBLE_MAX_WIDTH 曾误取 256（> 128 视口）→ mw>wc 时左右恒不足、left 翻转旁路、恒右出血 128px。
+    expect(BUBBLE_MAX_WIDTH).toBeLessThanOrEqual(128);
+    expect(BUBBLE_MAX_WIDTH).toBe(PET_LOGICAL_WIDTH);
+    // mw = BUBBLE_MAX_WIDTH（=128）在 128 视口 clap：left 钳到 pad，右出血 ≤ pad（旧 Bug 为 128px）。
+    const pMax = resolveBubblePlacement({
+      containerWidth: 128, bubbleWidth: BUBBLE_MAX_WIDTH, bubbleHeight: 40,
+      anchorCx: 64, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
+    });
+    expect(pMax.side).toBe('clamp');
+    expect(pMax.left).toBe(PAD);
+    expect(pMax.left + BUBBLE_MAX_WIDTH - 128).toBeLessThanOrEqual(PAD); // 出血 ≤ 4px（旧 128px）
+    // 常见文本宽（mw ≤ wc − 2·pad = 120）→ 完全落在视口内（left + mw ≤ wc − pad），零出血。
+    for (const mw of [80, 100, 116, 120]) {
+      const p = resolveBubblePlacement({
+        containerWidth: 128, bubbleWidth: mw, bubbleHeight: 40,
+        anchorCx: 64, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
+      });
+      expect(p.left).toBeGreaterThanOrEqual(PAD);
+      expect(p.left + mw).toBeLessThanOrEqual(128 - PAD);
     }
   });
 
@@ -254,6 +285,8 @@ describe('resolveBubblePlacement（右侧优先 → 左侧翻转 → 钳制）',
   });
 
   it('气泡宽超容器：钳制不退化为负值（left = pad）', () => {
+    // 注：本用例为**防御路径算法覆盖输入**（mw > wc 的病态输入，测 clamp 的 maxLeft 退化保护），
+    // 非真机几何（真机视口 128 CSS，且 `BUBBLE_MAX_WIDTH` 已钳 mw ≤ 128，不会出现 mw > wc 的实况）。
     const p = resolveBubblePlacement({
       containerWidth: 256, bubbleWidth: 300, bubbleHeight: 40,
       anchorCx: 128, anchorTop: 24, gap: GAP, pad: PAD, tailH: TAIL_H,
@@ -323,6 +356,7 @@ class FakeBubbleView implements BubbleView {
   readonly ops: ViewOp[] = [];
   width = 100;
   height = 40;
+  /** 算法测试输入、非真机视口（真机视口 = 128 CSS px；此默认仅驱动摆位分支，各用例多显式覆写）。 */
   containerW = 256;
 
   setContent(content: BubbleContent): void {

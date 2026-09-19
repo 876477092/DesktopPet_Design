@@ -47,6 +47,7 @@ class ProbeMenuView implements MenuView {
     this.hideCalls += 1;
   }
   containerSize(): { width: number; height: number } {
+    // 算法测试输入、非真机视口（真机视口 = 128 CSS px；此值仅驱动足容/钳制分支）。
     return { width: 256, height: 256 };
   }
 }

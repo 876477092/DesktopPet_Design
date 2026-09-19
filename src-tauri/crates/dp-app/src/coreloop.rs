@@ -115,8 +115,9 @@ const FX_DUST_BURST_COUNT: u32 = 16;
 /// 提醒演出动作 ID（`01 §6.3.2` P 类动作表：`ACT-P-03` 伸手指提醒）。
 ///
 /// 单一真源说明：动作元数据（优先级 / 打断规则 / 演出标记）仍以 `actions.json` 为准，
-/// 本常量只是「提醒 → 动作」映射的键；目录缺该动作或 `disabled`（批次 C 资源未交付）
-/// 时 [`ActionRequest::from_cfg`] 返回 `None`，触发面安全降级为仅日志。
+/// 本常量只是「提醒 → 动作」映射的键；目录缺该动作或 `actions.json` 标 `disabled=true`
+/// （本动作属批次 C，出厂**配置禁用**，资源与目录均已就绪）时
+/// [`ActionRequest::from_cfg`] 返回 `None`，触发面安全降级为仅日志。
 const REMINDER_ACTION_ID: &str = "ACT-P-03";
 
 /// 活动感知采样间隔（毫秒；`02 §5.6`：键击/点击/移动强度 1Hz 级汇总）。
@@ -2025,7 +2026,7 @@ impl CoreLoopState {
             return;
         };
         let Some(request) = ActionRequest::from_cfg(cfg, source) else {
-            eprintln!("[dp-app] 活动演出动作 {action_id} 未启用（批次 C 未交付）→ 降级");
+            eprintln!("[dp-app] 活动演出动作 {action_id} 未启用（actions.json disabled=true）→ 降级");
             return;
         };
         let now = self.wall.now_ms().max(0) as u64;
@@ -2224,9 +2225,10 @@ impl CoreLoopState {
 
     /// S7-M2：提醒到点处置（`03 §3.3 B21 ②`）。
     ///
-    /// 现状口径（重要）：`ACT-P-03` 属**资源批次 C**（`actions.json` `disabled=true`），
-    /// [`ActionRequest::from_cfg`] 对其返回 `None` → 本函数只记录「触发面已到点」，
-    /// 不提交动作。资源交付后本条链路**零改动**即可实播。
+    /// 现状口径（重要）：`ACT-P-03` 在 `actions.json` 中为 `disabled=true`（批次 C
+    /// **出厂配置禁用**，非资源缺失），[`ActionRequest::from_cfg`] 对其返回 `None`
+    /// → 本函数只记录「触发面已到点」，不提交动作。将 `disabled` 翻回 `false` 后本条
+    /// 链路**零改动**即可实播。
     /// 提醒气泡文案（`lines.json` 无提醒池）归 S7-M8 台词库重写。
     fn reminder_tick(&mut self, wall_now_ms: i64, mono_ms: u64) {
         // FR-10-4：勿扰静默（调度器自身也判，双保险）。
@@ -2243,7 +2245,7 @@ impl CoreLoopState {
         };
         let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
             eprintln!(
-                "[dp-app] 提醒动作 {REMINDER_ACTION_ID} 未启用（批次 C 资源未交付）→ 触发面就绪，待资源"
+                "[dp-app] 提醒动作 {REMINDER_ACTION_ID} 未启用（actions.json disabled=true，批次 C 出厂配置禁用）→ 触发面就绪，启用即实播"
             );
             return;
         };
@@ -2295,7 +2297,7 @@ impl CoreLoopState {
         };
         let Some(request) = ActionRequest::from_cfg(cfg, ActionSource::Ambient) else {
             eprintln!(
-                "[dp-app] 生存动作 {action_id} 未启用（批次 B 资源未交付）→ 触发面就绪，待资源"
+                "[dp-app] 生存动作 {action_id} 未启用（actions.json disabled=true，批次 B 出厂配置禁用）→ 触发面就绪，启用即实播"
             );
             return;
         };

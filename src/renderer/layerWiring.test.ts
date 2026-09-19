@@ -49,6 +49,7 @@ class RecordingBubbleView implements BubbleView {
     void visible;
   }
   containerWidth(): number {
+    // 算法测试输入、非真机视口（真机视口 = 128 CSS px；此值仅驱动摆位分支）。
     return 256;
   }
 }

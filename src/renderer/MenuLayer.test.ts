@@ -9,13 +9,16 @@ import { describe, expect, it } from 'vitest';
 
 import { MENU_HEIGHT, MENU_WIDTH, type MenuItemId, type MenuItemSpec, type MenuPlacement, type MenuView } from './layerPorts';
 import { MenuLayer } from './MenuLayer';
-import { MENU_ITEM_ORDER, buildMenuItems, clampMenuPlacement } from './menuLogic';
+import { MENU_ITEM_ORDER, buildMenuItems, clampMenuPlacement, menuScale } from './menuLogic';
 
 /** 假菜单视图：记录 show/hide 调用序与参数（不碰 DOM）。 */
 class FakeMenuView implements MenuView {
   readonly shown: Array<{ items: MenuItemSpec[]; at: MenuPlacement }> = [];
   readonly hides: number[] = [];
-  /** 模拟容器内容盒尺寸（默认 256×256 宠物逻辑容器）。 */
+  /**
+   * 模拟容器内容盒尺寸。默认 `256×256` 为**算法测试输入、非真机视口**
+   * （真机视口 = 窗口物理 256 ÷ DPR 2 = 128 CSS px；本值仅驱动足容/不足容分支）。
+   */
   constructor(public width = 256, public height = 256) {}
   show(items: readonly MenuItemSpec[], at: MenuPlacement): void {
     this.shown.push({ items: [...items], at: { ...at } });
@@ -101,6 +104,70 @@ describe('menuLogic 纯逻辑（01 §8.2 冻结口径）', () => {
       left: 4,
       top: 4,
     });
+  });
+
+  it('menuScale：容器足容 → 1；128 CSS 视口 → 等比缩小（预留 2·pad）；退化容器 → 1（钳制兜底）', () => {
+    // 足容（≥ MENU_WIDTH+2·pad × MENU_HEIGHT+2·pad）→ 不缩放，保冻结规格 216×156。
+    expect(menuScale({ width: 256, height: 256 })).toBe(1);
+    expect(menuScale({ width: 400, height: 400 })).toBe(1);
+    expect(menuScale({ width: MENU_WIDTH + 8, height: MENU_HEIGHT + 8 })).toBe(1);
+    // 恰好差 1px 不足容 → 开始缩放。
+    expect(menuScale({ width: MENU_WIDTH + 7, height: MENU_HEIGHT + 8 })).toBeLessThan(1);
+    // 真机 128×128 视口（窗口物理 256 ÷ DPR 2）：预留 2·pad=8 → (128-8)/216 = 120/216 ≈ 0.5556。
+    expect(menuScale({ width: 128, height: 128 })).toBeCloseTo(120 / MENU_WIDTH, 10);
+    expect(menuScale({ width: 128, height: 128 })).toBeLessThan(1);
+    // 退化容器（≤0 / 非有限）→ 1（不缩放，clamp 兜底防越界）。
+    expect(menuScale({ width: 0, height: 128 })).toBe(1);
+    expect(menuScale({ width: 128, height: 0 })).toBe(1);
+    expect(menuScale({ width: Number.NaN, height: 128 })).toBe(1);
+  });
+
+  it('B 回归护栏：菜单盒（clamp 左上 + menuScale 缩放）恒不超出视口 —— 九键全部可达', () => {
+    // 组合不变量：left ≥ pad 且 MENU_WIDTH·scale ≤ w − 2·pad ⇒ left + MENU_WIDTH·scale ≤ w。
+    // 覆盖真机 128 视口 + 各类不足容/足容容器 + 越界/贴边命中点。
+    const containers = [
+      { width: 128, height: 128 }, // 真机视口（窗口物理 256 ÷ DPR 2）
+      { width: 200, height: 100 }, // 高不足容
+      { width: 100, height: 200 }, // 宽不足容
+      { width: 60, height: 60 }, // 极小
+      { width: MENU_WIDTH + 8, height: MENU_HEIGHT + 8 }, // 恰好足容（scale=1）
+      { width: 640, height: 640 }, // 宽容器：不缩放
+      { width: 217, height: 157 }, // 差 1px 不足容边界
+    ];
+    for (const c of containers) {
+      const scale = menuScale(c);
+      expect(scale).toBeGreaterThan(0);
+      expect(scale).toBeLessThanOrEqual(1);
+      const scaledW = MENU_WIDTH * scale;
+      const scaledH = MENU_HEIGHT * scale;
+      // 多命中点（含极端越界 / 贴负边）遍历。
+      for (const p of [
+        { x: c.width + 999, y: c.height + 999 },
+        { x: -999, y: -999 },
+        { x: 0, y: 0 },
+        { x: c.width / 2, y: c.height / 2 },
+      ]) {
+        const at = clampMenuPlacement(p, c);
+        expect(at.left).toBeGreaterThanOrEqual(0);
+        expect(at.top).toBeGreaterThanOrEqual(0);
+        // 缩放后菜单盒右下角必须落在容器内（1e-9 吸收浮点）。
+        expect(at.left + scaledW).toBeLessThanOrEqual(c.width + 1e-9);
+        expect(at.top + scaledH).toBeLessThanOrEqual(c.height + 1e-9);
+      }
+    }
+    // 九项冻结序全在（按钮数 = 9，全部落盒内 ⇒ 全部可达可点）。
+    expect(buildMenuItems()).toHaveLength(9);
+  });
+
+  it('B 回归护栏：真机 128 视口 —— 越界命中点钳后菜单盒严格落于 128×128 内', () => {
+    const viewport = { width: 128, height: 128 };
+    const scale = menuScale(viewport); // 预留 2·pad：(128-8)/216 = 120/216 ≈ 0.5556
+    const at = clampMenuPlacement({ x: 999, y: 999 }, viewport); // maxX = max(4, 128-216-4) = 4
+    expect(at).toEqual({ left: 4, top: 4 });
+    const scaledW = MENU_WIDTH * scale; // 216 × 120/216 = 120
+    const scaledH = MENU_HEIGHT * scale; // 156 × 120/216 ≈ 86.67
+    expect(at.left + scaledW).toBeLessThanOrEqual(viewport.width + 1e-9); // 4 + 120 = 124 ≤ 128
+    expect(at.top + scaledH).toBeLessThanOrEqual(viewport.height + 1e-9);
   });
 });
 

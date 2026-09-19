@@ -1,5 +1,5 @@
 import './styles/pet.css';
-import { resizeCanvasToWindow } from './shared/coords';
+import { applyCanvasSizing } from './shared/coords';
 import {
   invokeCommand,
   listenEvent,
@@ -54,7 +54,18 @@ const PET_OVERLAY_ROOT_ID = 'pet-overlay-root';
 
 /** 宠物逻辑尺寸（`02 §4.4` 视觉契约：128×128 逻辑，导出 2x）。 */
 const LOGICAL_SIZE = 128;
-const LOGICAL_SCALE = 2;
+/**
+ * 位图密度倍数（**仅用于位图**，不改 CSS 尺寸）：
+ * 画布 CSS 尺寸 = `LOGICAL_SIZE`（128 CSS px，即 DIP）；位图边长 =
+ * CSS × `devicePixelRatio`（见 `resizeCanvasToWindow`）。此常量在 `LOGICAL_SIZE`
+ * 之上再乘一层，意在与「1x baseline」区分（导出源为 2x），保证高 DPR 下物理像素充足。
+ *
+ * ⚠️ 历史 Bug（S10 真机回归）：曾误将本倍数乘进 `canvas.style.width/height`，
+ * 令 CSS 尺寸 = 128×2 = 256 CSS px，而窗口仅 256 **物理** px（DPR=2 时视口 =
+ * 128 CSS px）→ 画布溢出视口 2 倍，宠物只露左上 1/4（狐被裁到底右角）。
+ * 修正：CSS 尺寸恒 = `LOGICAL_SIZE`；本倍数只进位图路径。
+ */
+const BITMAP_SCALE = 2;
 
 /** S6-M2 帧回执节流间隔（毫秒，单调钟）：2 次/秒，足够看门狗判定存活，不刷 IPC。 */
 const FRAME_RECEIPT_THROTTLE_MS = 500;
@@ -117,9 +128,11 @@ function locateOverlayRoot(): HTMLElement {
 async function bootstrapPetWindow(): Promise<void> {
   const canvas = locateCanvas();
 
-  // 逻辑尺寸先定死，随后按 DPR 放大位图，保证物理像素充足。
-  canvas.style.width = `${LOGICAL_SIZE * LOGICAL_SCALE}px`;
-  canvas.style.height = `${LOGICAL_SIZE * LOGICAL_SCALE}px`;
+  // 画布 CSS 尺寸 = 逻辑尺寸（CSS px == DIP）；位图 = 逻辑 × BITMAP_SCALE × DPR，
+  // 保证物理像素充足。CSS 尺寸绝不可乘 BITMAP_SCALE —— 否则画布溢出视口，
+  // 宠物被裁切（见 BITMAP_SCALE 注释：S10 真机回归 Bug）。
+  // 呈现尺寸与位图尺寸的单一收敛点：applyCanvasSizing（回归护栏见 coords.test.ts）。
+  applyCanvasSizing(canvas, LOGICAL_SIZE, LOGICAL_SIZE * BITMAP_SCALE);
 
   // 渲染装配（K-14 三级探测在 Stage.create 内完成，失败自动降级 Canvas2D）。
   const stage = WebGLStage.create(canvas);
@@ -207,7 +220,8 @@ async function bootstrapPetWindow(): Promise<void> {
   // DPI / 缩放变化：重建位图并重绘最后一帧（DPI 变更后重建无错位）。
   // 注：重建后 GL 纹理仍有效（贴图不随画布位图重置），重绘即可复原。
   const applySize = (): void => {
-    resizeCanvasToWindow(canvas, LOGICAL_SIZE * LOGICAL_SCALE);
+    // DPI 变更：重设位图（CSS 恒 128，位图 = 128×2×DPR，DPR 由 resizeCanvasToWindow 读）。
+    applyCanvasSizing(canvas, LOGICAL_SIZE, LOGICAL_SIZE * BITMAP_SCALE);
     stage.resize(canvas.width, canvas.height);
     host.render();
   };

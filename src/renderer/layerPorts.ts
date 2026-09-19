@@ -12,7 +12,7 @@
  *   - 同状态间隔 ≥20s（`01 §6.5.4`）→ `BUBBLE_COOLDOWN_MS`；
  *   - 长按阈值 500ms（`02 §5 K-6`）→ `REASON_CARD_LONG_PRESS_MS`；
  *   - 成就飘条（`01 §6.12.6`）→ `TOAST_MS` / `TOAST_QUEUE_CAP`；
- *   - 气泡宽 ≤ 宠物宽×2（`01 §4.4`：128 逻辑×2 = 256 CSS px）→ `BUBBLE_MAX_WIDTH`。
+ *   - 气泡宽 ≤ 宠物宽×2（`01 §4.4`：逻辑域 128×2 = 256 **逻辑**；DOM 域取视口 CSS 宽作上界）→ `BUBBLE_MAX_WIDTH`。
  *
  * 本卡边界：不做粒子 / 右键菜单 / 点击 DSP 反馈 / 情绪数值结算 / 台词抽取 / 道歉状态机 /
  * 桌面气泡小面板本体（设计 §0 会话边界）。
@@ -39,8 +39,19 @@ export const TOAST_MS = 2500;
 export const TOAST_QUEUE_CAP = 3;
 /** 宠物逻辑宽（CSS px，`02 §4.4` 视觉契约 128×128 逻辑）。 */
 export const PET_LOGICAL_WIDTH = 128;
-/** 气泡最大宽（= 宠物逻辑宽×2 = 256 CSS px，恰为宠物窗口内容宽）。 */
-export const BUBBLE_MAX_WIDTH = PET_LOGICAL_WIDTH * 2;
+/**
+ * 气泡最大宽（CSS px）。
+ *
+ * `01 §4.4` 的「气泡宽 ≤ 宠物宽度 ×2」以**逻辑**域表述（128 逻辑 ×2 = **256 逻辑**）；
+ * 而 DOM 定位域为 **CSS px**，视口仅 128 CSS px（窗口物理 256 ÷ DPR 2）。
+ * ⇒ 上界取**视口内容宽**（= `PET_LOGICAL_WIDTH`，同值 128），否则 `mw > wc` 时左右
+ * 两侧恒不足、`side='left'` 翻转**永不可达**（`01 §4.4` 明文要求「越界自动翻转」被旁路）。
+ *
+ * ⚠️ 历史 Bug（2026-09-19）：原写 `PET_LOGICAL_WIDTH * 2 = 256`，把「256 **逻辑**」
+ * 误当「256 **CSS**」→ 长文本气泡恒右出血（超出 128 视口 128px），且翻转机制失效。
+ * CSS 侧同源值见 `styles/pet.css` 的 `--bubble-max-w`（**须与本常量同值，勿双真源漂移**）。
+ */
+export const BUBBLE_MAX_WIDTH = PET_LOGICAL_WIDTH;
 /** 气泡淡入淡出时长（毫秒，双侧）。 */
 export const BUBBLE_FADE_MS = 200;
 
@@ -126,6 +137,17 @@ export const PARTICLE_HEART_COLOR = '#FF8FB1';
 
 /** 粒子锚点横向偏移（CSS px；「头顶偏右」= 容器中线 + 此值，待真机标定）。 */
 export const PARTICLE_ANCHOR_OFFSET_X = 24;
+/**
+ * 粒子锚点横向基线 = **视口 CSS 中线**（CSS px）。
+ *
+ * 坐标系 = `#pet-overlay-root`（`position:fixed; inset:0`）⇒ 单位为**视口 CSS px**；
+ * 视口宽 = 窗口物理 256px ÷ DPR 2 = 128 CSS px ⇒ 中线 = `PET_LOGICAL_WIDTH / 2` = 64。
+ * 由 `PET_LOGICAL_WIDTH` 推导（单一真源，防 128/256 域混用漂移）。
+ *
+ * ⚠️ 历史 Bug（2026-09-19）：曾硬编码 128（把「256 物理」误当 CSS 中线）→ 锚点落在
+ *    128 CSS 宽视口之外，粒子整批不可见。真机标定后经 `ParticleLayer` 的 `anchor` 选项覆盖。
+ */
+export const PARTICLE_ANCHOR_CENTER_X = PET_LOGICAL_WIDTH / 2;
 /** 粒子锚点纵向默认坐标（CSS px；头顶高度占位，待真机标定，见设计 §9-1）。 */
 export const PARTICLE_ANCHOR_TOP_DEFAULT = 32;
 

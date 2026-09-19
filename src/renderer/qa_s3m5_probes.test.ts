@@ -7,7 +7,7 @@
  *
  * 覆盖域（对应 T-10 段·上 AC 与主理人裁定口径）：
  *   P1 气泡停留（dwell 钳制 + 可见性边界 + fadeAlpha 三段）
- *   P2 摆位（三态 + 256 退化推演 + 纵向钳制 + 超宽不产生负 left）
+ *   P2 摆位（三态 + 128 CSS 视口几何推演 + 纵向钳制 + 超宽不产生负 left）
  *   P3 可复制契约（pet.css 取证：user-select:text / pointer-events:auto / visibility 非 display:none）
  *   P4 ≥20s 冷却（19999 抑制 / 20000 放行 / 不同 key 隔离 / 空串回退 kind）
  *   P5 优先级与 preempt（四值序 / 高低互断 / preempt 覆盖 / 20s 内 preempt 仍 drop）
@@ -17,6 +17,7 @@
  *   P9 幂等（两层无脏 flush 零 view 写入）
  *   P10 接线序（LayerHost render：overlay 先于 bubble）
  *   P11 C2 占位符与署名降级
+ *   P12 菜单降级几何（裁定 B 2026-09-19：128 CSS 视口 menuScale 等比缩小 + clamp 组合不变量）
  */
 
 import { readFileSync } from 'node:fs';
@@ -37,6 +38,8 @@ import {
   shouldSuppressDuplicate,
 } from './bubbleLogic';
 import { isReasonCardLongPress, toastProgress, clampToastQueue } from './overlayLogic';
+import { menuScale, clampMenuPlacement } from './menuLogic';
+import { MENU_WIDTH, MENU_HEIGHT, MENU_EDGE_PAD } from './layerPorts';
 import type { BubbleContent, BubblePlacement, BubbleView } from './layerPorts';
 import type { OverlayView } from './layerPorts';
 
@@ -87,6 +90,7 @@ function makeFakeBubbleView(measure: { width: number; height: number } = { width
       visibles.push(v);
     },
     containerWidth(): number {
+      // 算法测试输入、非真机视口（真机视口 = 128 CSS px；此值仅驱动摆位分支）。
       return 256;
     },
   };
@@ -227,7 +231,7 @@ describe('P1-C fadeAlpha 三段曲线与两端 0', () => {
 });
 
 // ---------------------------------------------------------------------------
-// P2 AC-翻转：三态（宽容器）+ 256 退化独立推演 + 纵向钳制 + 超宽不产生负 left
+// P2 AC-翻转：三态（宽容器）+ 128 CSS 视口几何独立推演 + 纵向钳制 + 超宽不产生负 left
 // ---------------------------------------------------------------------------
 
 const GEO = { gap: 8, pad: 4, tailH: 10 };
@@ -264,31 +268,39 @@ describe('P2-A 宽容器（640px）三态真实可达', () => {
   });
 });
 
-describe('P2-B 256×256 窗口 + 锚点居中（cx=128）的退化独立推演（裁定 4）', () => {
-  it('mw<=116 → 恒 right（left0+mw <= 252）', () => {
-    // 边界恰 116：136+116=252 <= 256-4=252 → right
+describe('P2-B 128 CSS 视口（窗口物理 256÷DPR2）+ 锚点居中（cx=64）几何（裁定 A/C 2026-09-19）', () => {
+  it('mw<=52 → 恒 right（left0+mw <= 124）', () => {
+    // 边界恰 52：72+52=124 <= 128-4=124 → right
     const p = resolveBubblePlacement({
-      containerWidth: 256, bubbleWidth: 116, bubbleHeight: 40,
-      anchorCx: 128, anchorTop: 60, ...GEO,
+      containerWidth: 128, bubbleWidth: 52, bubbleHeight: 40,
+      anchorCx: 64, anchorTop: 60, ...GEO,
     });
     expect(p.side).toBe('right');
-    expect(p.left).toBe(136);
+    expect(p.left).toBe(72);
   });
 
-  it('mw>116 → 恒 clamp（两侧皆不足）', () => {
-    // 边界恰 117：136+117=253 > 252；flip: 128-8-117=3 < 4 → clamp
+  it('mw>52 → 恒 clamp（两侧皆不足），但 mw<=128 不再右出血', () => {
+    // 边界恰 53：72+53=125 > 124；flip: 64-8-53=3 < 4 → clamp
     const p = resolveBubblePlacement({
-      containerWidth: 256, bubbleWidth: 117, bubbleHeight: 40,
-      anchorCx: 128, anchorTop: 60, ...GEO,
+      containerWidth: 128, bubbleWidth: 53, bubbleHeight: 40,
+      anchorCx: 64, anchorTop: 60, ...GEO,
     });
     expect(p.side).toBe('clamp');
+    // mw <= BUBBLE_MAX_WIDTH(=128) 时 clamp 的 left 钳到 pad，右出血 <= pad（旧 Bug 曾 128px）
+    const pMax = resolveBubblePlacement({
+      containerWidth: 128, bubbleWidth: 128, bubbleHeight: 40,
+      anchorCx: 64, anchorTop: 60, ...GEO,
+    });
+    expect(pMax.side).toBe('clamp');
+    expect(pMax.left).toBe(4);
+    expect(pMax.left + 128 - 128).toBeLessThanOrEqual(4);
   });
 
   it('side=left 在该几何下不可达（mw 扫描 1..300 无一命中）', () => {
     for (let mw = 1; mw <= 300; mw += 1) {
       const p = resolveBubblePlacement({
-        containerWidth: 256, bubbleWidth: mw, bubbleHeight: 40,
-        anchorCx: 128, anchorTop: 60, ...GEO,
+        containerWidth: 128, bubbleWidth: mw, bubbleHeight: 40,
+        anchorCx: 64, anchorTop: 60, ...GEO,
       });
       expect(p.side).not.toBe('left');
     }
@@ -297,6 +309,7 @@ describe('P2-B 256×256 窗口 + 锚点居中（cx=128）的退化独立推演�
 
 describe('P2-C 纵向钳制与超宽防护', () => {
   it('锚点过近顶沿 → top 钳到 pad，不产生负 top', () => {
+    // 注：本组为**算法覆盖输入**（containerWidth 取 256 仅为驱动纵向/超宽分支），非真机视口宽。
     const p = resolveBubblePlacement({
       containerWidth: 256, bubbleWidth: 100, bubbleHeight: 50,
       anchorCx: 128, anchorTop: 10, ...GEO,
@@ -304,7 +317,8 @@ describe('P2-C 纵向钳制与超宽防护', () => {
     expect(p.top).toBe(4); // max(pad, 10-50-10=-50)
   });
 
-  it('气泡宽超容器（mw=300, Wc=256）→ left 不为负、落在 pad', () => {
+  it('气泡宽超容器（mw=300, Wc=256）→ left 不为负、落在 pad（防御路径算法输入）', () => {
+    // 注：mw>Wc 为病态防御输入（真机 `BUBBLE_MAX_WIDTH` 已钳 mw<=128），非真机几何。
     const p = resolveBubblePlacement({
       containerWidth: 256, bubbleWidth: 300, bubbleHeight: 40,
       anchorCx: 128, anchorTop: 60, ...GEO,
@@ -921,5 +935,87 @@ describe('P11-B 署名（signatureEnabled && showSignature → 「—— 」+ �
     layer.submit(makeCmd({ kind: 'chat', cooldownKey: 'c1' }));
     layer.flush();
     expect(log.contentCalls[0]!.signature).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P12 菜单降级几何（裁定 B 2026-09-19）——独立探针
+//
+// 背景：DOM 定位域为 CSS px，真机视口仅 128 CSS px（窗口物理 256 ÷ DPR 2），
+// 而菜单冻结规格 MENU_WIDTH×MENU_HEIGHT = 216×156 远超视口。若直接摆位，右/下列
+// 会被裁（九键不全可达）。裁定 B：`menuScale` 在容器不足容时按「预留 2·pad」等比
+// 缩小，使 `MENU_WIDTH·scale ≤ w − 2·pad`，配合 `clampMenuPlacement`（left/top ≥ pad）
+// 则 `left + MENU_WIDTH·scale ≤ w` 恒成立 ⇒ 九键全部落在视口内。
+//
+// 本块为 QA 独立推演（不 import 工程师测试文件，仅 import 实现模块），数值断言从
+// 公式独立算出，非抄录工程师用例。
+// ---------------------------------------------------------------------------
+
+describe('P12 菜单降级几何（裁定 B：128 CSS 视口等比缩小恒不越界）', () => {
+  it('足容容器 → 不缩放（保冻结规格 216×156）', () => {
+    // 恰好足容：w = MENU_WIDTH+2·pad = 224，h = MENU_HEIGHT+2·pad = 164 → avail=216/156 → scale=1。
+    expect(menuScale({ width: MENU_WIDTH + 2 * MENU_EDGE_PAD, height: MENU_HEIGHT + 2 * MENU_EDGE_PAD })).toBe(1);
+    expect(menuScale({ width: 640, height: 640 })).toBe(1);
+  });
+
+  it('恰差 1px 不足容 → scale<1（缩放启动边界）', () => {
+    // 宽少 1px：availW=223-8=215 < 216 → scale=215/216<1。
+    expect(menuScale({ width: MENU_WIDTH + 2 * MENU_EDGE_PAD - 1, height: 640 })).toBeLessThan(1);
+  });
+
+  it('真机 128 视口 → scale = (128−2·pad)/MENU_WIDTH = 120/216（宽为约束维）', () => {
+    // availW=120, availH=120：120/216≈0.5556 < 120/156≈0.769 ⇒ 宽维约束。
+    expect(menuScale({ width: 128, height: 128 })).toBeCloseTo(120 / MENU_WIDTH, 12);
+    expect(menuScale({ width: 128, height: 128 })).toBeLessThan(1);
+  });
+
+  it('退化容器（≤0 / 非有限）→ scale=1（交由 clamp 兜底，不产生 NaN/负）', () => {
+    expect(menuScale({ width: 0, height: 128 })).toBe(1);
+    expect(menuScale({ width: 128, height: 0 })).toBe(1);
+    expect(menuScale({ width: Number.NaN, height: 128 })).toBe(1);
+    expect(menuScale({ width: Number.POSITIVE_INFINITY, height: 128 })).toBe(1);
+  });
+
+  it('组合不变量：left/top ≥ pad 且缩放盒右/下缘恒不越界（128 视口 + 多维容器扫描）', () => {
+    const containers = [
+      { width: 128, height: 128 }, // 真机视口
+      { width: 200, height: 100 }, // 高不足容
+      { width: 100, height: 200 }, // 宽不足容
+      { width: 60, height: 60 }, // 极小
+      { width: MENU_WIDTH + 2 * MENU_EDGE_PAD, height: MENU_HEIGHT + 2 * MENU_EDGE_PAD }, // 恰足容
+      { width: 640, height: 640 }, // 宽容器
+    ];
+    for (const c of containers) {
+      const scale = menuScale(c);
+      expect(scale).toBeGreaterThan(0);
+      expect(scale).toBeLessThanOrEqual(1);
+      const scaledW = MENU_WIDTH * scale;
+      const scaledH = MENU_HEIGHT * scale;
+      // 命中点在容器内各处（含越界/负边）→ clamp 后左上角 ≥ pad。
+      for (const at of [
+        { x: 0, y: 0 },
+        { x: -999, y: -999 },
+        { x: c.width + 999, y: c.height + 999 },
+        { x: c.width / 2, y: c.height / 2 },
+      ]) {
+        const p = clampMenuPlacement(at, c);
+        expect(p.left).toBeGreaterThanOrEqual(MENU_EDGE_PAD);
+        expect(p.top).toBeGreaterThanOrEqual(MENU_EDGE_PAD);
+        // 核心不变量（裁定 B）：缩放后菜单盒右下角落在容器内（1e-9 吸收浮点）。
+        expect(p.left + scaledW).toBeLessThanOrEqual(c.width + 1e-9);
+        expect(p.top + scaledH).toBeLessThanOrEqual(c.height + 1e-9);
+      }
+    }
+  });
+
+  it('真机 128 视口：左贴边时右缘亦不越界（旧「贴容器宽缩放」会溢出 128→右列裁切）', () => {
+    // 反例回归：若 scale=w/MENU_WIDTH=128/216，则 left=pad 时右缘=4+128=132>128（溢出）。
+    // 裁定 B 预留 2·pad 后：scale=120/216，left=4 → 右缘=4+120=124 ≤ 128。
+    const scale = menuScale({ width: 128, height: 128 });
+    const p = clampMenuPlacement({ x: -999, y: -999 }, { width: 128, height: 128 });
+    expect(p.left).toBe(MENU_EDGE_PAD);
+    expect(p.left + MENU_WIDTH * scale).toBeLessThanOrEqual(128);
+    // 且确实小于「贴边缩放」的 132，证明预留 2·pad 生效。
+    expect(p.left + MENU_WIDTH * scale).toBeLessThan(4 + 128);
   });
 });

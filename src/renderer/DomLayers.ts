@@ -29,6 +29,7 @@ import type {
   ParticleRenderItem,
   ParticleView,
 } from './layerPorts';
+import { menuScale } from './menuLogic';
 
 /** 高对比样式类。 */
 const HC_CLASS = 'bubble--hc';
@@ -296,7 +297,7 @@ export class DomMenuView implements MenuView {
     root.appendChild(this.rootEl);
   }
 
-  /** 显示菜单：重建九宫格按钮 + 摆位 + 可见。 */
+  /** 显示菜单：重建九宫格按钮 + 摆位 + 降级缩放 + 可见。 */
   show(items: readonly MenuItemSpec[], at: MenuPlacement): void {
     this.panel.replaceChildren();
     for (const item of items) {
@@ -321,6 +322,11 @@ export class DomMenuView implements MenuView {
     }
     this.panel.style.left = `${at.left}px`;
     this.panel.style.top = `${at.top}px`;
+    // 裁定 B：容器装不下冻结规格（216×156）时等比缩小，保九个按钮全部落在视口内。
+    // transform-origin 取左上角（默认 center 会因缩放把面板移出左/上边界）。
+    const scale = menuScale(this.containerSize());
+    this.panel.style.transformOrigin = 'top left';
+    this.panel.style.transform = scale < 1 ? `scale(${scale})` : '';
     this.rootEl.style.visibility = 'visible';
   }
 

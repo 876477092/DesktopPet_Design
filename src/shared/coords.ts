@@ -65,3 +65,31 @@ export function resizeCanvasToWindow(canvas: HTMLCanvasElement, logicalPx: numbe
   canvas.height = physicalPx;
   return physicalPx;
 }
+
+/**
+ * 设定画布**呈现尺寸**（CSS px == DIP）与**位图尺寸**（物理 px）。
+ *
+ * 两条尺寸各司其职、**禁止混用**（`02 §4.4` 视觉契约）：
+ * - CSS 呈现边长 = `cssPx`（宠物逻辑尺寸 128，1 CSS px == 1 DIP）；
+ * - 位图边长 = `resizeCanvasToWindow(canvas, bitmapLogicalPx)` = `bitmapLogicalPx × dpr`
+ *   （`bitmapLogicalPx` 为**位图逻辑输入**，宠物 = `128 × 2 = 256`，保证高 DPR 物理像素充足）。
+ *
+ * ⚠️ 该函数是 S10 真机回归 Bug 的**单一修复点与回归护栏**：历史上曾把
+ * 「位图密度倍数」误乘进 CSS 尺寸（256 CSS px），而窗口仅 256 物理 px（DPR=2 时
+ * 视口 = 128 CSS px）→ 画布溢出视口 2 倍，宠物只露左上 1/4（狐被裁到底右角）。
+ * 任何「CSS 尺寸 ≠ cssPx」的偏离都由此函数拦截（见 `coords.test.ts`）。
+ *
+ * @param canvas           目标画布
+ * @param cssPx            CSS 逻辑边长（DIP；宠物 = 128），**直接写入 style，不再乘任何系数**
+ * @param bitmapLogicalPx  位图逻辑输入边长（宠物 = 256 = 128 × 2）；`resizeCanvasToWindow` 再乘 DPR
+ * @returns 实际写入的位图边长（物理像素）= `bitmapLogicalPx × dpr`
+ */
+export function applyCanvasSizing(
+  canvas: HTMLCanvasElement,
+  cssPx: number,
+  bitmapLogicalPx: number,
+): number {
+  canvas.style.width = `${cssPx}px`;
+  canvas.style.height = `${cssPx}px`;
+  return resizeCanvasToWindow(canvas, bitmapLogicalPx);
+}

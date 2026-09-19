@@ -10,7 +10,14 @@ import { describe, expect, it } from 'vitest';
 import type { ParticleCmdV1 } from '../shared/ipc';
 import { PARTICLE_BURST_CAP } from '../shared/ipc';
 import { ParticleLayer } from './ParticleLayer';
-import { PARTICLE_LIFETIME_MS, type ParticleRenderItem, type ParticleView } from './layerPorts';
+import {
+  PARTICLE_ANCHOR_CENTER_X,
+  PARTICLE_ANCHOR_OFFSET_X,
+  PARTICLE_LIFETIME_MS,
+  PET_LOGICAL_WIDTH,
+  type ParticleRenderItem,
+  type ParticleView,
+} from './layerPorts';
 import {
   advanceParticles,
   clampBurstCount,
@@ -201,7 +208,7 @@ describe('ParticleLayer 层编排（惰性 flush + 帧 tick 驱动）', () => {
     expect(new Set(items.map((it) => it.id)).size).toBe(5);
   });
 
-  it('默认锚点：容器中线 128 + 头顶偏右 24 / 顶部 32（待真机标定）；锚点选项可覆盖', () => {
+  it('默认锚点：视口 CSS 中线 64 + 头顶偏右 24 / 顶部 32（待真机标定）；锚点选项可覆盖', () => {
     const clock = new FakeClock();
     const view = new FakeParticleView();
     const layer = new ParticleLayer(view, { now: clock.now, seed: () => 7 });
@@ -209,7 +216,8 @@ describe('ParticleLayer 层编排（惰性 flush + 帧 tick 驱动）', () => {
     layer.flush();
     const item = view.snapshots[0]?.[0];
     // renderItems 快照 t=0 时位置即锚点。
-    expect(item?.x).toBe(128 + 24);
+    expect(item?.x).toBe(PARTICLE_ANCHOR_CENTER_X + PARTICLE_ANCHOR_OFFSET_X);
+    expect(item?.x).toBe(64 + 24);
     expect(item?.y).toBe(32);
 
     const custom: ParticleAnchor = { x: 55, y: 66 };
@@ -223,5 +231,15 @@ describe('ParticleLayer 层编排（惰性 flush + 帧 tick 驱动）', () => {
     layer2.flush();
     expect(view2.snapshots[0]?.[0]?.x).toBe(55);
     expect(view2.snapshots[0]?.[0]?.y).toBe(66);
+  });
+
+  it('几何自洽：默认锚点必须落在视口 CSS 宽内（S10 回归护栏，防 128/256 域混用）', () => {
+    // 视口 CSS 宽 = 窗口物理 256 ÷ DPR 2 = 128（`PET_LOGICAL_WIDTH` 即此视口宽）。
+    // 锚点 x = 中线 + 偏移；若中线误取 128（历史 Bug），x=152 > 128 → 粒子整批不可见。
+    const anchoredX = PARTICLE_ANCHOR_CENTER_X + PARTICLE_ANCHOR_OFFSET_X;
+    expect(anchoredX).toBeLessThan(PET_LOGICAL_WIDTH);
+    // 中线本身也必须在视口内（严格小于右边界）。
+    expect(PARTICLE_ANCHOR_CENTER_X).toBeLessThan(PET_LOGICAL_WIDTH);
+    expect(PARTICLE_ANCHOR_CENTER_X).toBe(PET_LOGICAL_WIDTH / 2);
   });
 });

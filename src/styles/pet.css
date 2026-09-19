@@ -37,7 +37,7 @@ body {
   --pet-anger-red: #e5484d; /* 怒气符号（01 附录 A.3） */
   --pet-runaway-red: #d62828; /* 离家出走气泡描边（01 附录 A.3） */
   --pet-outline: #2b2436; /* 统一外描边（01 附录 A.3） */
-  --bubble-max-w: 256px; /* 气泡最大宽（宠物逻辑宽×2） */
+  --bubble-max-w: 128px; /* 气泡最大宽 = 视口内容宽（窗口物理 256 ÷ DPR 2；与 layerPorts.BUBBLE_MAX_WIDTH 同源，勿双真源漂移） */
   --bubble-fade-ms: 200; /* 与 BUBBLE_FADE_MS 对齐（纯过渡时长冗余声明） */
 }
 
@@ -54,7 +54,7 @@ body {
   left: 0;
   top: 0;
   box-sizing: border-box;
-  max-width: var(--bubble-max-w, 256px);
+  max-width: var(--bubble-max-w, 128px);
   padding: 6px 10px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.96);
@@ -178,7 +178,7 @@ body {
   left: 50%;
   top: 8px;
   transform: translateX(-50%);
-  max-width: var(--bubble-max-w, 256px);
+  max-width: var(--bubble-max-w, 128px);
   padding: 4px 10px;
   border-radius: 8px;
   background: rgba(43, 36, 54, 0.85);

@@ -20,6 +20,7 @@
 
 import type { ParticleCmdV1 } from '../shared/ipc';
 import {
+  PARTICLE_ANCHOR_CENTER_X,
   PARTICLE_ANCHOR_OFFSET_X,
   PARTICLE_ANCHOR_TOP_DEFAULT,
   type ParticleView,
@@ -76,11 +77,15 @@ export class ParticleLayer {
     this.seed = opts.seed ?? ((): number => this.now());
   }
 
-  /** 默认锚点的横向基线（容器中线；经 view 不可得时取 128 逻辑宽中线）。 */
+  /** 默认锚点的横向基线（**视口 CSS 中线**；`ParticleView` 端口不暴露尺寸，故取渲染约定值）。 */
   private viewAnchorX(): number {
-    // ParticleView 端口不暴露容器尺寸（粒子锚点无需精确测量）；取渲染约定宽。
-    // 128 逻辑宽 ×2 导出 = 256 CSS px 的中线；真机标定后经 anchor 选项覆盖。
-    return 128;
+    // 坐标系 = `#pet-overlay-root`（`position:fixed; inset:0`）⇒ 单位是**视口 CSS px**。
+    // 视口宽 = 窗口物理 256px ÷ DPR 2 = 128 CSS px ⇒ 中线 = 128/2 = 64（常量集中在
+    // `layerPorts.PARTICLE_ANCHOR_CENTER_X`，由 `PET_LOGICAL_WIDTH / 2` 推导，不可漂移）。
+    // ⚠️ 历史 Bug（2026-09-19）：曾误返回 128（把「256 物理」当成 CSS 中线），致
+    //    锚点 x = 128+24 = 152 落在 128 CSS 宽视口之外 → 粒子整批不可见（非仅偏右）。
+    //    真机标定后经 `anchor` 选项覆盖。
+    return PARTICLE_ANCHOR_CENTER_X;
   }
 
   /**
